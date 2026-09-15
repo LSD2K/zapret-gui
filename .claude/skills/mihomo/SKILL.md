@@ -74,11 +74,11 @@ description: >-
 | `-ext-ctl <addr>` | переопределить external-controller | нет (через YAML) |
 | `-ext-ui`, `-secret`, `-m` | UI/секрет/geodata-режим | нет |
 
-Таблица — только то, что вызываем мы; полный список шире. В v1.19.30 есть
+Таблица — только то, что вызываем мы; полный список шире. В v1.19.31 есть
 ещё `-config` (конфиг base64-строкой), `-ext-ctl-tls`/`-ext-ctl-unix`/
 `-ext-ctl-pipe`/`-ext-ctl-routing-mark`, `-post-up`/`-post-down` (скрипты),
 `-age-secret-key`. Почти все дублируются переменными `CLASH_*` — сверено с
-`main.go` mihomo v1.19.30 (между 1.19.29 и 1.19.30 не изменился).
+`main.go` mihomo v1.19.31 (с 1.19.29 не изменился).
 
 Запуск у нас: `mihomo -d <config_dir> -f <config.yaml>` в новой сессии
 (`start_new_session`), `stdin=DEVNULL`, stdout/stderr → лог-файл,
@@ -187,8 +187,11 @@ mihomo поддерживает: `ss` (shadowsocks), `ssr`, `snell`, `vmess`, `v
 `proxy-server-nameserver` (резолв доменов прокси-узлов), `direct-nameserver`,
 `use-hosts`, `use-system-hosts`, `respect-rules`.
 
-Схемы nameserver: `udp://`, `tcp://`, `tls://`(DoT), `https://`(DoH),
-`quic://`(DoQ), `system`, `dhcp`, `rcode://`. Суффикс `#` задаёт параметры
+Схемы nameserver (`parseNameServer`, v1.19.31): `udp://`, `tcp://`,
+`tls://`(DoT), `http://`/`https://`(DoH), `quic://`(DoQ), `system`, `dhcp`,
+`rcode://`, `success://`, а также резолв через оверлей —
+`ts://`/`tailscale://` и `et://`/`easytier://` (**последний с v1.19.31**);
+после схемы там идёт имя прокси, а не адрес. Суффикс `#` задаёт параметры
 сервера (например `#proxy` — гонять DNS-запрос по правилам/через прокси,
 `&ecs=…` — EDNS Client Subnet).
 
@@ -201,8 +204,8 @@ mihomo поддерживает: `ss` (shadowsocks), `ssr`, `snell`, `vmess`, `v
 
 ## 8. TUN / прозрачное проксирование / listeners
 
-**tun** (вики, config/inbound): `enable`, `stack` (`system`/`gvisor`/`mixed`,
-дефолт `gvisor`), `device`, `auto-route` (прописать маршруты, чтобы трафик шёл
+**tun** (вики, config/inbound): `enable`, `stack` (`system`/`gvisor`/`mixed`/
+`mips`, дефолт `gvisor`), `device`, `auto-route` (прописать маршруты, чтобы трафик шёл
 в TUN), `auto-redirect` (nft-redirect для ПЕРЕсылаемого трафика LAN; только
 Linux+nftables, вместе с `auto-route`), `auto-detect-interface`, `dns-hijack`
 (например `["any:53"]`; без схемы подразумевается `udp://`), `mtu`,
@@ -212,6 +215,22 @@ Linux+nftables, вместе с `auto-route`), `auto-detect-interface`, `dns-hij
 `disable-icmp-forwarding`, `endpoint-independent-nat`, `udp-timeout` (300 c),
 `iproute2-table-index` (2022) / `iproute2-rule-index` (9000), устаревшие
 `inet4-address`/`inet4-route-address`.
+
+> 🆕 **`processors-per-channel` — с v1.19.31** (`RawTun`, помечено в коде как
+> непубличное и в документацию апстрима не вынесено). Число обработчиков на
+> канал gvisor, **дефолт 1** с прямым комментарием апстрима: «для большинства
+> память важнее пиковой производительности». Для наших роутеров дефолт и
+> нужен — трогать его стоит только если упираемся в CPU при избытке памяти.
+
+> 🆕 **`stack: mips` — с v1.19.31** (`constant/tun.go`, реализация —
+> `metacubex/mipstack`). Отдельный userspace-стек, заявленный как облегчённый;
+> ровно тот случай, ради которого мы вообще держим выбор стека: на слабых
+> MIPS-роутерах (Keenetic) `gvisor` раздувает буферы и жжёт CPU, а `system`
+> ловит не весь трафик. **Наш UI его пока не предлагает** — селектор стека в
+> `web/js/pages/mihomo.js` (`stackSelectHtml`) жёстко перечисляет
+> `gvisor`/`system`/`mixed`. Добавлять надо вместе с гейтом по версии: на
+> mihomo < 1.19.31 значение `mips` конфиг не примет (`mihomo -t` отдаст
+> ошибку разбора `stack`).
 
 > **`device` по умолчанию — `Meta`, а не `utun`.** В
 > `listener/sing_tun/server.go`: `var InterfaceName = "Meta"`, и
@@ -235,7 +254,7 @@ Linux+nftables, вместе с `auto-route`), `auto-detect-interface`, `dns-hij
 
 `sniffer` определяет домен по содержимому соединения (TLS SNI / HTTP Host),
 когда его неоткуда взять иначе. Ключи и **дефолты сверены с
-`config/config.go` v1.19.30** (`DefaultRawConfig`):
+`config/config.go` v1.19.31** (`DefaultRawConfig`):
 
 | Ключ | Дефолт | Смысл |
 |------|--------|-------|
@@ -302,16 +321,22 @@ mihomo. Мини-парсер YAML + реестр конвертеров `_CLASH
 | `anytls`, `hysteria` (v1), `ssh`, `socks5`→`socks`, `http` | **Аналог в sing-box ЕСТЬ** — просто конвертер не написан. Реальный пробел, а не ограничение |
 | `wireguard` | В sing-box это не outbound, а **`endpoint`** (outbound удалён в 1.13) — нужен отдельный путь, см. скил `singbox` §5.3 |
 | `tailscale` | Тоже не outbound: в sing-box это endpoint/service |
-| `ssr`, `snell` | Аналога нет: ShadowsocksR из sing-box выпилен ещё в 1.6, snell там не реализован |
-| `mieru`, `masque`, `shadowquic`, `trusttunnel`, `openvpn`, `sudoku`, `rematch` | Протоколы, которые есть только у mihomo |
-| `zerotier` | Оверлейная mesh-сеть (добавлен в v1.19.30), у sing-box аналога нет вовсе |
+| `ssr` | Аналога нет: ShadowsocksR из sing-box выпилен ещё в 1.6 |
+| `snell` | **Появился у sing-box в 1.14** (`outbound/snell`, реализация `sing-snell`) — с этой версии конвертер написать можно, раньше было некуда |
+| `mieru`, `masque`, `shadowquic`, `trusttunnel`, `sudoku`, `rematch` | Протоколы, которые есть только у mihomo |
+| `openvpn` | У sing-box с **1.14** есть, но как **`endpoint`** (`openvpn-client`/`openvpn-server`), а не outbound — путь как у `wireguard` |
+| `zerotier` | Оверлейная mesh-сеть (добавлен в v1.19.30; в v1.19.31 у него появился `identity-secret`), у sing-box аналога нет вовсе |
+| `easytier` | Оверлейная mesh-сеть, добавлена в **v1.19.31**, у sing-box аналога нет |
 | `direct`, `dns`, `reject` | Служебные, при импорте узлов не нужны |
 
-Список типов сверен с `adapter/parser.go` mihomo v1.19.30 и каталогом
-`docs/configuration/outbound/` sing-box v1.13.15. Апстрим mihomo добавляет
-протоколы заметно быстрее — при следующей сверке проверить, не появился ли
-аналог у обоих. Счёт на v1.19.30: 24 типа прокси (+ 3 служебных),
-конвертируем 6.
+Список типов сверен с `adapter/parser.go` mihomo v1.19.31 и каталогами
+`docs/configuration/outbound/` + `docs/configuration/endpoint/` sing-box
+v1.14.1. Апстрим mihomo добавляет протоколы заметно быстрее — при следующей
+сверке проверять, не появился ли аналог у обоих (так и вышло со `snell` и
+`openvpn`: sing-box 1.14 их принёс). Счёт на v1.19.31 —
+`grep -oE 'case "[a-z0-9]+"' adapter/parser.go | sort -u`: 27 веток, из них
+3 служебных (`direct`/`dns`/`reject`) → **24 типа прокси**, конвертируем 6.
+(На v1.19.30 было 23 — прибавился `easytier`.)
 
 > Нюанс YAML: `short-id: 01` парсится как int `1` — конвертер обрабатывает это
 > best-effort, чтобы не потерять ведущий ноль. `proxy-groups`/`rules` при таком

@@ -7,7 +7,7 @@
  *
  * Опирается на:
  *   - SKILL §0   — что изменилось в zapret2 1.0.x
- *   - SKILL §3   — CLI-опции nfqws2 (v1.0.4)
+ *   - SKILL §3   — CLI-опции nfqws2 (v1.0.5.2)
  *   - SKILL §4   — диапазоны --in-range/--out-range
  *   - SKILL §5/6 — payload-типы и pos-маркеры
  *   - SKILL §8   — desync-функции zapret-antidpi.lua и блоки опций (fooling/…)
@@ -530,6 +530,10 @@ const Nfqws2Spec = (() => {
         '--filter-ipp':  { slot: 'filter', cat: 'filter', desc: 'Raw IP-протоколы', arg: { type: 'string' } },
         '--filter-l7':   { slot: 'filter', cat: 'filter', desc: 'Фильтр L7-протокола (csv)', arg: { type: 'csv-enum', values: L7_PROTOS } },
         '--filter-ssid': { slot: 'filter', cat: 'filter', desc: 'Wi-Fi SSID-фильтр (Linux)', arg: { type: 'string' } },
+        // Появились в zapret2 1.0.5. Редактор обязан их знать, иначе на
+        // валидной строке загорается «неизвестный флаг» (SKILL §0.1).
+        '--filter-ssid-neg': { slot: 'filter', cat: 'filter', desc: 'Инверсия SSID-фильтра (1.0.5+)', arg: { type: 'enum', values: ['0', '1'], optional: true } },
+        '--filter-mark': { slot: 'filter', cat: 'filter', desc: 'Фильтр по mark пакета: mark[/mask], dec или 0xHEX (1.0.5+)', arg: { type: 'string', ex: ['0x1000', '0x1000/0xf000'] } },
 
         // ipset / hostlist
         '--ipset':                 { slot: 'list', cat: 'list', desc: 'Include по IP/CIDR (файл)', arg: { type: 'file:ipset' } },
