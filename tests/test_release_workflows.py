@@ -120,5 +120,80 @@ class TestReleaseWorkflows(unittest.TestCase):
             "--latest): на него завязаны все ссылки на пакеты в README")
 
 
+class TestGhNeedsRepoWithoutCheckout(unittest.TestCase):
+    """Сторож: gh-команды в job'е без checkout'а знают, какой это репозиторий.
+
+    Публикация v0.24.17 упала на `gh release view` с «failed to run git:
+    fatal: not a git repository». Причина: job публикации намеренно живёт
+    без `actions/checkout` (каждый action тянется с codeload.github.com, и
+    именно на этом не вышел v0.24.16), а `gh release`/`gh pr`/`gh issue`
+    без явного репозитория определяют его по git remote рабочего каталога.
+    Нет каталога — нет репозитория — нет релиза.
+
+    Лечится либо `GH_REPO` в env job'а, либо `--repo` у каждой команды.
+    `gh api` сюда не входит: там репозиторий уже стоит в пути запроса.
+    """
+
+    # Команды gh, которым нужен репозиторий (в отличие от `gh api`).
+    GH_REPO_SCOPED_RE = re.compile(
+        r"\bgh (release|pr|issue|run|workflow|label|cache|variable|secret)\b")
+
+    def _jobs(self):
+        try:
+            import yaml
+        except ImportError:                     # pragma: no cover
+            self.skipTest("нет PyYAML")
+        for name, text in _workflows().items():
+            data = yaml.safe_load(text) or {}
+            top_env = data.get("env") or {}
+            for job_name, job in (data.get("jobs") or {}).items():
+                yield name, job_name, job, top_env
+
+    def test_gh_without_checkout_names_the_repo(self):
+        checked = []
+        for wf, job_name, job, top_env in self._jobs():
+            steps = job.get("steps") or []
+            if any("checkout" in str(s.get("uses") or "") for s in steps):
+                continue                        # каталог — git-репозиторий
+            runs = [str(s.get("run") or "") for s in steps]
+            scoped = [r for r in runs if self.GH_REPO_SCOPED_RE.search(r)]
+            if not scoped:
+                continue
+            checked.append("%s:%s" % (wf, job_name))
+            env = dict(top_env)
+            env.update(job.get("env") or {})
+            if "GH_REPO" in env:
+                continue                        # задан на весь job
+            for run in scoped:
+                for line in run.splitlines():
+                    if not self.GH_REPO_SCOPED_RE.search(line):
+                        continue
+                    self.assertIn(
+                        "--repo", line,
+                        "%s: job «%s» без checkout'а зовёт gh без --repo и "
+                        "без GH_REPO в env — команда упадёт с «not a git "
+                        "repository»:\n    %s"
+                        % (wf, job_name, line.strip()))
+
+        self.assertTrue(
+            checked,
+            "не найдено ни одного job'а без checkout'а с gh-командами — "
+            "проверка перестала что-либо проверять")
+
+    def test_gui_release_job_has_gh_repo(self):
+        """Точечно про публикацию релиза GUI — там это уже стоило релиза."""
+        try:
+            import yaml
+        except ImportError:                     # pragma: no cover
+            self.skipTest("нет PyYAML")
+        data = yaml.safe_load(_workflows()[GUI_RELEASE_WORKFLOW])
+        job = (data.get("jobs") or {}).get("release") or {}
+        env = job.get("env") or {}
+        self.assertIn(
+            "GH_REPO", env,
+            "в job'е публикации релиза нет GH_REPO: без checkout'а gh не "
+            "определит репозиторий и релиз не опубликуется")
+
+
 if __name__ == "__main__":
     unittest.main()
