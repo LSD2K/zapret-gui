@@ -180,6 +180,14 @@ jobs:
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # В этом job'е нет checkout'а (см. комментарий выше), поэтому рабочий
+      # каталог — НЕ git-репозиторий. А `gh release view/create/edit/upload`
+      # без явного репозитория определяет его по git remote: «failed to run
+      # git: fatal: not a git repository» — ровно так упала публикация
+      # v0.24.17. GH_REPO задаёт репозиторий для всех gh-команд сразу, а не
+      # по одному флагу на команду (`gh run download` ниже передаёт --repo
+      # сам и от этого не зависит).
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Extract version
@@ -230,14 +238,18 @@ jobs:
 
           # Повторный прогон после сбоя (частично созданный релиз) не должен
           # упираться в «release already exists» — дописываем, а не падаем.
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" \
+          # --repo у каждой команды, хотя GH_REPO уже стоит в env job'а:
+          # цена промаха здесь — несостоявшийся релиз и возня с тэгом, а
+          # цена страховки — один флаг.
+          REPO=(--repo "$GITHUB_REPOSITORY")
+          if gh release view "$TAG" "${REPO[@]}" >/dev/null 2>&1; then
+            gh release edit "$TAG" "${REPO[@]}" \
               --title "Zapret Web-GUI $TAG" \
               --notes-file /tmp/release_notes.md \
               --draft=false "${CHANNEL[@]}"
-            gh release upload "$TAG" artifacts/* --clobber
+            gh release upload "$TAG" artifacts/* "${REPO[@]}" --clobber
           else
-            gh release create "$TAG" artifacts/* \
+            gh release create "$TAG" artifacts/* "${REPO[@]}" \
               --title "Zapret Web-GUI $TAG" \
               --notes-file /tmp/release_notes.md \
               "${CHANNEL[@]}"

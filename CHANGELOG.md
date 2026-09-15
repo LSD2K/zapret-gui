@@ -551,6 +551,17 @@
 
 ### Исправлено
 
+- **Публикация релиза падала на `gh release`: «fatal: not a git
+  repository».** Job публикации намеренно живёт без `actions/checkout` —
+  каждый action тянется с codeload.github.com, и именно на этом не вышел
+  v0.24.16. Но `gh release view/create/edit/upload` без явного
+  репозитория определяют его по git remote рабочего каталога, а каталог
+  без checkout'а — не репозиторий: v0.24.17 собрался, сложился в артефакт
+  и не опубликовался. Теперь репозиторий задан и в env job'а (`GH_REPO`),
+  и флагом `--repo` у каждой команды. Сторож — `tests/
+  test_release_workflows.py`: любой job без checkout'а, зовущий
+  `gh release/pr/issue/run`, обязан назвать репозиторий
+  (`.github/workflows/release.yml`)
 - **Длинный список доменов в маршруте ронял dnsmasq, а с ним DHCP и DNS
   роутера** (issue #332). dnsmasq читает конфиг построчно через
   `fgets(buff, MAXDNAME, f)` (`src/option.c`), где `MAXDNAME = 1025`: в
