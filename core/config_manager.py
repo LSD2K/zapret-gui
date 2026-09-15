@@ -389,6 +389,11 @@ class ConfigManager:
     def path(self) -> str:
         return self._config_path
 
+    @property
+    def config_dir(self) -> str:
+        """Каталог конфигурации — тот, что задан `--config DIR`."""
+        return self._config_dir
+
     def load(self) -> dict:
         """
         Загрузить конфигурацию. Если файла нет — создать с дефолтами.
@@ -656,6 +661,18 @@ def save_config() -> bool:
     init_config() мог пересоздать глобальный экземпляр.
     """
     return get_config_manager().save()
+
+
+def get_config_dir() -> str:
+    """
+    Каталог конфигурации с учётом `--config DIR`.
+
+    Нужен всем, кто кладёт рядом с settings.json свои файлы состояния.
+    Раньше такие пути были константами `/opt/etc/zapret-gui/...`, и при
+    запуске с `--config /opt/zapret-gui/etc` часть файлов уезжала по
+    указанному пути, а часть — по дефолтному (issue #328).
+    """
+    return get_config_manager().config_dir
 
 
 def init_config(config_dir: str = None) -> dict:

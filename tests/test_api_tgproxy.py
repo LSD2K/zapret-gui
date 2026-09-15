@@ -463,19 +463,28 @@ class TestMtprotoInstalledTag(unittest.TestCase):
 
 
 class TestTgwsproxyUpdateCheck(unittest.TestCase):
-    """Версия пакета против тега релиза.
+    """Версия пакета против тега, который РЕАЛЬНО поставит установщик.
 
     Issue #272: opkg/apk отдают версию с ревизией сборки (`0.9.3-1`), а
     тег релиза — без неё (`0.9.3`). Сравнение строк «в лоб» держало
     кнопку «Обновить» вечно зажжённой на уже актуальной версии.
+
+    Discussion #102: движок ЗАКРЕПЛЁН на 0.9.3 (с v1.0.0 апстрим — это
+    десктопное приложение без сборок для роутера), а проверка обновлений
+    всё равно смотрела в /releases/latest. Страница звала обновиться на
+    v1.4.0, установщик отвечал «актуальная версия 0.9.3 уже установлена».
     """
 
-    def _check(self, installed, latest):
+    def _check(self, installed, latest, pinned="0.9.3"):
         from core.update_checker import _check_tgwsproxy
+        import core.ext_binary_installer as ebi
         mgr = mock.Mock()
         mgr.detect.return_value = {"installed": True, "version": installed}
+        cfg = dict(ebi.BINARIES["tgwsproxy"])
+        cfg["release_tag"] = pinned
         with mock.patch("core.update_checker._github_latest",
                         return_value=latest), \
+             mock.patch.dict(ebi.BINARIES, {"tgwsproxy": cfg}), \
              mock.patch("core.tgproxy_manager.get_tgwsproxy_manager",
                         return_value=mgr):
             return _check_tgwsproxy()
@@ -486,13 +495,24 @@ class TestTgwsproxyUpdateCheck(unittest.TestCase):
             self.assertIs(res["has_update"], False, installed)
             self.assertEqual(res["current"], installed)
 
-    def test_newer_upstream_is_an_update(self):
-        res = self._check("0.9.3-1", "0.9.4")
+    def test_pinned_tag_wins_over_upstream(self):
+        """Апстрим ушёл на v1.4.0 — обновляться некуда, мы закреплены."""
+        res = self._check("0.9.3-1", "v1.4.0")
+        self.assertIs(res["has_update"], False)
+        self.assertEqual(res["latest"], "0.9.3")
+        self.assertIs(res["pinned"], True)
+        self.assertEqual(res["upstream_latest"], "v1.4.0")
+
+    def test_newer_upstream_is_an_update_when_not_pinned(self):
+        """Снимут закрепление — снова ориентируемся на апстрим."""
+        res = self._check("0.9.3-1", "0.9.4", pinned="")
         self.assertTrue(res["has_update"])
+        self.assertNotIn("pinned", res)
 
     def test_unknown_versions_do_not_offer_update(self):
         self.assertIs(self._check("", "0.9.3")["has_update"], False)
-        self.assertIs(self._check("0.9.3-1", "")["has_update"], False)
+        self.assertIs(self._check("0.9.3-1", "", pinned="")["has_update"],
+                      False)
 
 
 class TestTgproxyUninstall(unittest.TestCase):

@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 
 from core.log_buffer import log
 
@@ -58,7 +59,11 @@ def _nft_port_set(spec: str) -> str:
 # работает «в холостую» с ошибкой "Ни iptables, ни nft не найдены".
 # Дополняем PATH общеизвестными sbin-каталогами один раз при импорте.
 def _ensure_sbin_in_path():
-    extra = ["/usr/local/sbin", "/usr/sbin", "/sbin"]
+    # /opt/* — Entware (Keenetic): при запуске из init.d PATH бывает
+    # урезанным, и установленные через opkg iptables/nft оказываются
+    # «не найдены» при живом бинарнике (issue #325).
+    extra = ["/usr/local/sbin", "/usr/sbin", "/sbin",
+             "/opt/sbin", "/opt/bin", "/opt/usr/sbin", "/opt/usr/bin"]
     cur = os.environ.get("PATH", "")
     parts = cur.split(os.pathsep) if cur else []
     added = [d for d in extra if d not in parts and os.path.isdir(d)]
@@ -160,6 +165,8 @@ class FirewallManager:
         self._lock = threading.Lock()
         self._applied = False
         self._fw_type = None          # "iptables" | "nftables" | None
+        self._fw_detect_at = 0.0      # когда последний раз ИСКАЛИ бэкенд
+        self._fw_type_logged = False  # результат уже отражён в логе
         self._rules_info = []         # Для UI
         # Доп. параметры для PREROUTING / NAT / TCP-флагов (заполняется в
         # apply_rules). Дефолты — на случай прямого вызова _apply_* в тестах.
@@ -171,10 +178,26 @@ class FirewallManager:
 
     # ─────────────────────────── public API ───────────────────────────
 
+    # Как часто ПОВТОРЯТЬ поиск бэкенда, когда его не нашли. Успешный
+    # результат кешируется навсегда, а вот отрицательный — нет: iptables
+    # или nft могут доставить через opkg уже после старта GUI, и ждать
+    # перезапуска ради этого незачем.
+    NEG_DETECT_TTL = 60.0
+
     def detect_fw_type(self) -> str:
         """Определить тип firewall: iptables / nftables / None."""
         if self._fw_type:
             return self._fw_type
+
+        # Статус опрашивается из UI каждые несколько секунд, и раньше
+        # КАЖДЫЙ такой опрос заново искал бинарники и писал в лог. На
+        # роутере без iptables/nft это давало «WARNING Ни iptables, ни nft
+        # не найдены!» раз в пять секунд — лог переставал быть читаемым
+        # (issue #325). Держим результат поиска, включая отрицательный.
+        now = time.monotonic()
+        if self._fw_detect_at and (now - self._fw_detect_at) < self.NEG_DETECT_TTL:
+            return None
+        self._fw_detect_at = now
 
         from core.config_manager import get_config_manager
         cfg = get_config_manager()
@@ -185,8 +208,19 @@ class FirewallManager:
         else:
             self._fw_type = self._auto_detect()
 
-        log.info("Тип firewall: %s" % (self._fw_type or "не определён"),
-                 source="firewall")
+        if self._fw_type:
+            log.info("Тип firewall: %s" % self._fw_type, source="firewall")
+            self._fw_type_logged = True
+        elif not self._fw_type_logged:
+            # Одно внятное сообщение вместо потока одинаковых: говорим и
+            # что сломано, и что с этим делать.
+            log.warning(
+                "Ни iptables, ни nft не найдены — NFQUEUE, masquerade и DSCP"
+                " работать не будут. Entware: opkg install iptables (или"
+                " nftables), OpenWrt: opkg install iptables-nft/nftables."
+                " Повторная проверка — раз в %d с."
+                % int(self.NEG_DETECT_TTL), source="firewall")
+            self._fw_type_logged = True
         return self._fw_type
 
     def apply_rules(self, queue_num=None, ports_tcp=None,
@@ -465,7 +499,8 @@ class FirewallManager:
         if has_nft:
             return "nftables"
 
-        log.warning("Ни iptables, ни nft не найдены!", source="firewall")
+        # Логирует вызывающий (detect_fw_type): здесь нет состояния, а
+        # значит и защиты от повтора одного и того же сообщения.
         return None
 
     # ──────────────── iptables implementation ────────────────

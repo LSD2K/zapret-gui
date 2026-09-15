@@ -177,11 +177,24 @@ const UpdateCheckerPage = (() => {
                    </div>`
                 : "";
 
+            // Версия может быть ЗАКРЕПЛЁНА (tg-ws-proxy-go: апстрим ушёл на
+            // десктоп и роутерных сборок больше не выпускает). Тогда в
+            // колонке «последняя» стоит наш закреплённый тег — и здесь же
+            // объясняем, почему он ниже апстримного, иначе это выглядит как
+            // сломанная проверка обновлений (discussion #102).
+            const pinned = r.pinned
+                ? `<div class="text-muted" style="font-size:11px;margin-top:2px;">
+                       закреплено${r.upstream_latest
+                           ? ", у апстрима " + esc(r.upstream_latest) : ""}${
+                       r.pin_reason ? ": " + esc(r.pin_reason) : ""}
+                   </div>`
+                : "";
+
             html += `<tr>
                 <td><strong>${esc(r.display_name || r.name)}</strong></td>
                 <td${r.path ? ` title="${esc(r.path)}"` : ""}><span class="status-dot ${installedCls}"></span> ${r.installed ? "Да" : "Нет"}${found}${vanished}</td>
                 <td><code>${esc(r.current || "-")}</code></td>
-                <td><code class="${updateCls}">${esc(r.latest || "-")}</code></td>
+                <td><code class="${updateCls}">${esc(r.latest || "-")}</code>${pinned}</td>
                 <td>${r.has_update ? '<span style="color:var(--warning);font-weight:600;">← доступно</span>' : ""}
                     ${r.error ? '<span class="text-error" title="' + esc(r.error) + '">⚠</span>' : ""}
                     ${action}

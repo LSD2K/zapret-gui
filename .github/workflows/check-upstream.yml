@@ -138,10 +138,27 @@ jobs:
             echo "_Обновлено прогоном ${GITHUB_RUN_ID} от $(date -u +%Y-%m-%d)._"
           } > "$BODY_FILE"
 
-          EXISTING=$(gh issue list --state open --label upstream-drift \
-                       --search "$TITLE in:title" --json number \
-                       --jq '.[0].number // empty')
+          # Метку заводим САМИ. Её не было в репозитории, из-за чего
+          # `gh issue create --label upstream-drift` падал, срабатывал
+          # фолбэк без метки — и следующий прогон, ища issue ПО МЕТКЕ,
+          # ничего не находил и заводил ещё одну. Так накопились #326,
+          # #329, #330, #334: четыре копии одного отчёта, и ни одну из них
+          # шаг «закрыть, если всё сошлось» тоже не видел.
+          gh label create upstream-drift \
+            --description 'Отставание от апстрима (сторож check-upstream)' \
+            --color 'D4C5F9' 2>/dev/null || true
+
+          # Ищем ПО ЗАГОЛОВКУ, а не по метке: заголовок ставим мы сами в
+          # той же переменной, а метка — внешнее состояние репозитория,
+          # которого может не быть. Точное сравнение — чтобы «похожая»
+          # issue от человека не стала носителем автоотчёта.
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+                       --json number,title \
+                       --jq '[.[] | select(.title == env.DRIFT_ISSUE_TITLE)]
+                             | .[0].number // empty')
           if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --body-file "$BODY_FILE" \
+              --add-label upstream-drift 2>/dev/null || \
             gh issue edit "$EXISTING" --body-file "$BODY_FILE"
             echo "Обновлена issue #$EXISTING"
           else
@@ -161,12 +178,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          N=$(gh issue list --state open --label upstream-drift \
-                --search "$DRIFT_ISSUE_TITLE in:title" --json number \
-                --jq '.[0].number // empty')
-          if [ -n "$N" ]; then
+          # Тот же поиск по заголовку, что и у заводящего шага: иначе
+          # issue, созданная без метки, остаётся открытой навсегда.
+          for N in $(gh issue list --state open \
+                       --search "$DRIFT_ISSUE_TITLE in:title" \
+                       --json number,title \
+                       --jq '.[] | select(.title == env.DRIFT_ISSUE_TITLE)
+                                 | .number'); do
             gh issue close "$N" --comment 'Все апстримы сошлись с `docs/upstream.json` — закрыто автоматически.'
-          fi
+          done
 
       - name: Отметить провал
         if: steps.check.outcome == 'failure' || steps.check.outputs.ok != '1'

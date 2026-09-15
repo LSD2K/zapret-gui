@@ -39,6 +39,62 @@ MANAGED_FILENAME = "zapret-gui-awg-routing.conf"
 # чтобы потом точно так же откатить.
 SETUP_STATE_FILE = "/var/lib/zapret-gui/dnsmasq-auto-setup.json"
 
+# Максимальная длина строки в конфиге dnsmasq.
+#
+# dnsmasq читает конфиг построчно: `while (fgets(buff, MAXDNAME, f))`
+# (src/option.c → read_file), где MAXDNAME = 1025 (src/dns-protocol.h).
+# То есть в одну строку влезает не более 1024 байт вместе с переводом
+# строки; остаток ХВОСТА приезжает следующим вызовом fgets и разбирается
+# как отдельная директива — dnsmasq падает с «bad option at line N» и не
+# стартует ВООБЩЕ. А это не только наш роутинг: вместе с dnsmasq на
+# роутере ложатся DHCP и DNS (issue #332 — «на утро выключили свет, после
+# включения отвалился DHCP»).
+#
+# Поэтому список доменов режем на несколько директив. 900 — с запасом к
+# жёсткому лимиту: длина самой директивы (`nftset=/`), спецификаций
+# set'ов и разделителей тоже съедает бюджет, а цена запаса — лишняя
+# строка в файле.
+DNSMASQ_MAX_LINE = 900
+
+
+def _blen(s):
+    """Длина строки в БАЙТАХ — dnsmasq считает лимит в них, не в символах."""
+    try:
+        return len(s.encode("utf-8"))
+    except (UnicodeError, AttributeError):
+        return len(s)
+
+
+def split_domain_directives(prefix, domains, suffix,
+                            limit=DNSMASQ_MAX_LINE):
+    """Разложить домены по нескольким директивам с оглядкой на лимит строки.
+
+    prefix — «nftset=/» или «ipset=/», suffix — «/<spec>[,<spec>]».
+    Домены дописываются в текущую директиву, пока строка влезает в `limit`
+    байт; как только перестаёт — начинается следующая. Несколько директив
+    на один set для dnsmasq нормальны: он их просто складывает.
+
+    Домен, который не влезает в лимит даже в одиночку, всё равно
+    эмитится отдельной строкой: резать доменное имя нельзя, а молча
+    выбросить — хуже, чем отдать dnsmasq'у длинную строку.
+    """
+    budget = limit - _blen(prefix) - _blen(suffix)
+    lines = []
+    cur = []
+    cur_len = 0
+    for d in domains:
+        dl = _blen(d)
+        add = dl if not cur else dl + 1          # +1 — разделитель «/»
+        if cur and (budget < 1 or cur_len + add > budget):
+            lines.append(prefix + "/".join(cur) + suffix)
+            cur, cur_len = [], 0
+            add = dl
+        cur.append(d)
+        cur_len += add
+    if cur:
+        lines.append(prefix + "/".join(cur) + suffix)
+    return lines
+
 
 # ───────────────────────── helpers ──────────────────────────────────
 
@@ -304,6 +360,71 @@ class DnsmasqIntegration:
         return {"ok": True, "added": True, "main_config": main_conf,
                 "managed_file": managed}
 
+    def remove_include(self):
+        """
+        Снять наш include из основного dnsmasq.conf и удалить managed-файл.
+
+        Симметрия к ensure_include(). Нужна, когда domain-правил больше нет:
+        иначе в dnsmasq.conf остаётся `conf-file=` на файл, который для
+        пользователя давно «удалён вместе с маршрутом» — и первый же
+        рестарт dnsmasq (в issue #332 это было отключение света) падает на
+        нём, унося DHCP и DNS роутера.
+
+        Удаляются только НАШИ строки: маркер и conf-file= ровно на наш файл.
+        Вариант «подключена вся conf-dir» не трогаем — это не наша строка.
+        """
+        main_conf = self.find_main_config()
+        if not main_conf:
+            return {"ok": True, "skipped": True}
+        managed = self.managed_file_path(main_conf)
+
+        removed_lines = 0
+        if os.path.isfile(main_conf):
+            text = _read_file(main_conf)
+            out = []
+            for line in text.splitlines(True):
+                s_line = line.strip()
+                if s_line == INCLUDE_MARKER:
+                    removed_lines += 1
+                    continue
+                if s_line.startswith("conf-file="):
+                    val = s_line.partition("=")[2].strip().split(",", 1)[0]
+                    if val and os.path.abspath(val) == os.path.abspath(managed):
+                        removed_lines += 1
+                        continue
+                out.append(line)
+            if removed_lines:
+                try:
+                    tmp = main_conf + ".zapret-gui.tmp"
+                    with open(tmp, "w") as f:
+                        f.write("".join(out))
+                        f.flush()
+                        try:
+                            os.fsync(f.fileno())
+                        except Exception:
+                            pass
+                    os.replace(tmp, main_conf)
+                except (IOError, OSError) as e:
+                    return {"ok": False,
+                            "error": "Не удалось обновить %s: %s"
+                                     % (main_conf, e)}
+
+        removed_file = False
+        try:
+            if os.path.isfile(managed):
+                os.remove(managed)
+                removed_file = True
+        except OSError as e:
+            return {"ok": False,
+                    "error": "Не удалось удалить %s: %s" % (managed, e)}
+
+        if removed_lines or removed_file:
+            log.info("dnsmasq: include и managed-файл сняты (%s)" % managed,
+                     source="routing")
+        return {"ok": True, "removed_include": bool(removed_lines),
+                "removed_file": removed_file, "main_config": main_conf,
+                "managed_file": managed}
+
     # ─────── managed file write/read ───────
 
     def write_managed_file(self, blocks):
@@ -360,11 +481,14 @@ class DnsmasqIntegration:
                 # домен и писал только в v6-set — IPv4 к проксируемым доменам
                 # шёл мимо туннеля (маскировалось pre-population'ом до первой
                 # смены IP у CDN).
-                joined = "/".join(doms)
                 spec_v4 = "%s#%s#%s" % (fam, table, name)
                 spec_v6 = "%s#%s#%s6" % (fam, table, name)
-                lines.append("nftset=/%s/%s,%s" %
-                             (joined, spec_v4, spec_v6))
+                # Длинный список доменов НЕЛЬЗЯ класть в одну строку: у
+                # dnsmasq лимит 1024 байта на строку конфига, за ним он не
+                # стартует и уносит с собой DHCP/DNS (см. DNSMASQ_MAX_LINE,
+                # issue #332). Режем на несколько директив.
+                lines.extend(split_domain_directives(
+                    "nftset=/", doms, "/%s,%s" % (spec_v4, spec_v6)))
             else:  # ipset
                 name = blk.get("set_name") or ""
                 # dnsmasq directive: ipset=/dom1/dom2/<set4>,<set6>.
@@ -373,8 +497,9 @@ class DnsmasqIntegration:
                 # запишет AAAA-IP → весь IPv6-трафик к домену идёт мимо
                 # туннеля (браузеры предпочитают v6). dnsmasq кладёт каждый
                 # адрес в set с совпадающим семейством.
-                joined = "/".join(doms)
-                lines.append("ipset=/%s/%s,%s6" % (joined, name, name))
+                # Тот же лимит строки, что и у nftset (issue #332).
+                lines.extend(split_domain_directives(
+                    "ipset=/", doms, "/%s,%s6" % (name, name)))
             lines.append("")
 
         text = "\n".join(lines).rstrip() + "\n"

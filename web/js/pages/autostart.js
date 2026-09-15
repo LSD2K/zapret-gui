@@ -161,7 +161,7 @@ const AutostartPage = (() => {
             if (action === 'regenerate') { regenerate(); return; }
             if (action === 'showScript') { showScript(); return; }
             if (action === 'showPreview') { showPreview(); return; }
-            if (action === 'closeModal') { closeModal(e); return; }
+            if (action === 'closeModal') { closeModal(); return; }
             if (action === 'copyScript') { copyScript(); return; }
             if (action === 'stopPropagation') { e.stopPropagation(); return; }
         });
@@ -463,8 +463,20 @@ const AutostartPage = (() => {
                                       { okText: 'Скрипт скопирован' });
     }
 
-    function closeModal(event) {
-        if (event && event.target !== event.currentTarget) return;
+    // Закрытие модалки. Раньше здесь стоял гейт
+    // `event.target !== event.currentTarget` — защита от «клика мимо
+    // контента» из времён inline-onclick, когда обработчик висел на самом
+    // backdrop'е. После перехода на делегирование (MR-69) слушатель висит
+    // на `container`, поэтому currentTarget — ВСЕГДА контейнер страницы, а
+    // target — крестик или backdrop, и условие срабатывало на любом клике:
+    // окна «Просмотр скрипта» и «Превью нового» не закрывались ни по
+    // кресту, ни по клику мимо (discussion #102).
+    //
+    // Клик внутри контента сюда не доходит: у `.modal-content` стоит
+    // data-action="stopPropagation", а делегатор ищет БЛИЖАЙШИЙ
+    // [data-action] — значит до closeModal добираются только крестик и сам
+    // backdrop.
+    function closeModal() {
         const modal = document.getElementById('script-modal');
         if (modal) modal.classList.add('hidden');
     }
