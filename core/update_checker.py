@@ -458,28 +458,51 @@ def _check_tgproto() -> dict:
 def _check_tgwsproxy() -> dict:
     """Проверить tg-ws-proxy-go (основной Telegram-движок)."""
     try:
-        from core.ext_binary_installer import _pkg_version_matches_tag
+        from core.ext_binary_installer import (BINARIES,
+                                               _pkg_version_matches_tag)
         from core.tgproxy_manager import get_tgwsproxy_manager
         mgr = get_tgwsproxy_manager()
         detect = mgr.detect()
-        latest = _github_latest("spatiumstas/tg-ws-proxy-go")
         current = detect.get("version", "")
-        # Движок ставится ПАКЕТОМ, и opkg/apk хранят версию с ревизией
-        # сборки (`0.9.3-1`, `0.9.3-r1`), а тег релиза — без неё
-        # (`0.9.3`). Прямое сравнение строк держало кнопку «Обновить»
-        # вечно зажжённой на уже актуальной версии (issue #272).
-        return {
+
+        # «Последняя» — та версия, которую реально поставит кнопка, а не та,
+        # что лежит в /releases/latest. Движок ЗАКРЕПЛЁН на 0.9.3: начиная с
+        # v1.0.0 апстрим переписан с Go на Python и стал десктопным GUI — в
+        # его релизах нет ни .ipk, ни .apk для роутера (см. BINARIES
+        # ['tgwsproxy'] и docs/upstream.json → hold). Пока сюда подставлялся
+        # апстримный тег, страница «Обновления» звала обновиться на v1.4.0, а
+        # установщик честно отвечал «актуальная версия 0.9.3 уже установлена»
+        # — обновление, которого нет (discussion #102).
+        cfg = BINARIES.get("tgwsproxy") or {}
+        pinned = (cfg.get("release_tag") or "").strip()
+        upstream = _github_latest("spatiumstas/tg-ws-proxy-go")
+        latest = pinned or upstream
+
+        res = {
             "name": "tgwsproxy",
             "display_name": "tg-ws-proxy-go",
             "installed": detect.get("installed", False),
             "current": current,
             "latest": latest,
+            # Движок ставится ПАКЕТОМ, и opkg/apk хранят версию с ревизией
+            # сборки (`0.9.3-1`, `0.9.3-r1`), а тег релиза — без неё
+            # (`0.9.3`). Прямое сравнение строк держало кнопку «Обновить»
+            # вечно зажжённой на уже актуальной версии (issue #272).
             "has_update": bool(latest and current and
                                not _pkg_version_matches_tag(current, latest)),
             # Движок ставится пакетом; «что нашли» — его init.d-скрипт,
             # по нему же detect() и считает пакет установленным.
             "path": detect.get("path", ""),
         }
+        if pinned:
+            # Показываем и то, что версия закреплена, и апстримный тег —
+            # иначе «у них 1.4.0, а у меня 0.9.3» выглядит как проглоченная
+            # ошибка проверки.
+            res["pinned"] = True
+            res["upstream_latest"] = upstream
+            res["pin_reason"] = ("апстрим с v1.0.0 — десктопное приложение"
+                                 " без сборок для роутера")
+        return res
     except Exception as e:
         return {"name": "tgwsproxy", "display_name": "tg-ws-proxy-go",
                 "installed": False, "current": "", "latest": "",

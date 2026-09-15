@@ -228,7 +228,18 @@ _FOOL_EXT_LUA_FILE = "z2k-fooling-ext.lua"
 # Путь к state-каталогу (Z2K_STATE_DIR_OVERRIDE для z2k-state-persist.lua).
 # Пишем в наш GUI-каталог, а не в /opt/zapret2/extra_strats — чтобы state
 # выживал переустановку zapret2 и был частью бекапа GUI.
+#
+# Каталог вычисляется от каталога конфига: с `--config DIR` state должен
+# лежать в DIR, а не в дефолтном /opt/etc/zapret-gui (issue #328). Значение
+# ниже — только дефолт для обратной совместимости с внешним кодом,
+# читающим константу; внутри пользуемся z2k_state_dir().
 Z2K_STATE_DIR = "/opt/etc/zapret-gui/state/autocircular"
+
+
+def z2k_state_dir() -> str:
+    """Каталог state.tsv с учётом `--config DIR`."""
+    from core.strategy_state import default_state_dir
+    return default_state_dir()
 
 _LUA_DESYNC_FUNC_RE = re.compile(r"--lua-desync=([a-zA-Z0-9_]+)")
 _LUA_INIT_PATH_RE = re.compile(r"^--lua-init=@(.+)$")
@@ -360,15 +371,16 @@ class NFQWSManager:
             # nfqws2 запускается под --user (обычно nobody) и при отсутствии
             # каталога Lua делает fallback в /tmp (тоже работает, но теряется
             # при ребуте).
+            state_dir = z2k_state_dir()
             try:
-                os.makedirs(Z2K_STATE_DIR, mode=0o755, exist_ok=True)
+                os.makedirs(state_dir, mode=0o755, exist_ok=True)
                 # nfqws2 запускается под `--user nobody` — даём ему права на запись
                 try:
                     import shutil
                     if shutil.which("chown"):
                         subprocess.run(
                             ["chown", "-R", cfg.get("nfqws", "user") or "nobody",
-                             Z2K_STATE_DIR],
+                             state_dir],
                             check=False, timeout=5,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )
@@ -378,7 +390,7 @@ class NFQWSManager:
                 # Без каталога z2k-state-persist уйдёт в /tmp fallback — это ОК.
                 pass
             child_env = dict(os.environ)
-            child_env["Z2K_STATE_DIR_OVERRIDE"] = Z2K_STATE_DIR
+            child_env["Z2K_STATE_DIR_OVERRIDE"] = state_dir
 
             try:
                 if slave_fd is not None:

@@ -17,8 +17,10 @@ z2k-state-persist.lua оборачивает функцию `circular` из zapr
   - strategy — номер закреплённой подстратегии в circular (1..N).
   - ts — unix-timestamp последнего успешного применения.
 
-Каталог по умолчанию — `/opt/etc/zapret-gui/state/autocircular/state.tsv`
-(см. core/nfqws_manager.Z2K_STATE_DIR; путь передаётся в Lua через env
+Каталог по умолчанию — `<каталог конфига>/state/autocircular/state.tsv`,
+то есть `/opt/etc/zapret-gui/state/autocircular/state.tsv`, а при запуске
+с `--config DIR` — внутри DIR (см. default_state_dir() и
+core/nfqws_manager.z2k_state_dir(); путь передаётся в Lua через env
 `Z2K_STATE_DIR_OVERRIDE`). Fallback из самой Lua — `/tmp/...` (volatile).
 
 Этот модуль НИ ЗА ЧТО НЕ ПИШЕТ в файл во время работы nfqws2 — Lua делает
@@ -35,9 +37,12 @@ import time
 
 from core.log_buffer import log
 
-# Должно совпадать с Z2K_STATE_DIR в core/nfqws_manager.py и Z2K_STATE_DIR в
-# шаблоне S99zapret (core/autostart_manager.py). Если меняешь — меняй везде.
-DEFAULT_STATE_DIR = "/opt/etc/zapret-gui/state/autocircular"
+# Путь по умолчанию — на случай, если конфиг ещё не инициализирован
+# (прямой импорт модуля в тестах/CLI до init_config).
+DEFAULT_CONFIG_DIR = "/opt/etc/zapret-gui"
+DEFAULT_STATE_DIR = DEFAULT_CONFIG_DIR + "/state/autocircular"
+# Подкаталог state внутри каталога конфигурации.
+STATE_SUBDIR = ("state", "autocircular")
 STATE_FILE_NAME = "state.tsv"
 STATE_FILE_FALLBACK = "/tmp/z2k-autocircular-state.tsv"
 LOCK_SUFFIX = ".lock"
@@ -61,10 +66,28 @@ _HEADER_LINES = (
 _lock = threading.RLock()
 
 
+def default_state_dir() -> str:
+    """`<каталог конфига>/state/autocircular`.
+
+    Каталог конфига задаётся ключом `--config DIR` — и всё, что лежит
+    рядом с settings.json, обязано ехать за ним. Раньше здесь стояла
+    константа `/opt/etc/zapret-gui/...`, поэтому при запуске с
+    `--config /opt/zapret-gui/etc` state.tsv писался ОДНОВРЕМЕННО и по
+    указанному пути (через env, который выставляет nfqws_manager), и по
+    дефолтному — GUI читал не тот файл, который писала Lua (issue #328).
+    """
+    try:
+        from core.platform_dirs import config_dir
+        base = (config_dir() or "").strip()
+    except Exception:                                  # noqa: BLE001
+        base = ""
+    return os.path.join(base or DEFAULT_CONFIG_DIR, *STATE_SUBDIR)
+
+
 def get_state_dir() -> str:
-    """Каталог state — из env (как в Lua) или дефолт."""
+    """Каталог state — из env (как в Lua) или из каталога конфига."""
     return (os.environ.get("Z2K_STATE_DIR_OVERRIDE")
-            or DEFAULT_STATE_DIR)
+            or default_state_dir())
 
 
 def get_state_file() -> str:

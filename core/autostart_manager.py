@@ -93,7 +93,7 @@ FW_BACKEND=@FW_BACKEND@
 # zapret2, бекапится с настройками GUI. nfqws2 запускается под --user nobody,
 # поэтому права на каталог даём заранее. Если каталог недоступен — Lua
 # уйдёт в /tmp fallback и закреплённая стратегия теряется при ребуте.
-Z2K_STATE_DIR="/opt/etc/zapret-gui/state/autocircular"
+Z2K_STATE_DIR=@Z2K_STATE_DIR@
 export Z2K_STATE_DIR_OVERRIDE="$Z2K_STATE_DIR"
 mkdir -p "$Z2K_STATE_DIR" 2>/dev/null
 chown -R "$(echo "$NFQWS_ARGS" | sed -n 's/.*--user=\([^ ]*\).*/\1/p' | head -1)" \
@@ -705,12 +705,26 @@ class AutostartManager:
             "@WAN_IFACES@": _q(wan_ifaces),
             "@FW_BACKEND@": _q(fw_backend),
             "@FIREWALL_FUNCS@": FIREWALL_SH_FUNCTIONS,
+            # Каталог state.tsv берём от каталога конфига: с
+            # `--config DIR` автозапуск обязан писать туда же, куда пишет
+            # работающий GUI, иначе после ребута закреплённые стратегии
+            # ищутся не там (issue #328).
+            "@Z2K_STATE_DIR@": _q(_z2k_state_dir()),
         }
 
         script = _S99ZAPRET_TEMPLATE
         for key, value in repl.items():
             script = script.replace(key, value)
         return script
+
+
+def _z2k_state_dir() -> str:
+    """Каталог state.tsv (учитывает `--config DIR`, issue #328)."""
+    try:
+        from core.strategy_state import default_state_dir
+        return default_state_dir()
+    except Exception:                                  # noqa: BLE001
+        return "/opt/etc/zapret-gui/state/autocircular"
 
 
 def regenerate_systemd_unit_if_needed() -> dict:

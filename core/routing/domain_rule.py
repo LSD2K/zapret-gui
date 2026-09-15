@@ -236,6 +236,21 @@ def _rebuild_managed_dnsmasq():
             "domains":    domains,
         })
 
+    # Правил не осталось — убираем за собой ПОЛНОСТЬЮ: и managed-файл, и
+    # include на него в dnsmasq.conf. Иначе после удаления последнего
+    # маршрута в системе остаётся `conf-file=` на наш файл — «удалил
+    # маршрут, а данные о нём остались», и любая последующая правка/
+    # удаление файла руками роняет dnsmasq при старте вместе с DHCP
+    # (issue #332).
+    if not blocks and not _all_domain_rules():
+        rm = dn.remove_include()
+        if not rm.get("ok"):
+            log.warning("dnsmasq include cleanup: %s" % rm.get("error"),
+                        source="routing")
+        reload_res = dn.reload()
+        return {"ok": bool(rm.get("ok")), "cleanup": rm,
+                "reload": reload_res}
+
     dn.ensure_include()
     write_res = dn.write_managed_file(blocks)
     if not write_res.get("ok"):

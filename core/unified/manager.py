@@ -22,7 +22,10 @@ def save_route(data: dict, *, apply: bool = True) -> dict:
     """Создать/обновить маршрут из dict. Валидирует модель, сохраняет,
     (опц.) применяет."""
     try:
-        route = UnifiedRoute.from_dict(data or {})
+        # strict: адрес устройства проверяем на входе из GUI/API —
+        # «192.168.0.*» должен вернуться ошибкой в форму, а не осесть в
+        # settings.json неработающим правилом (issue #333).
+        route = UnifiedRoute.from_dict(data or {}, strict_devices=True)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if not route.has_selectors():

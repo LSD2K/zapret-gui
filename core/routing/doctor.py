@@ -413,6 +413,31 @@ def _diagnose_device_rule(rule) -> list:
         "«%s» стоит выше (приоритет < %d) и уводит трафик раньше"
         % (shadow, DEVICE_PRIORITY)))
 
+    # 6a. Правило на ПОДСЕТЬ без исключений = роутер уехал в туннель.
+    from core.routing.device_rule import (LOCAL_EXEMPT_PRIORITY, _is_subnet,
+                                          _exempt_targets)
+    if _is_subnet(src):
+        nets, own = _exempt_targets(src, family)
+        lines = _ip_rule_lines(family)
+        missing = [n for n in nets
+                   if not any(("from %s" % src) in ln and ("to %s" % n) in ln
+                              and "lookup main" in ln for ln in lines)]
+        checks.append(_check(
+            "локальная сеть не уходит в туннель", not missing,
+            "" if not missing else
+            "нет исключений (приоритет %d) для %s — трафик внутри LAN и"
+            " ответы роутера уедут в туннель, роутер пропадёт из сети"
+            % (LOCAL_EXEMPT_PRIORITY, ", ".join(missing))))
+        if own:
+            miss_self = [a for a in own
+                         if not any(("from %s" % a.split("/")[0]) in ln
+                                    and "lookup main" in ln for ln in lines)]
+            checks.append(_check(
+                "адреса роутера вне правила", not miss_self,
+                "" if not miss_self else
+                "нет исключения для %s — собственный трафик роутера уходит"
+                " в туннель" % ", ".join(miss_self)))
+
     # 7. Контрольный вопрос ядру: куда реально уйдёт пакет устройства.
     if found and not v6:
         via = _route_get_from("1.1.1.1", src_short)

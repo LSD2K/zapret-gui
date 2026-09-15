@@ -9,6 +9,7 @@ NAT MASQUERADE и обработка TCP-флагов.
 import unittest
 from unittest import mock
 
+import core.firewall as firewall_mod
 from core.firewall import FirewallManager
 
 
@@ -375,6 +376,79 @@ class TestNftablesIfaceQuoting(unittest.TestCase):
         self.assertTrue(rules)
         for c in rules:
             self.assertRegex(c, r'[oi]ifname "6in4-wan" ')
+
+
+class TestMissingBackendIsNotSpam(unittest.TestCase):
+    """Issue #325: «Ни iptables, ни nft не найдены!» раз в пять секунд.
+
+    Статус опрашивается из UI постоянно, а отрицательный результат поиска
+    не кешировался — каждый опрос заново искал бинарники и писал в лог.
+    """
+
+    def _manager_without_backend(self):
+        mgr = FirewallManager()
+        return mgr
+
+    def _detect_many(self, times=5):
+        mgr = self._manager_without_backend()
+        cfg = mock.Mock()
+        cfg.get.return_value = "auto"
+        with mock.patch("core.firewall.shutil.which", return_value=None), \
+             mock.patch("core.config_manager.get_config_manager",
+                        return_value=cfg), \
+             mock.patch.object(firewall_mod.log, "warning") as warn:
+            for _ in range(times):
+                self.assertIsNone(mgr.detect_fw_type())
+        return mgr, warn
+
+    def test_warning_is_logged_once(self):
+        _mgr, warn = self._detect_many(5)
+        self.assertEqual(warn.call_count, 1)
+
+    def test_warning_text_says_what_to_install(self):
+        _mgr, warn = self._detect_many(1)
+        text = warn.call_args[0][0]
+        self.assertIn("opkg install", text)
+
+    def test_detection_is_not_repeated_within_ttl(self):
+        mgr = self._manager_without_backend()
+        cfg = mock.Mock()
+        cfg.get.return_value = "auto"
+        with mock.patch("core.firewall.shutil.which",
+                        return_value=None) as which, \
+             mock.patch("core.config_manager.get_config_manager",
+                        return_value=cfg):
+            for _ in range(4):
+                mgr.detect_fw_type()
+        # Один проход поиска — два which() (iptables + nft).
+        self.assertLessEqual(which.call_count, 2)
+
+    def test_backend_installed_later_is_picked_up(self):
+        """Поставили iptables через opkg — перезапуск GUI не нужен."""
+        mgr = self._manager_without_backend()
+        cfg = mock.Mock()
+        cfg.get.return_value = "auto"
+        with mock.patch("core.firewall.shutil.which", return_value=None), \
+             mock.patch("core.config_manager.get_config_manager",
+                        return_value=cfg):
+            self.assertIsNone(mgr.detect_fw_type())
+        mgr._fw_detect_at -= (mgr.NEG_DETECT_TTL + 1)
+        with mock.patch("core.firewall.shutil.which",
+                        side_effect=lambda n: "/opt/sbin/iptables"
+                        if n == "iptables" else None), \
+             mock.patch("core.config_manager.get_config_manager",
+                        return_value=cfg):
+            self.assertEqual(mgr.detect_fw_type(), "iptables")
+
+
+class TestSbinPathAugmentation(unittest.TestCase):
+    """Entware кладёт iptables/nft в /opt/sbin — их тоже надо видеть."""
+
+    def test_entware_dirs_are_considered(self):
+        import inspect
+        src = inspect.getsource(firewall_mod._ensure_sbin_in_path)
+        for d in ("/opt/sbin", "/opt/bin"):
+            self.assertIn(d, src)
 
 
 class TestAutoDetectFwType(unittest.TestCase):

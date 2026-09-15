@@ -16,7 +16,9 @@ def config_dir() -> str:
     try:
         # Respect create_app(config_dir=...) and test/application overrides.
         from core.config_manager import get_config_manager
-        configured = getattr(get_config_manager(), "_config_dir", "")
+        mgr = get_config_manager()
+        configured = getattr(mgr, "config_dir", "") or getattr(
+            mgr, "_config_dir", "")
         if configured:
             return configured
     except Exception:

@@ -259,16 +259,53 @@ class TestEnvOverride(unittest.TestCase):
             else:
                 os.environ["Z2K_STATE_DIR_OVERRIDE"] = prev
 
-    def test_get_state_dir_default(self):
+    def test_get_state_dir_follows_config_dir(self):
+        """Без env каталог state лежит внутри каталога конфига.
+
+        Issue #328: пути были константами `/opt/etc/zapret-gui/...`, и при
+        запуске с `--config DIR` state.tsv писался и туда, и по дефолту.
+        """
         from core import strategy_state
         prev = os.environ.pop("Z2K_STATE_DIR_OVERRIDE", None)
+        prev_cfg = os.environ.get("ZAPRET_GUI_CONFIG_DIR")
         try:
+            os.environ["ZAPRET_GUI_CONFIG_DIR"] = "/opt/zapret-gui/etc"
             self.assertEqual(
                 os.path.normpath(strategy_state.get_state_dir()),
-                os.path.normpath(strategy_state.DEFAULT_STATE_DIR))
+                os.path.normpath("/opt/zapret-gui/etc/state/autocircular"))
+            self.assertEqual(
+                os.path.normpath(strategy_state.get_state_file()),
+                os.path.normpath(
+                    "/opt/zapret-gui/etc/state/autocircular/state.tsv"))
         finally:
             if prev is not None:
                 os.environ["Z2K_STATE_DIR_OVERRIDE"] = prev
+            if prev_cfg is None:
+                os.environ.pop("ZAPRET_GUI_CONFIG_DIR", None)
+            else:
+                os.environ["ZAPRET_GUI_CONFIG_DIR"] = prev_cfg
+
+    def test_default_dir_is_the_classic_path(self):
+        """Дефолтный каталог конфига — прежний, ничего не переехало."""
+        from core import strategy_state
+        self.assertEqual(strategy_state.DEFAULT_STATE_DIR,
+                         "/opt/etc/zapret-gui/state/autocircular")
+
+    def test_autostart_script_uses_the_same_dir(self):
+        """Скрипт автозапуска обязан писать state туда же, куда GUI."""
+        from core import autostart_manager, strategy_state
+        prev_cfg = os.environ.get("ZAPRET_GUI_CONFIG_DIR")
+        try:
+            os.environ["ZAPRET_GUI_CONFIG_DIR"] = "/opt/zapret-gui/etc"
+            self.assertEqual(autostart_manager._z2k_state_dir(),
+                             strategy_state.default_state_dir())
+            self.assertIn("/opt/zapret-gui/etc/state/autocircular",
+                          autostart_manager._z2k_state_dir())
+        finally:
+            if prev_cfg is None:
+                os.environ.pop("ZAPRET_GUI_CONFIG_DIR", None)
+            else:
+                os.environ["ZAPRET_GUI_CONFIG_DIR"] = prev_cfg
 
 
 if __name__ == "__main__":

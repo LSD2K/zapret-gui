@@ -175,7 +175,8 @@ class UnifiedRoute:
                  fallbacks=None, priority=0, enabled=True,
                  monitor_enabled=False, failover_enabled=False,
                  probe_domain="", route_id="", created_at=0,
-                 devices=None, dscp=None, dscp_self=False):
+                 devices=None, dscp=None, dscp_self=False,
+                 strict_devices=False):
         # os.urandom, а не uuid: на Entware python3-light без модуля uuid
         self.id = route_id or ("route-" + os.urandom(4).hex())
         self.name = (name or "").strip() or self.id
@@ -194,7 +195,7 @@ class UnifiedRoute:
         self.failover_enabled = bool(failover_enabled)
         self.probe_domain = (probe_domain or "").strip()
         self.created_at = int(created_at or time.time())
-        self.devices = _clean_devices(devices)
+        self.devices = _clean_devices(devices, strict=strict_devices)
         self.dscp = _clean_dscp(dscp)
         self.dscp_self = bool(dscp_self)
 
@@ -228,7 +229,7 @@ class UnifiedRoute:
         }
 
     @staticmethod
-    def from_dict(d: dict):
+    def from_dict(d: dict, *, strict_devices: bool = False):
         d = d or {}
         # Метод по умолчанию — только когда поля НЕТ вовсе (старые
         # payload'ы, импорт). Присланная пустая строка — это «в форме
@@ -252,17 +253,49 @@ class UnifiedRoute:
             created_at=d.get("created_at") or 0,
             devices=d.get("devices"),
             dscp=d.get("dscp"),
-            dscp_self=d.get("dscp_self", False))
+            dscp_self=d.get("dscp_self", False),
+            strict_devices=strict_devices)
 
 
 # ─────────────────────── helpers ─────────────────────────────────────
 
-def _clean_devices(v) -> list:
+def _norm_device_ip(raw: str) -> str:
+    """
+    Нормализовать источник устройства: один IP или ПОДСЕТЬ.
+
+    Подсеть (`192.168.0.0/24`) — законный источник: «все устройства этой
+    сети в туннель». Записывается она как сеть, а не как чей-то адрес с
+    маской, поэтому `192.168.0.1/24` приводим к `192.168.0.0/24` — иначе
+    пользователь видит в списке один адрес, а правило ловит всю сеть.
+    Одиночный адрес и маска /32 (/128) — одно и то же, храним без маски.
+
+    Всё, что ipaddress не разбирает (`192.168.0.*`, «192.168.0.1-50»),
+    отдаёт ValueError: молча сохранённый мусор превращался в правило,
+    которое ядро не принимает, — маршрут числился рабочим и не работал.
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if "/" in s:
+        net = ipaddress.ip_network(s, strict=False)
+        if net.prefixlen == net.max_prefixlen:
+            return str(net.network_address)
+        return str(net)
+    return str(ipaddress.ip_address(s))
+
+
+def _clean_devices(v, strict: bool = False) -> list:
     """
     Нормализовать список устройств-источников:
     [{"ip": str, "mac": str, "hostname": str}, ...]. Записи без ip
     отбрасываются, дубликаты по ip схлопываются (последний выигрывает
     mac/hostname, если они заполнены).
+
+    `strict=True` (сохранение из GUI/API) — на некорректном адресе
+    бросаем ValueError, чтобы пользователь увидел ошибку сразу.
+    `strict=False` (чтение settings.json) — такую запись пропускаем:
+    из-за одного битого адреса маршрут не должен исчезать из списка
+    целиком вместе с доменами и CIDR, которые работают.
     """
     if not isinstance(v, (list, tuple)):
         return []
@@ -273,6 +306,14 @@ def _clean_devices(v) -> list:
             continue
         ip = str(x.get("ip") or "").strip()
         if not ip:
+            continue
+        try:
+            ip = _norm_device_ip(ip)
+        except (ValueError, TypeError):
+            if strict:
+                raise ValueError("Некорректный IP или подсеть устройства: %s"
+                                 " (примеры: 192.168.1.50, 192.168.1.0/24)"
+                                 % ip)
             continue
         entry = by_ip.get(ip)
         if entry is None:

@@ -988,8 +988,8 @@ const RoutingUnifiedPage = (() => {
         box.innerHTML = `
             <div>${chips}</div>
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px;">
-                <input type="text" id="ru-dev-manual" class="form-control" style="max-width:200px;"
-                       placeholder="IP вручную: 192.168.1.50">
+                <input type="text" id="ru-dev-manual" class="form-control" style="max-width:260px;"
+                       placeholder="IP или подсеть: 192.168.1.50 / 192.168.1.0/24">
                 <button class="btn btn-ghost btn-sm" data-action="addDeviceManual">Добавить</button>
                 <button class="btn btn-ghost btn-sm" data-action="toggleDevPicker">
                     ${devPickerOpen ? 'Скрыть устройства сети' : 'Выбрать из сети…'}</button>
@@ -1005,6 +1005,11 @@ const RoutingUnifiedPage = (() => {
             <div class="text-muted" style="font-size:11px; margin-top:4px;">
                 Устройства и DSCP работают только с туннельными методами
                 (awg/sing-box/mihomo); для direct/nfqws2 они пропускаются.
+                <br>Можно указать и целую подсеть — <code>192.168.1.0/24</code>:
+                тогда в туннель уходят все её устройства. Трафик внутри
+                локальной сети и трафик самого роутера при этом остаются
+                локальными. Маски вида <code>192.168.1.*</code> не
+                поддерживаются — это не адрес.
                 ${netEnv && netEnv.profile === 'pc'
                     ? '<br>🖥 Локальный режим (ПК без LAN-клиентов): устройства' +
                       ' обычно не нужны — домены/CIDR-правила и так действуют' +
@@ -1057,10 +1062,26 @@ const RoutingUnifiedPage = (() => {
         renderMethodWarning();
     }
 
+    // Грубая проверка «похоже на адрес/подсеть» — чтобы не ждать ответа
+    // сервера на «192.168.0.*» и подобное (issue #333). Точную валидацию
+    // (и нормализацию 192.168.0.1/24 → 192.168.0.0/24) делает бэкенд.
+    function looksLikeAddress(v) {
+        const [addr, mask, extra] = String(v).split('/');
+        if (extra !== undefined) return false;
+        if (mask !== undefined && !/^\d{1,3}$/.test(mask)) return false;
+        if (addr.includes(':')) return /^[0-9a-fA-F:.]+$/.test(addr);
+        return /^\d{1,3}(\.\d{1,3}){3}$/.test(addr);
+    }
+
     function addDeviceManual() {
         const inp = document.getElementById('ru-dev-manual');
         const ip = (inp && inp.value || '').trim();
-        if (!ip) { Toast.error('Введите IP устройства'); return; }
+        if (!ip) { Toast.error('Введите IP устройства или подсеть'); return; }
+        if (!looksLikeAddress(ip)) {
+            Toast.error('Нужен IP (192.168.1.50) или подсеть '
+                      + '(192.168.1.0/24)');
+            return;
+        }
         const known = devices.find(d => d.ip === ip) || {};
         addDevice(ip, known.mac || '', known.hostname || '');
         if (inp) inp.value = '';

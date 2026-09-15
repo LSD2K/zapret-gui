@@ -270,13 +270,27 @@ const TgProxyPage = (() => {
     // Строка «пакет / версия / Обновить / Удалить» — одинаковая у обоих движков.
     function _packageRow(engine, det) {
         const meta = _ENGINES[engine];
+        // У tgwsproxy версия ЗАКРЕПЛЕНА на 0.9.3: с v1.0.0 апстрим переписан
+        // на Python и стал десктопным приложением, роутерных .ipk/.apk там
+        // больше нет. Кнопка «Обновить до последней версии» обещала то, чего
+        // не бывает: нажатие честно отвечало «актуальная версия 0.9.3 уже
+        // установлена» (discussion #102). Говорим прямо — это переустановка
+        // закреплённой сборки.
         const label = engine === "tgwsproxy"
-            ? "Обновить до последней версии" : "Обновить";
+            ? "Переустановить пакет" : "Обновить";
+        const pinNote = engine === "tgwsproxy"
+            ? `<div class="text-muted" style="font-size:11px; margin-top:4px;">
+                   Версия закреплена на 0.9.3 — это последний релиз апстрима
+                   со сборками для роутера; более новые (v1.x) — десктопное
+                   приложение, ставить на роутер нечего.
+               </div>`
+            : "";
         return `
             <div class="pkg-row">
                 <span class="text-muted" style="font-size:12px;">
                     Пакет <code>${esc(meta.pkg)}</code>${det.version
                         ? ", версия " + esc(det.version) : ""}
+                    ${pinNote}
                 </span>
                 <span style="display:flex; gap:6px; flex-wrap:wrap;">
                     <button class="btn btn-sm" id="${esc(engine)}-btn-install" type="button"
