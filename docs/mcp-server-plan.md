@@ -880,6 +880,12 @@ zapret-gui mcp code export-patch > /tmp/local.patch      # выгрузить л
 
 ## 13. Порядок работы: 8 PR-ов с критериями приёмки
 
+> **Как делить это между сессиями ИИ-агента** (чтобы контекст не переполнялся
+> и качество не падало) — отдельный документ:
+> [`docs/mcp-implementation-roadmap.md`](mcp-implementation-roadmap.md).
+> Там 16 сессий с бюджетом чтения, зависимостями и регламентом. PR-ы ниже —
+> это логические вехи; сессии нарезаны мельче.
+
 **PR1 — каркас протокола.**
 `core/mcp/{server,registry,schema,auth,permissions,redact}.py`, `api/mcp.py`,
 секция `mcp` в конфиге, 5 read-only инструментов (`system_status`,
