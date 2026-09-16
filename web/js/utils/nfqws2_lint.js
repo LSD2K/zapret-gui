@@ -67,6 +67,21 @@ const Nfqws2Lint = (() => {
         // одиночная граница без разделителя: -d10 уже покрыт (пустая левая часть)
         return false;
     }
+    // Значение --filter-mark: mark[/mask], каждая часть — десятичное
+    // число либо 0xHEX (nfqws.c: sscanf "0x%X", затем "%u"). uint32,
+    // поэтому 4294967296 и 0x1FFFFFFFF — уже не mark.
+    function isMark(s) {
+        const parts = s.split('/');
+        if (parts.length > 2) return false;
+        return parts.every(p => {
+            p = p.trim();
+            let n;
+            if (/^0[xX][0-9a-fA-F]+$/.test(p)) n = parseInt(p, 16);
+            else if (/^\d+$/.test(p)) n = parseInt(p, 10);
+            else return false;
+            return n <= 0xFFFFFFFF;
+        });
+    }
     // pos-маркер (один): число | ±число | marker[±N]
     function isPosMarker(s) {
         if (/^-?\d+$/.test(s)) return true;
@@ -85,6 +100,10 @@ const Nfqws2Lint = (() => {
             case 'range':
                 return isRange(value) ? null
                     : 'неверный диапазон (примеры: -d10, -s5556, s100-s1000, a, x)';
+            case 'mark':
+                return isMark(value) ? null
+                    : 'ожидается mark[/mask]: десятичное число или 0xHEX '
+                      + '(примеры: 4096, 0x1000, 0x1000/0xf000)';
             case 'enum':
                 if (valuesEnum && valuesEnum.indexOf(value) < 0)
                     return 'недопустимое значение (ожидается: ' + valuesEnum.join(', ') + ')';

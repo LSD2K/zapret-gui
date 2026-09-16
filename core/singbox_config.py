@@ -11,15 +11,19 @@ sing-box принимает JSON (не INI-like .conf). Структура сх�
       "dns":       {"servers": [...], ...},  # опционально
       "inbounds":  [...],   # source трафика: tun / mixed / http / socks
       "outbounds": [...],   # куда уходит: vless / trojan / shadowsocks /
-                            #              hysteria2 / wireguard / direct
+                            #              hysteria2 / direct
+      "endpoints": [...],   # 1.11+: wireguard / tailscale, с 1.14 ещё
+                            #        openvpn-client|server / openconnect.
+                            #        Теги общие с outbounds — route
+                            #        ссылается на них одинаково
       "route":     {"rules": [...]},  # правила маршрутизации
                                        # между inbounds и outbounds
       "experimental": {...},
     }
 
 Этот модуль:
-  - валидирует обязательные поля (outbounds должны быть, тип каждого
-    outbound'а — известный);
+  - валидирует обязательные поля (трафику нужен хотя бы один outbound
+    ИЛИ endpoint, тип каждого из них — известный);
   - выдаёт человекочитаемые ошибки для UI;
   - умеет генерить минимальный «route only»-конфиг под наш typical
     use-case: tun inbound → user-defined outbound → direct-fallback.
@@ -39,20 +43,37 @@ from typing import Any
 # Известные типы outbound'ов (для предварительной валидации без
 # реального бинаря). Список неполный — sing-box добавляет новые;
 # UI просто выдаст warning «неизвестный тип» вместо отказа.
+#
+# Сверено с регистрацией протоколов sing-box v1.14.1
+# (`protocol/*/outbound.go`, `outbound.Register[...]`). `snell` и `bridge`
+# появились в 1.14, `anytls` — в 1.12; без них валидный конфиг получал
+# ложное «неизвестный тип». `block`/`dns`/`wireguard` как outbound'ы
+# УДАЛЕНЫ в 1.13, но оставлены здесь намеренно: конфиги пользователя
+# читаются и старые, а ругаться на них должен `sing-box check`, который
+# знает версию установленного бинаря (см. §9 скила singbox).
 KNOWN_OUTBOUND_TYPES = {
     "direct", "block", "dns", "selector", "urltest",
     "shadowsocks", "vmess", "vless", "trojan",
     "wireguard", "hysteria", "hysteria2", "tuic",
     "shadowtls", "naive", "ssh", "socks", "http",
-    "tor",
+    "tor", "anytls", "snell", "bridge",
 }
 
-# Известные типы inbound'ов.
+# Известные типы inbound'ов (там же, `inbound.Register[...]`).
 KNOWN_INBOUND_TYPES = {
     "direct", "mixed", "socks", "http", "shadowsocks",
     "vmess", "vless", "trojan", "naive", "hysteria",
     "hysteria2", "tuic", "shadowtls", "tun", "redirect",
-    "tproxy",
+    "tproxy", "anytls", "snell", "cloudflared",
+}
+
+# Известные типы endpoint'ов — секция `endpoints`, отдельная от outbounds
+# (добавлена в 1.11). `wireguard` живёт ТОЛЬКО здесь: как outbound он
+# удалён в 1.13. `openvpn-client`/`openvpn-server`/`openconnect` добавлены
+# в 1.14 (`protocol/*/endpoint.go`, `endpoint.Register[...]`).
+KNOWN_ENDPOINT_TYPES = {
+    "wireguard", "tailscale",
+    "openvpn-client", "openvpn-server", "openconnect",
 }
 
 
@@ -90,24 +111,35 @@ def validate(cfg: dict) -> list:
 
     Глубокая валидация (правильность ssh-key, формата endpoint и т.п.)
     делегируется самому `sing-box check`. Здесь мы ловим только то,
-    что точно проблема: отсутствуют outbound'ы, неправильные типы,
+    что точно проблема: некуда отправить трафик, неправильные типы,
     повторяющиеся теги.
+
+    ⚠️ «Некуда отправить» — это ПУСТЫЕ И `outbounds`, И `endpoints`.
+    Само по себе отсутствие `outbounds` ошибкой НЕ является: в схеме
+    апстрима поле помечено `omitempty`, а при пустом списке менеджер
+    сам поднимает direct-outbound (`adapter/outbound/manager.go`,
+    `defaultOutboundFallback`). Конфиг из одних `endpoints` — штатный и
+    единственный способ поднять WireGuard начиная с 1.13 (там outbound
+    `type:wireguard` удалён), а с 1.14 так же живут openvpn/openconnect.
+    Пока мы этого не знали, такой конфиг не сохранялся вовсе: save_config
+    считает «Секция 'outbounds' обязательна» hard-ошибкой.
     """
     errors = []
 
     if not isinstance(cfg, dict):
         return ["Корень должен быть объектом"]
 
-    # outbounds — обязательны
+    tags_seen = set()
+    # Секция есть, но не массив — про неё уже сказано точнее, поэтому
+    # итоговое «отправлять некуда» не дублируем.
+    malformed = False
+
+    # outbounds — опциональны (см. docstring), но если есть, типизированы
     outbounds = cfg.get("outbounds")
-    if outbounds is None:
-        errors.append("Секция 'outbounds' обязательна")
-    elif not isinstance(outbounds, list):
+    if outbounds is not None and not isinstance(outbounds, list):
         errors.append("'outbounds' должен быть массивом")
-    elif not outbounds:
-        errors.append("'outbounds' не должен быть пустым")
-    else:
-        tags_seen = set()
+        outbounds, malformed = None, True
+    elif outbounds:
         for i, ob in enumerate(outbounds):
             if not isinstance(ob, dict):
                 errors.append("outbounds[%d]: должен быть объектом" % i)
@@ -127,6 +159,38 @@ def validate(cfg: dict) -> list:
                         "outbounds[%d]: tag '%s' уже встречается выше" %
                         (i, tag))
                 tags_seen.add(tag)
+
+    # endpoints (1.11+) — WireGuard / Tailscale / OpenVPN / OpenConnect.
+    # Теги общие с outbounds: route ссылается на те и другие одинаково,
+    # поэтому дубль тега между секциями — такая же ошибка.
+    endpoints = cfg.get("endpoints")
+    if endpoints is not None and not isinstance(endpoints, list):
+        errors.append("'endpoints' должен быть массивом")
+        endpoints, malformed = None, True
+    elif endpoints:
+        for i, ep in enumerate(endpoints):
+            if not isinstance(ep, dict):
+                errors.append("endpoints[%d]: должен быть объектом" % i)
+                continue
+            t = ep.get("type")
+            if not t:
+                errors.append("endpoints[%d]: отсутствует 'type'" % i)
+            elif t not in KNOWN_ENDPOINT_TYPES:
+                errors.append(
+                    "endpoints[%d]: неизвестный тип '%s' "
+                    "(будет принят как есть)" % (i, t))
+            tag = ep.get("tag")
+            if tag:
+                if tag in tags_seen:
+                    errors.append(
+                        "endpoints[%d]: tag '%s' уже встречается выше" %
+                        (i, tag))
+                tags_seen.add(tag)
+
+    if not outbounds and not endpoints and not malformed:
+        errors.append(
+            "Нужна непустая секция 'outbounds' или 'endpoints' — "
+            "иначе трафик отправлять некуда")
 
     # inbounds — опциональны, но если есть, типизированы
     inbounds = cfg.get("inbounds")

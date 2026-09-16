@@ -149,7 +149,10 @@ def make_tun(*, device: str = DEFAULT_TUN_DEVICE, stack: str = "gvisor",
 
     stack: 'gvisor' (userspace, ловит TCP+UDP сам — нужен для надёжного
            доменного роутинга), 'system' (kernel, низкий CPU — нужен auto-route
-           чтобы ловить трафик), 'mixed'.
+           чтобы ловить трафик), 'mixed', 'mips' (облегчённый userspace-стек
+           metacubex/mipstack, только mihomo >= 1.19.31 — см.
+           mihomo_routing.available_stacks; на старом бинаре незнакомое
+           значение роняет разбор всего конфига, а не одного поля).
     mtu=1500 (не 9000): для туннеля поверх прокси большой MTU бессмыслен, а с
            gvisor на слабом MIPS раздувает буферы → GC-молотьба/100% CPU.
     strict_route=False: не «лочим» роутер (иначе при мёртвом прокси «умирает

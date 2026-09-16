@@ -18,10 +18,49 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 
 from core.log_buffer import log
 from core import mihomo_config as mc
+
+
+# ─────────────────────── TUN-стеки ───────────────────────
+#
+# Значения `tun.stack`, которые понимает mihomo (`constant/tun.go`,
+# StackTypeMapping). Неизвестное значение — не warning: UnmarshalText
+# возвращает «invalid tun stack», и конфиг не принимается целиком.
+#
+# `mips` (реализация metacubex/mipstack) добавлен в v1.19.31 — отдельный
+# облегчённый userspace-стек ровно под наш случай: на слабых MIPS-роутерах
+# gvisor раздувает буферы и жжёт CPU, а system ловит не весь трафик.
+STACKS = ("gvisor", "system", "mixed", "mips")
+
+# Первая версия mihomo, знающая `stack: mips`.
+MIPS_STACK_MIN_VERSION = (1, 19, 31)
+
+
+def _version_tuple(v: str) -> tuple:
+    """'1.19.31' / 'v1.19.31-alpha' → (1, 19, 31). Мусор → ()."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", str(v or ""))
+    return tuple(int(g) for g in m.groups()) if m else ()
+
+
+def mips_stack_supported(version: str) -> bool:
+    """
+    Знает ли установленный mihomo `stack: mips`.
+
+    Версию не удалось определить → False: лучше не предлагать стек,
+    который старый бинарь отвергнет вместе со всем конфигом.
+    """
+    vt = _version_tuple(version)
+    return bool(vt) and vt >= MIPS_STACK_MIN_VERSION
+
+
+def available_stacks(version: str) -> list:
+    """Стеки, которые можно предлагать для этой версии бинаря."""
+    return [s for s in STACKS
+            if s != "mips" or mips_stack_supported(version)]
 
 
 # ─────────────────────── proxy resolution ───────────────────────
@@ -255,6 +294,9 @@ def build_options() -> dict:
         "geoip_suggested": geoip_suggested,
         "configs": configs,
         "default_stack": "gvisor" if det.get("has_gvisor", True) else "system",
+        # Какие стеки предлагать в форме. `mips` есть только с 1.19.31,
+        # на более старом бинаре он уронил бы весь конфиг, а не поле.
+        "stacks": available_stacks(det.get("version") or ""),
         "fakeip_range": mc.FAKEIP_RANGE,
         "default_device": mc.DEFAULT_TUN_DEVICE,
     }
@@ -262,9 +304,13 @@ def build_options() -> dict:
 
 # ─────────────────────── build + validate + save ───────────────────────
 
-def _pick_stack(requested: str, has_gvisor: bool, default: str) -> str:
+def _pick_stack(requested: str, has_gvisor: bool, default: str,
+                version: str = "") -> str:
     st = (requested or "").strip().lower()
-    if st in ("gvisor", "system", "mixed"):
+    # Запрос на mips к бинарю, который его не знает, игнорируем наравне с
+    # мусором: mihomo на незнакомом значении печатает «invalid tun stack»
+    # и не принимает конфиг целиком — лучше дефолтный стек, чем отказ.
+    if st in STACKS and (st != "mips" or mips_stack_supported(version)):
         return st
     return default if has_gvisor or default == "system" else "system"
 
@@ -354,7 +400,8 @@ def build_domain_route_and_save(*, name: str = "mihomo-domains",
 
     det = get_mihomo_detector().detect_binary()
     has_gvisor = det.get("has_gvisor", True)
-    chosen_stack = _pick_stack(stack, has_gvisor, "gvisor")
+    chosen_stack = _pick_stack(stack, has_gvisor, "gvisor",
+                               det.get("version") or "")
     nft = _nft_backend()
     port, sec = _free_port(), secrets.token_hex(8)
 
@@ -433,7 +480,8 @@ def build_source_route_and_save(*, name: str = "mihomo-devices",
     det = get_mihomo_detector().detect_binary()
     has_gvisor = det.get("has_gvisor", True)
     # Для «весь ПК / устройства» дефолт — system (kernel, низкий CPU).
-    chosen_stack = _pick_stack(stack, has_gvisor, "system")
+    chosen_stack = _pick_stack(stack, has_gvisor, "system",
+                               det.get("version") or "")
     nft = _nft_backend()
     port, sec = _free_port(), secrets.token_hex(8)
 

@@ -17,11 +17,11 @@ def _vless_proxy():
             "port": 443, "uuid": "u-1", "tls": True}
 
 
-def _detector(installed=True, has_gvisor=True):
+def _detector(installed=True, has_gvisor=True, version="1.18.0"):
     det = mock.MagicMock()
     det.detect_binary.return_value = {"installed": installed,
                                       "has_gvisor": has_gvisor,
-                                      "version": "1.18.0"}
+                                      "version": version}
     return det
 
 
@@ -130,12 +130,13 @@ class TestCollectTargets(unittest.TestCase):
 
 class TestBuildDomainRoute(unittest.TestCase):
 
-    def _patches(self, mgr, installed=True, has_gvisor=True, nft=False):
+    def _patches(self, mgr, installed=True, has_gvisor=True, nft=False,
+                 version="1.18.0"):
         plat = mock.MagicMock()
         plat.get_firewall_backend.return_value = "nftables" if nft else "iptables"
         return [
             mock.patch("core.mihomo_detector.get_mihomo_detector",
-                       return_value=_detector(installed, has_gvisor)),
+                       return_value=_detector(installed, has_gvisor, version)),
             mock.patch("core.mihomo_manager.get_mihomo_manager",
                        return_value=mgr),
             mock.patch("core.proxy_tester._free_port", return_value=9099),
@@ -184,6 +185,28 @@ class TestBuildDomainRoute(unittest.TestCase):
                       domains=["youtube.com"])
         self.assertTrue(r["ok"])
         self.assertEqual(r["stack"], "system")
+
+    def test_mips_stack_accepted_on_new_enough_mihomo(self):
+        # `stack: mips` (metacubex/mipstack) — облегчённый стек для слабых
+        # роутеров, добавлен в mihomo v1.19.31.
+        mgr = _FakeManager()
+        r = self._run(mgr, name="d", proxy_link="vless://x",
+                      domains=["youtube.com"], stack="mips",
+                      _env={"version": "1.19.31"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["stack"], "mips")
+        self.assertEqual(parse_yaml(mgr.saved[1])["tun"]["stack"], "mips")
+
+    def test_mips_stack_ignored_on_old_mihomo(self):
+        # На бинаре без mipstack незнакомое значение stack — не
+        # игнорируемое поле, а «invalid tun stack» на ВЕСЬ конфиг.
+        # Поэтому запрос молча вырождается в дефолтный стек.
+        mgr = _FakeManager()
+        r = self._run(mgr, name="d", proxy_link="vless://x",
+                      domains=["youtube.com"], stack="mips",
+                      _env={"version": "1.19.30"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["stack"], "gvisor")
 
     def test_ruleset_fallback_to_domain_suffix(self):
         # Отвергаем любой конфиг с rule-providers (старая сборка).
@@ -254,6 +277,38 @@ class TestBuildSourceRoute(unittest.TestCase):
         self.assertTrue(r["ok"])
         cfg = parse_yaml(mgr.saved[1])
         self.assertEqual(cfg["rules"][-1], "MATCH,PROXY")
+
+
+class TestStacks(unittest.TestCase):
+    """
+    Набор `tun.stack` сверен с `constant/tun.go` mihomo (StackTypeMapping).
+    `mips` там появился в v1.19.31; UnmarshalText на незнакомом значении
+    возвращает «invalid tun stack», то есть конфиг не принимается целиком —
+    отсюда гейт по версии, а не «пусть попробует».
+    """
+
+    def test_mips_requires_11931(self):
+        self.assertTrue(mr.mips_stack_supported("1.19.31"))
+        self.assertTrue(mr.mips_stack_supported("v1.19.31"))
+        self.assertTrue(mr.mips_stack_supported("1.20.0"))
+        self.assertFalse(mr.mips_stack_supported("1.19.30"))
+        self.assertFalse(mr.mips_stack_supported("1.18.0"))
+
+    def test_unknown_version_is_not_supported(self):
+        # Версию не прочитали — не предлагаем то, что может уронить конфиг.
+        for v in ("", "unknown", None):
+            self.assertFalse(mr.mips_stack_supported(v))
+
+    def test_available_stacks(self):
+        self.assertEqual(mr.available_stacks("1.19.30"),
+                         ["gvisor", "system", "mixed"])
+        self.assertEqual(mr.available_stacks("1.19.31"),
+                         ["gvisor", "system", "mixed", "mips"])
+
+    def test_pick_stack_rejects_garbage(self):
+        self.assertEqual(mr._pick_stack("нет-такого", True, "gvisor"),
+                         "gvisor")
+        self.assertEqual(mr._pick_stack("mixed", True, "gvisor"), "mixed")
 
 
 if __name__ == "__main__":

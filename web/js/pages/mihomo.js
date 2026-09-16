@@ -464,16 +464,30 @@ rules:
             </div>`;
     }
 
+    // Подписи стеков TUN. Набор самих значений приходит с сервера
+    // (routingOpts.stacks): `mips` понимает только mihomo >= 1.19.31, а на
+    // более старом бинаре незнакомое значение stack — не игнорируемое поле,
+    // а «invalid tun stack» на весь конфиг.
+    const STACK_LABELS = {
+        gvisor: 'gvisor — надёжно, выше CPU',
+        system: 'system — kernel, низкий CPU',
+        mixed:  'mixed',
+        mips:   'mips — лёгкий стек для слабых роутеров (1.19.31+)',
+    };
+
     function stackSelectHtml(prefix, f, recommend) {
         const opt = (v, label) =>
             `<option value="${v}" ${f.stack === v ? 'selected' : ''}>${label}</option>`;
+        const stacks = (routingOpts && routingOpts.stacks)
+            || ['gvisor', 'system', 'mixed'];
+        const items = stacks
+            .map(s => opt(s, STACK_LABELS[s] || s))
+            .join('\n                    ');
         return `
             <label style="font-size:12px;">Стек TUN
                 <select onchange="MihomoPage.set${prefix}('stack', this.value)">
                     ${opt('', 'авто (' + recommend + ')')}
-                    ${opt('gvisor', 'gvisor — надёжно, выше CPU')}
-                    ${opt('system', 'system — kernel, низкий CPU')}
-                    ${opt('mixed', 'mixed')}
+                    ${items}
                 </select>
             </label>`;
     }
