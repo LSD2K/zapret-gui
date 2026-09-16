@@ -10,8 +10,9 @@ dnsmasq >= 2.87). Это даёт возможность маршрутизир�
 Этот модуль умеет:
   * детектить dnsmasq и его основной конфиг
   * добавлять (один раз!) include на наш управляемый файл
+  * прописывать наш файл в ujail-mount'ы procd на OpenWrt
   * писать управляемый файл с ipset=/nftset= директивами
-  * перезагружать dnsmasq через SIGHUP
+  * перезапускать dnsmasq (SIGHUP конфиг НЕ перечитывает)
 
 ВАЖНО: основной dnsmasq.conf никогда полностью не переписывается —
 только append-once с маркером.
@@ -38,6 +39,19 @@ MANAGED_FILENAME = "zapret-gui-awg-routing.conf"
 # Marker-файл auto-setup: фиксируем, ЧТО мы поменяли в системе,
 # чтобы потом точно так же откатить.
 SETUP_STATE_FILE = "/var/lib/zapret-gui/dnsmasq-auto-setup.json"
+
+# OpenWrt: UCI-список в секции `config dnsmasq` файла /etc/config/dhcp,
+# каждый элемент которого init-скрипт отдаёт в `procd_add_jail_mount`.
+#
+# dnsmasq на OpenWrt запускается procd внутри ujail, и ВНУТРЬ джейла
+# прокидывается только явный список путей (см. package/network/services/
+# dnsmasq/files/dnsmasq.init: `config_list_foreach "$cfg" addnmount
+# append_extramount` → `procd_add_jail_mount $EXTRA_MOUNT`). /etc/dnsmasq.conf
+# и conf-dir (по умолчанию /tmp/dnsmasq.d) там есть, а /etc/dnsmasq.d — нет.
+# Поэтому `conf-file=/etc/dnsmasq.d/zapret-gui-awg-routing.conf` для dnsmasq
+# в джейле указывает в никуда: он не стартует, унося DHCP и DNS роутера
+# (issue #332). Лечится добавлением нашего файла в addnmount.
+UCI_ADDNMOUNT_OPTION = "addnmount"
 
 # Максимальная длина строки в конфиге dnsmasq.
 #
@@ -119,6 +133,12 @@ def _read_file(path):
         return ""
 
 
+def _strip_generated_at(text):
+    """Текст managed-файла без строки-таймстампа «# Generated at ...»."""
+    return "\n".join(ln for ln in (text or "").splitlines()
+                      if not ln.startswith("# Generated at "))
+
+
 def _which(name):
     rc, out, _e = _run(["which", name])
     return out.strip() if rc == 0 and out.strip() else ""
@@ -143,6 +163,8 @@ class DnsmasqIntegration:
 
     def __init__(self):
         self._cached_status = None
+        self._jailed = None
+        self._uci_sections = None
 
     # ─────── detect ───────
 
@@ -292,9 +314,177 @@ class DnsmasqIntegration:
             "confdir":          self.find_confdir(main_conf) if main_conf else "",
             "managed_file":     managed,
             "include_present":  include_present,
+            "jailed":           self.uses_procd_jail(),
+            "jail_mount_ok":    self.jail_mount_present(managed),
             "supports_nftset":  self.supports_nftset() if binary else False,
             "supports_ipset":   self.supports_ipset() if binary else False,
         }
+
+    # ─────── OpenWrt: ujail-mount'ы procd ───────
+
+    def uses_procd_jail(self) -> bool:
+        """
+        Запускается ли dnsmasq через procd в ujail (OpenWrt)?
+
+        Признак — init-скрипт /etc/init.d/dnsmasq, который вызывает
+        `procd_add_jail`, плюс живой UCI с /etc/config/dhcp. На Entware
+        (Keenetic), Debian и обычном Linux всё это отсутствует, и метод
+        честно отвечает False — там джейла нет и трогать нечего.
+        """
+        if self._jailed is not None:
+            return self._jailed
+        init = "/etc/init.d/dnsmasq"
+        jailed = (os.path.isfile(init)
+                  and os.path.isfile("/etc/config/dhcp")
+                  and bool(_which("uci"))
+                  and "procd_add_jail" in _read_file(init))
+        self._jailed = jailed
+        return jailed
+
+    def _uci_dnsmasq_sections(self):
+        """
+        Имена секций `config dnsmasq` из /etc/config/dhcp.
+
+        Мемоизируем на время жизни объекта: статус маршрутизации UI
+        опрашивает постоянно, а секции за один запрос не меняются
+        (менеджер создаётся заново на каждый вызов API).
+        """
+        if self._uci_sections is not None:
+            return list(self._uci_sections)
+        uci = _which("uci")
+        if not uci:
+            return []
+        rc, out, _e = _run([uci, "show", "dhcp"], timeout=5)
+        if rc != 0:
+            return []
+        names = []
+        for line in (out or "").splitlines():
+            line = line.strip()
+            key, _eq, val = line.partition("=")
+            # `dhcp.cfg01411c=dnsmasq` либо `dhcp.@dnsmasq[0]=dnsmasq`
+            if val.strip().strip("'\"") != "dnsmasq":
+                continue
+            if key.count(".") != 1:      # опция, а не заголовок секции
+                continue
+            sec = key.split(".", 1)[1]
+            if sec and sec not in names:
+                names.append(sec)
+        self._uci_sections = names
+        return list(names)
+
+    def _uci_addnmount_values(self, section):
+        """Текущий список addnmount секции (может быть пустым)."""
+        uci = _which("uci")
+        if not uci:
+            return []
+        rc, out, _e = _run(
+            [uci, "get", "dhcp.%s.%s" % (section, UCI_ADDNMOUNT_OPTION)],
+            timeout=5)
+        if rc != 0:
+            return []
+        # uci отдаёт список через пробел; в наших путях пробелов нет.
+        return [v for v in (out or "").split() if v]
+
+    def ensure_jail_mount(self, path=""):
+        """
+        Прокинуть `path` внутрь ujail dnsmasq (OpenWrt), чтобы он смог
+        прочитать наш managed-файл.
+
+        Идемпотентно: если путь уже в addnmount — ничего не делаем.
+        На системах без procd-джейла — no-op со `skipped`.
+        """
+        if not path:
+            path = self.managed_file_path(self.find_main_config())
+        if not self.uses_procd_jail():
+            return {"ok": True, "skipped": True, "changed": False,
+                    "reason": "dnsmasq не в procd-ujail"}
+
+        uci = _which("uci")
+        sections = self._uci_dnsmasq_sections()
+        if not sections:
+            return {"ok": False, "changed": False,
+                    "error": "секция `config dnsmasq` в /etc/config/dhcp"
+                             " не найдена"}
+
+        changed = False
+        for sec in sections:
+            if path in self._uci_addnmount_values(sec):
+                continue
+            rc, _o, err = _run(
+                [uci, "add_list",
+                 "dhcp.%s.%s=%s" % (sec, UCI_ADDNMOUNT_OPTION, path)],
+                timeout=5)
+            if rc != 0:
+                _run([uci, "revert", "dhcp"], timeout=5)
+                return {"ok": False, "changed": False,
+                        "error": "uci add_list dhcp.%s.%s: %s"
+                                 % (sec, UCI_ADDNMOUNT_OPTION,
+                                    (err or "").strip() or "rc=%d" % rc)}
+            changed = True
+
+        if changed:
+            rc, _o, err = _run([uci, "commit", "dhcp"], timeout=10)
+            if rc != 0:
+                _run([uci, "revert", "dhcp"], timeout=5)
+                return {"ok": False, "changed": False,
+                        "error": "uci commit dhcp: %s"
+                                 % ((err or "").strip() or "rc=%d" % rc)}
+            log.info("dnsmasq: %s добавлен в ujail-mount'ы (addnmount)" % path,
+                     source="routing")
+        return {"ok": True, "changed": changed, "path": path,
+                "sections": sections}
+
+    def remove_jail_mount(self, path=""):
+        """
+        Снять `path` из addnmount — симметрия к ensure_jail_mount().
+
+        Нужна, когда domain-правил не осталось: иначе в /etc/config/dhcp
+        навсегда остаётся ujail-mount на файл, которого больше нет.
+        """
+        if not path:
+            path = self.managed_file_path(self.find_main_config())
+        if not self.uses_procd_jail():
+            return {"ok": True, "skipped": True, "changed": False,
+                    "reason": "dnsmasq не в procd-ujail"}
+
+        uci = _which("uci")
+        changed = False
+        for sec in self._uci_dnsmasq_sections():
+            if path not in self._uci_addnmount_values(sec):
+                continue
+            rc, _o, err = _run(
+                [uci, "del_list",
+                 "dhcp.%s.%s=%s" % (sec, UCI_ADDNMOUNT_OPTION, path)],
+                timeout=5)
+            if rc != 0:
+                _run([uci, "revert", "dhcp"], timeout=5)
+                return {"ok": False, "changed": False,
+                        "error": "uci del_list dhcp.%s.%s: %s"
+                                 % (sec, UCI_ADDNMOUNT_OPTION,
+                                    (err or "").strip() or "rc=%d" % rc)}
+            changed = True
+
+        if changed:
+            rc, _o, err = _run([uci, "commit", "dhcp"], timeout=10)
+            if rc != 0:
+                _run([uci, "revert", "dhcp"], timeout=5)
+                return {"ok": False, "changed": False,
+                        "error": "uci commit dhcp: %s"
+                                 % ((err or "").strip() or "rc=%d" % rc)}
+            log.info("dnsmasq: %s убран из ujail-mount'ов (addnmount)" % path,
+                     source="routing")
+        return {"ok": True, "changed": changed, "path": path}
+
+    def jail_mount_present(self, path="") -> bool:
+        """Прокинут ли `path` внутрь джейла (для status/доктора)."""
+        if not path:
+            path = self.managed_file_path(self.find_main_config())
+        if not self.uses_procd_jail():
+            return True     # джейла нет — читать файл ничто не мешает
+        for sec in self._uci_dnsmasq_sections():
+            if path in self._uci_addnmount_values(sec):
+                return True
+        return False
 
     # ─────── include management ───────
 
@@ -345,9 +535,21 @@ class DnsmasqIntegration:
             except (IOError, OSError) as e:
                 return {"ok": False, "error": "Не удалось создать %s: %s" % (managed, e)}
 
+        # ujail ДО include: на OpenWrt dnsmasq сидит в джейле и видит только
+        # явно прокинутые пути. Если сначала дописать `conf-file=` в
+        # dnsmasq.conf, а mount не получится — dnsmasq при следующем старте
+        # упадёт на нечитаемом файле и утащит с собой DHCP/DNS (issue #332).
+        # Поэтому сначала mount, и только если он удался — include.
+        jail = self.ensure_jail_mount(managed)
+        if not jail.get("ok"):
+            return {"ok": False,
+                    "error": "Не удалось прокинуть %s внутрь ujail dnsmasq:"
+                             " %s" % (managed, jail.get("error")),
+                    "jail_mount": jail}
+
         if self._main_has_include(main_conf, managed):
             return {"ok": True, "added": False, "main_config": main_conf,
-                    "managed_file": managed}
+                    "managed_file": managed, "jail_mount": jail}
 
         # Append-once.
         try:
@@ -358,7 +560,7 @@ class DnsmasqIntegration:
 
         log.info("dnsmasq: include добавлен в %s" % main_conf, source="routing")
         return {"ok": True, "added": True, "main_config": main_conf,
-                "managed_file": managed}
+                "managed_file": managed, "jail_mount": jail}
 
     def remove_include(self):
         """
@@ -418,12 +620,20 @@ class DnsmasqIntegration:
             return {"ok": False,
                     "error": "Не удалось удалить %s: %s" % (managed, e)}
 
+        # Хвост в /etc/config/dhcp: ujail-mount на файл, которого больше нет.
+        # Снимаем ровно наш путь; чужие addnmount не трогаем.
+        jail = self.remove_jail_mount(managed)
+        if not jail.get("ok"):
+            log.warning("dnsmasq: не удалось снять ujail-mount %s: %s"
+                        % (managed, jail.get("error")), source="routing")
+
         if removed_lines or removed_file:
             log.info("dnsmasq: include и managed-файл сняты (%s)" % managed,
                      source="routing")
         return {"ok": True, "removed_include": bool(removed_lines),
                 "removed_file": removed_file, "main_config": main_conf,
-                "managed_file": managed}
+                "managed_file": managed, "jail_mount": jail,
+                "removed_jail_mount": bool(jail.get("changed"))}
 
     # ─────── managed file write/read ───────
 
@@ -503,6 +713,14 @@ class DnsmasqIntegration:
             lines.append("")
 
         text = "\n".join(lines).rstrip() + "\n"
+
+        # Менялось ли что-то ПО СУЩЕСТВУ? Строку «Generated at» игнорируем:
+        # она меняется всегда, а рестартовать dnsmasq на каждый повторный
+        # apply одного и того же набора правил — значит ронять DNS/DHCP на
+        # ровном месте.
+        changed = _strip_generated_at(_read_file(managed)) != \
+            _strip_generated_at(text)
+
         # MR-24: Атомарная запись во избежание повреждения файла при сбоях питания/uninstall/OOM
         tmp_managed = managed + ".tmp"
         try:
@@ -520,12 +738,20 @@ class DnsmasqIntegration:
             except OSError:
                 pass
             return {"ok": False, "error": "Запись %s: %s" % (managed, e)}
-        return {"ok": True, "managed_file": managed, "bytes": len(text)}
+        return {"ok": True, "managed_file": managed, "bytes": len(text),
+                "changed": changed}
 
     # ─────── reload ───────
 
     def reload(self):
-        """SIGHUP в dnsmasq, чтобы он перечитал конфиг."""
+        """
+        SIGHUP в dnsmasq: сбрасывает кэш и перечитывает hosts-файлы.
+
+        ВНИМАНИЕ: конфиг SIGHUP НЕ перечитывает (man dnsmasq: «Note that
+        SIGHUP does not re-read the configuration file»). Для новых
+        `nftset=`/`ipset=` директив и новых ujail-mount'ов нужен restart()
+        — см. _rebuild_managed_dnsmasq в core/routing/domain_rule.py.
+        """
         pid = self.get_pid()
         if pid > 0:
             try:
@@ -541,6 +767,61 @@ class DnsmasqIntegration:
         if rc == 0:
             return {"ok": True, "pid": 0}
         return {"ok": False, "error": err.strip() or "dnsmasq не запущен"}
+
+    def restart(self):
+        """
+        Полный рестарт dnsmasq — единственный способ применить изменения
+        конфига.
+
+        Почему не SIGHUP: dnsmasq по SIGHUP перечитывает только hosts-файлы,
+        но НЕ конфиг, — то есть свежие `nftset=`/`ipset=` директивы из
+        managed-файла так и остаются неприменёнными, set'ы не наполняются,
+        и domain-роутинг работает «на бумаге». Плюс на OpenWrt procd
+        пересобирает ujail (и, значит, подхватывает новый addnmount) только
+        при рестарте инстанса.
+
+        Порядок: systemctl (если есть юнит) → init-скрипт → SIGHUP как
+        последний фолбэк, чтобы на экзотике не остаться совсем без
+        перезагрузки.
+
+        Остановленный dnsmasq НЕ поднимаем: запуск — дело auto_setup, а
+        «снял последнее domain-правило» не повод стартовать чужой сервис.
+        Поведение в этом случае ровно как у reload().
+        """
+        if self.get_pid() <= 0:
+            return self.reload()
+
+        if self._has_dnsmasq_service():
+            res = self._step_restart_unit("dnsmasq")
+            if res.get("ok"):
+                return {"ok": True, "how": "systemctl", "pid": self.get_pid()}
+            last_err = res.get("error", "")
+        else:
+            last_err = ""
+
+        script = self._find_init_script()
+        if script:
+            rc, _o, err = _run([script, "restart"], timeout=30)
+            # init-скрипты врут кодом возврата — верим только живому pid.
+            time.sleep(0.7)
+            pid = self.get_pid()
+            if pid > 0:
+                return {"ok": True, "how": script, "pid": pid}
+            last_err = ((err or "").strip()
+                        or self._dnsmasq_config_error()
+                        or "dnsmasq не поднялся после %s restart" % script)
+
+        hup = self.reload()
+        if hup.get("ok"):
+            # Честно говорим, что это только SIGHUP: конфиг не перечитан.
+            return {"ok": True, "how": "SIGHUP", "pid": hup.get("pid", 0),
+                    "degraded": True,
+                    "error": last_err or "рестарт недоступен, сделан только"
+                                         " SIGHUP — новые директивы конфига"
+                                         " применятся после перезапуска"
+                                         " dnsmasq"}
+        return {"ok": False, "how": "", "pid": 0,
+                "error": last_err or hup.get("error") or "рестарт не удался"}
 
     # ─────── auto-setup (Debian/Ubuntu) ───────
 
@@ -1025,6 +1306,25 @@ class DnsmasqIntegration:
                 "what": "Добавить include нашего файла правил в %s" % main_conf,
                 "cmd":  "append %s" % main_conf,
             })
+        elif main_conf and not self.jail_mount_present(managed):
+            # Include уже есть (например, от старой версии), а ujail-mount'а
+            # нет — ровно то состояние, в котором dnsmasq на OpenWrt не
+            # стартует и уносит DHCP/DNS (issue #332). Чиним тем же шагом:
+            # ensure_include() идемпотентен и прокидывает mount.
+            steps.append({
+                "id":   "ensure_include",
+                "what": "Прокинуть %s внутрь ujail dnsmasq"
+                        " (addnmount в /etc/config/dhcp) — без этого dnsmasq"
+                        " не может прочитать файл и не стартует" % managed,
+                "cmd":  "uci add_list dhcp.@dnsmasq[0].addnmount=%s" % managed,
+            })
+            if status.get("running"):
+                steps.append({
+                    "id":   "restart_dnsmasq_init",
+                    "what": "Перезапустить dnsmasq, чтобы procd пересобрал"
+                            " ujail с новым mount'ом",
+                    "cmd":  "dnsmasq restart",
+                })
 
         if not status.get("running"):
             init_script = self._find_init_script()
@@ -1055,6 +1355,11 @@ class DnsmasqIntegration:
                                 "error": r.get("error", "")})
             elif sid == "start_dnsmasq_init":
                 results.append(self._step_start_init_script())
+            elif sid == "restart_dnsmasq_init":
+                r = self.restart()
+                results.append({"step": "restart_dnsmasq_init",
+                                "ok": bool(r.get("ok")),
+                                "error": r.get("error", "")})
 
         final = self.status()
         ok = all(r.get("ok") for r in results) and final.get("running")

@@ -472,6 +472,16 @@ def diagnose() -> dict:
         env.append(_check("dnsmasq", True,
                           "работает" if st.get("running")
                           else "нет (Keenetic: норм — set-путь/iproute)"))
+        # OpenWrt: dnsmasq в ujail видит только явно прокинутые пути.
+        # Include на непрокинутый файл = dnsmasq не стартует вообще,
+        # вместе с DHCP и DNS роутера (issue #332).
+        if st.get("jailed") and st.get("include_present") \
+                and not st.get("jail_mount_ok"):
+            env.append(_check(
+                "dnsmasq ujail", False,
+                "%s подключён в dnsmasq.conf, но не прокинут внутрь ujail"
+                " (addnmount в /etc/config/dhcp) — dnsmasq не сможет"
+                " стартовать" % st.get("managed_file", "")))
     except Exception as e:
         env.append(_check("dnsmasq", True, "статус не снят: %s" % e))
 

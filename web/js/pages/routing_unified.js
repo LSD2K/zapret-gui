@@ -526,8 +526,33 @@ const RoutingUnifiedPage = (() => {
                 ${dnsIntHtml()} ${platformLine}
             </div>`;
         }
+        // OpenWrt: dnsmasq работает в ujail и видит только явно
+        // прокинутые пути. Если наш файл подключён в dnsmasq.conf, но не
+        // прокинут — dnsmasq не переживёт ближайший рестарт (а с ним
+        // лягут DHCP и DNS роутера). Предупреждаем заранее.
+        const jailBroken = !!dn.jailed && !!dn.include_present
+            && !dn.jail_mount_ok;
+        const jailWarn = jailBroken
+            ? `<div class="alert alert-warning" style="margin-bottom:12px;">
+                   <div class="alert-title">dnsmasq не сможет прочитать файл правил</div>
+                   <p style="font-size:12px; margin:6px 0 10px;">
+                     На OpenWrt dnsmasq запускается в изолированном окружении
+                     (ujail) и видит только разрешённые пути.
+                     <code>${esc(dn.managed_file || '')}</code> подключён в
+                     <code>${esc(dn.main_config || '')}</code>, но внутрь ujail
+                     не прокинут — при следующем перезапуске dnsmasq не
+                     поднимется и утащит за собой DHCP и DNS роутера.
+                     Нажмите «Применить обновления dnsmasq-конфига»: путь
+                     добавится в <code>addnmount</code> секции
+                     <code>config dnsmasq</code> файла
+                     <code>/etc/config/dhcp</code>.
+                   </p>
+                   ${setupButton}
+               </div>`
+            : '';
+
         if (dnReady) {
-            return `<div style="font-size:12px; margin-bottom:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            return `${jailWarn}<div style="font-size:12px; margin-bottom:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                 <span style="color:#39c45e;">●</span>
                 <span class="text-muted">
                     Маршрутизация по доменам: dnsmasq
@@ -535,7 +560,7 @@ const RoutingUnifiedPage = (() => {
                     бэкенд <strong>${esc(preferred)}</strong>
                     ${setupApplied ? ' — настроен через GUI' : ''}
                 </span>
-                ${setupButton} ${revertButton} ${platformLine}
+                ${jailBroken ? '' : setupButton} ${revertButton} ${platformLine}
             </div>`;
         }
         if (!needWarn) {
