@@ -533,7 +533,11 @@ const Nfqws2Spec = (() => {
         // Появились в zapret2 1.0.5. Редактор обязан их знать, иначе на
         // валидной строке загорается «неизвестный флаг» (SKILL §0.1).
         '--filter-ssid-neg': { slot: 'filter', cat: 'filter', desc: 'Инверсия SSID-фильтра (1.0.5+)', arg: { type: 'enum', values: ['0', '1'], optional: true } },
-        '--filter-mark': { slot: 'filter', cat: 'filter', desc: 'Фильтр по mark пакета: mark[/mask], dec или 0xHEX (1.0.5+)', arg: { type: 'string', ex: ['0x1000', '0x1000/0xf000'] } },
+        // type:'mark', а не 'string': разбор в nfqws2 строгий (sscanf
+        // "0x%X" либо "%u"), и на кривом значении процесс не стартует
+        // вовсе — «filter mark or mask format error» + exit. То есть
+        // опечатка здесь стоит не одного профиля, а всего обхода.
+        '--filter-mark': { slot: 'filter', cat: 'filter', desc: 'Фильтр по mark пакета: mark[/mask], dec или 0xHEX (1.0.5+)', arg: { type: 'mark', ex: ['0x1000', '0x1000/0xf000'] } },
 
         // ipset / hostlist
         '--ipset':                 { slot: 'list', cat: 'list', desc: 'Include по IP/CIDR (файл)', arg: { type: 'file:ipset' } },

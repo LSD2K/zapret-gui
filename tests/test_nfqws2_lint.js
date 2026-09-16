@@ -43,6 +43,43 @@ test('spec: знает базовые флаги и функции nfqws2', () =
     assert.ok(Spec.isKnownFunc('circular'));
 });
 
+// Опции, добавленные в zapret2 1.0.5. Их отсутствие в справочнике даёт
+// «неизвестный флаг» на валидной строке (SKILL §0.1, §3.1).
+test('spec: знает опции фильтрации из zapret2 1.0.5', () => {
+    assert.ok(Spec.isKnownFlag('--filter-mark'));
+    assert.ok(Spec.isKnownFlag('--filter-ssid-neg'));
+});
+
+// --ssid-filter / --nlm-filter и их -neg — Windows-only (в nfqws.c под
+// __CYGWIN__), у нас Linux/Keenetic. Их отсутствие — не пробел, а
+// намеренная граница справочника: подсказывать неработающее хуже, чем
+// не подсказывать.
+test('spec: Windows-only опции в справочник НЕ попадают', () => {
+    assert.ok(!Spec.isKnownFlag('--ssid-filter'));
+    assert.ok(!Spec.isKnownFlag('--ssid-filter-neg'));
+    assert.ok(!Spec.isKnownFlag('--nlm-filter'));
+    assert.ok(!Spec.isKnownFlag('--nlm-filter-neg'));
+});
+
+test('lint: --filter-mark принимает dec, 0xHEX и маску', () => {
+    ['4096', '0x1000', '0x1000/0xf000', '4096/65535'].forEach(v => {
+        const r = Lint.analyze('--filter-mark=' + v + ' --lua-desync=fake');
+        assert.strictEqual(
+            warns(r).filter(d => /filter-mark/.test(d.message)).length, 0,
+            'должно быть валидно: ' + v);
+    });
+});
+
+test('lint: кривой --filter-mark ловится (nfqws2 с ним не стартует)', () => {
+    // sscanf("0x%X")/sscanf("%u") в nfqws.c: всё прочее → «filter mark or
+    // mask format error» и exit, то есть молча умирает весь обход.
+    ['abc', '0x', '0xZZ', '1/2/3', '4294967296'].forEach(v => {
+        const r = Lint.analyze('--filter-mark=' + v + ' --lua-desync=fake');
+        assert.ok(warns(r).some(d => /filter-mark/.test(d.message)),
+            'должно ругаться: ' + v);
+    });
+});
+
 test('spec: nfqws1 НЕ поддерживается', () => {
     assert.ok(!Spec.isKnownFlag('--dpi-desync'));
     assert.ok(!Spec.isKnownFlag('--dpi-desync-split-pos'));

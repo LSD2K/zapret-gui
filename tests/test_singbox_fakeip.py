@@ -21,6 +21,32 @@ def _vless():
             "tls": {"enabled": True, "server_name": "ex.com"}}
 
 
+class TestDnsFormatOrder(unittest.TestCase):
+    """
+    Окна валидности форматов DNS: typed — с 1.12, legacy — по 1.13
+    (в 1.14 удалён). Значит typed надо предпочитать везде, где он
+    вообще работает, включая «версия неизвестна».
+    """
+
+    def _order(self, ver):
+        from core.singbox_fakeip import dns_format_order
+        return dns_format_order(ver)
+
+    def test_typed_first_on_112_and_newer(self):
+        for ver in ("1.12.0", "1.13.0", "1.14.1", "1.16.0"):
+            self.assertEqual(self._order(ver), [True, False], ver)
+
+    def test_legacy_first_on_older(self):
+        for ver in ("1.8.0", "1.10.3", "1.11.9"):
+            self.assertEqual(self._order(ver), [False, True], ver)
+
+    def test_unknown_version_prefers_typed(self):
+        # Бинаря нет — конфиг ложится без проверки, а установщик принесёт
+        # последний релиз (1.14+), где legacy-DNS уже не парсится.
+        for ver in ("", None, "какая-то ерунда"):
+            self.assertEqual(self._order(ver), [True, False], repr(ver))
+
+
 class TestNormalizeSuffix(unittest.TestCase):
     def test_strips_and_dedups(self):
         out = _norm_suffix_domains(
@@ -259,23 +285,33 @@ class TestOrchestrator(unittest.TestCase):
             for p in patches:
                 p.stop()
 
-    def test_link_proxy_legacy_saved_and_validated(self):
-        mgr = _FakeMgr([{"ok": True}])               # legacy прошёл check
+    def test_link_proxy_typed_saved_and_validated(self):
+        # На 1.13 typed уже валиден (с 1.12) и переживёт обновление на
+        # 1.14, где legacy удалён, — поэтому пробуется первым.
+        mgr = _FakeMgr([{"ok": True}])               # typed прошёл check
         res = self._run(mgr, name="fi", proxy_link="vless://u@h:443",
                         domains="youtube.com")
         self.assertTrue(res["ok"])
-        self.assertEqual(res["dns_format"], "legacy")
+        self.assertEqual(res["dns_format"], "typed")
         self.assertTrue(res["fakeip"])
         self.assertEqual(mgr.saved[0], "fi")
         self.assertIn("fakeip", mgr.saved[1])         # FakeIP в сохранённом
 
-    def test_falls_back_to_typed_when_legacy_rejected(self):
-        # legacy отвергнут, typed принят → формат typed.
-        mgr = _FakeMgr([{"ok": False, "error": "legacy removed"},
+    def test_falls_back_to_legacy_when_typed_rejected(self):
+        # typed отвергнут (сборка старше 1.12) → берём legacy.
+        mgr = _FakeMgr([{"ok": False, "error": "unknown field type"},
                         {"ok": True}])
         res = self._run(mgr, proxy_link="vless://u@h:443", domains="a.com")
         self.assertTrue(res["ok"])
-        self.assertEqual(res["dns_format"], "typed")
+        self.assertEqual(res["dns_format"], "legacy")
+
+    def test_old_binary_tries_legacy_first(self):
+        # До 1.12 typed-серверов не существует — начинаем с legacy.
+        mgr = _FakeMgr([{"ok": True}])
+        res = self._run(mgr, ver="1.11.0", proxy_link="vless://u@h:443",
+                        domains="a.com")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["dns_format"], "legacy")
 
     def test_no_binary_saves_without_check(self):
         mgr = _FakeMgr([{"ok": False, "no_binary": True}])
@@ -283,6 +319,16 @@ class TestOrchestrator(unittest.TestCase):
                         domains="a.com")
         self.assertTrue(res["ok"])
         self.assertTrue(res["warning"])
+
+    def test_no_binary_saves_typed(self):
+        # Бинаря нет → проверить нечем, конфиг ложится как есть. Ставим мы
+        # ПОСЛЕДНИЙ релиз (1.14+), где legacy-DNS удалён, поэтому вслепую
+        # писать надо typed — иначе конфиг мёртв сразу после установки.
+        mgr = _FakeMgr([{"ok": False, "no_binary": True}])
+        res = self._run(mgr, ver="", installed=False,
+                        proxy_link="vless://u@h:443", domains="a.com")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["dns_format"], "typed")
 
     def test_guard_requires_proxy(self):
         mgr = _FakeMgr([{"ok": True}])

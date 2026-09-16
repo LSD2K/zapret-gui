@@ -89,6 +89,63 @@ class TestValidate(unittest.TestCase):
         errors = validate(cfg)
         self.assertTrue(any("tag" in e and "встречается" in e for e in errors))
 
+    def test_types_added_in_114_are_known(self):
+        # anytls (1.12), snell и bridge (1.14) — валидные outbound'ы
+        # апстрима. Пока их не было в списке, чужой конфиг получал
+        # ложное «неизвестный тип».
+        for t in ("anytls", "snell", "bridge"):
+            errors = validate({"outbounds": [{"type": t, "tag": t}]})
+            self.assertEqual(errors, [], "%s должен быть известным" % t)
+
+
+class TestValidateEndpoints(unittest.TestCase):
+    """
+    Секция `endpoints` (1.11+). С 1.13 это ЕДИНСТВЕННЫЙ способ поднять
+    WireGuard (outbound type:wireguard удалён), с 1.14 там же живут
+    openvpn/openconnect. Конфиг из одних endpoints валиден: в схеме
+    апстрима outbounds помечены omitempty, а пустой список менеджер
+    закрывает автоматическим direct (adapter/outbound/manager.go).
+    """
+
+    WG = {"type": "wireguard", "tag": "wg-ep",
+          "address": ["10.0.0.2/32"], "private_key": "k",
+          "peers": [{"address": "1.2.3.4", "port": 51820,
+                     "public_key": "p", "allowed_ips": ["0.0.0.0/0"]}]}
+
+    def test_endpoints_only_config_is_valid(self):
+        cfg = {"endpoints": [self.WG], "route": {"final": "wg-ep"}}
+        self.assertEqual(validate(cfg), [])
+
+    def test_known_endpoint_types(self):
+        for t in ("wireguard", "tailscale", "openvpn-client",
+                  "openvpn-server", "openconnect"):
+            errors = validate({"endpoints": [{"type": t, "tag": t}]})
+            self.assertEqual(errors, [], "%s должен быть известным" % t)
+
+    def test_unknown_endpoint_type_is_warning(self):
+        errors = validate({"endpoints": [{"type": "made_up", "tag": "a"}]})
+        self.assertTrue(any("неизвестный тип" in e for e in errors))
+
+    def test_endpoint_without_type(self):
+        errors = validate({"endpoints": [{"tag": "a"}]})
+        self.assertTrue(any("type" in e for e in errors))
+
+    def test_tag_collision_between_sections(self):
+        # route ссылается на outbound'ы и endpoint'ы одинаково, поэтому
+        # одинаковый тег в разных секциях — такой же конфликт.
+        cfg = {"outbounds": [{"type": "direct", "tag": "dup"}],
+               "endpoints": [dict(self.WG, tag="dup")]}
+        errors = validate(cfg)
+        self.assertTrue(any("dup" in e and "встречается" in e
+                            for e in errors))
+
+    def test_nothing_to_send_traffic_to(self):
+        for cfg in ({}, {"outbounds": []}, {"endpoints": []},
+                    {"outbounds": [], "endpoints": []}):
+            errors = validate(cfg)
+            self.assertTrue(any("outbounds" in e and "endpoints" in e
+                                for e in errors), repr(cfg))
+
 
 class TestRender(unittest.TestCase):
 

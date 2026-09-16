@@ -34,7 +34,14 @@ import tempfile
 #   HeaderProtectionKey    — ключ шифрования полей заголовка (server-side,
 #                            нонсом служит crypto-паддинг S1..S4, поэтому
 #                            требует S1..S4 >= 12); генерится `awg genkey`;
-#   ContentPaddingAddition — доп. паддинг содержимого (uint32/range);
+#   ContentPaddingAddition — доп. паддинг содержимого (uint32/range).
+#                            С v3.1.20260828 добавка ограничена не MTU, а
+#                            UDP-окном пира (peer.udpWindow, стартовое
+#                            DefaultUdpWindow=500 байт, дальше растёт до
+#                            самого большого виденного пакета). Пакет уже
+#                            больше окна → добавка нулевая. То есть на
+#                            «тихом» туннеле паддинга заметно меньше
+#                            заказанного, и это не ошибка конфига;
 #   Rekey*/RejectAfterTime/KeepaliveTimeout/MaxHandshakeAttempts —
 #                            тайминги WireGuard (uint32/range, секунды).
 # Тип `range` = "a-b" | "a" | "(off)", поэтому числами их не валидируем.
@@ -57,10 +64,16 @@ AWG3_INTERFACE_FIELDS = (
 #                    только с этим флагом (device/receive.go,
 #                    DeterminePacketTypeAndPadding) — включённый на одной
 #                    стороне и выключенный на другой ломает handshake;
-#   DisableCookies — не отвечать cookie-reply на отброшенный handshake
-#                    (device/send.go, SendHandshakeCookie). Cookie-ответ —
-#                    заметная сигнатура WireGuard; ценой отказа от неё
-#                    выключается штатная анти-DoS-защита.
+#   DisableCookies — выключает cookie-механизм целиком. Не только не
+#                    отправляет cookie-reply на отброшенный handshake
+#                    (device/send.go, SendHandshakeCookie), но с
+#                    v3.1.20260828 и не заходит в under-load-путь на
+#                    приёме: MAC2 во входящем handshake не проверяется
+#                    вовсе (device/receive.go, `if !disableCookies &&
+#                    device.IsUnderLoad()`). Cookie-ответ — заметная
+#                    сигнатура WireGuard, но это же и штатная анти-DoS-
+#                    защита: пользователю это «анти-DoS не работает», а
+#                    не «мы молчим в ответ».
 # Значения — `on`/`off`/`0`/`1` (parse_bool в src/config.c). `true`/`false`
 # тулза НЕ принимает и отбрасывает конфиг целиком, см. validate().
 AWG31_INTERFACE_FIELDS = (

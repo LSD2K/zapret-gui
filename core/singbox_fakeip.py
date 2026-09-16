@@ -35,6 +35,25 @@ def _parse_minor(version: str):
     return (int(m.group(1)), int(m.group(2)))
 
 
+def dns_format_order(version: str) -> list:
+    """
+    В каком порядке пробовать форматы DNS: [typed_first, …].
+
+    Окна валидности пересекаются: typed-серверы живут с 1.12, legacy
+    (`dns.servers[].address`) — по 1.13 включительно, в 1.14 удалён.
+
+    Версия НЕ определилась (бинаря ещё нет) — typed. Раньше здесь брался
+    legacy как «самый совместимый», но совместимость успела перевернуться:
+    установщик ставит ПОСЛЕДНИЙ релиз, а это 1.14+, где legacy-DNS не
+    парсится. Без бинаря проверить конфиг нечем, он сохраняется как есть —
+    то есть выбор вслепую становился нерабочим ровно в тот момент, когда
+    пользователь доходил до установки.
+    """
+    ver = _parse_minor(version)
+    legacy_first = ver != (0, 0) and ver < (1, 12)
+    return [False, True] if legacy_first else [True, False]
+
+
 # ─────────────────────── proxy resolution ───────────────────────
 
 def _resolve_proxy(proxy_link: str, proxy_config: str) -> dict:
@@ -165,10 +184,10 @@ def build_and_save(*, name: str = "fakeip", proxy_link: str = "",
             typed_dns=typed, capture_dns=fw_capture, dns_port=dns_port)
         return render_conf(cfg)
 
-    # Порядок форматов: для свежих движков (≥1.14, legacy-DNS удалён) — typed
-    # первым, иначе legacy (он валиден на 1.8–1.13, т.е. почти везде сейчас).
-    ver = _parse_minor(get_singbox_detector().detect_binary().get("version"))
-    order = [True, False] if ver >= (1, 14) else [False, True]
+    # Порядок форматов — см. dns_format_order (typed везде, кроме заведомо
+    # старого бинаря: legacy-DNS удалён в 1.14, а ставим мы последний релиз).
+    order = dns_format_order(
+        get_singbox_detector().detect_binary().get("version"))
 
     mgr = get_singbox_manager()
     chosen_text, fmt, warning = None, "", ""
@@ -177,7 +196,7 @@ def build_and_save(*, name: str = "fakeip", proxy_link: str = "",
         text = _mk(typed)
         chk = mgr.check_text(text)
         if chk.get("no_binary"):
-            # Проверить нечем — берём первый (самый совместимый) формат.
+            # Проверить нечем — берём первый из dns_format_order.
             chosen_text = text
             fmt = "typed" if typed else "legacy"
             warning = "sing-box не установлен — конфиг сохранён без проверки"
@@ -270,8 +289,8 @@ def build_lite_route_and_save(*, name: str = "lite-route", proxy_link: str = "",
             pass
         return render_conf(cfg)
 
-    ver = _parse_minor(get_singbox_detector().detect_binary().get("version"))
-    order = [True, False] if ver >= (1, 14) else [False, True]
+    order = dns_format_order(
+        get_singbox_detector().detect_binary().get("version"))
 
     mgr = get_singbox_manager()
     chosen_text, fmt, warning, last_err = None, "", "", ""
