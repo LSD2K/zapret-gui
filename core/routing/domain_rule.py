@@ -17,11 +17,12 @@ ipset/nftset+fwmark:
     3. Добавить mark-правило в firewall (mark = mark_for(rule)).
     4. Добавить ip rule fwmark <mark> lookup <table_for(iface)>.
     5. Гарантировать default-маршрут в таблице.
-    6. Перегенерить managed dnsmasq-файл + SIGHUP.
+    6. Перегенерить managed dnsmasq-файл и перезапустить dnsmasq
+       (SIGHUP конфиг не перечитывает).
 
   remove:
     Симметрично: удаляем ip rule, mark-правило, set, перегенерим
-    managed-файл, SIGHUP dnsmasq.
+    managed-файл, перезапускаем dnsmasq.
 
 Файл собирается из ВСЕХ активных domain-правил, поэтому apply/remove
 одного правила всегда вызывают full rewrite managed-файла.
@@ -247,18 +248,38 @@ def _rebuild_managed_dnsmasq():
         if not rm.get("ok"):
             log.warning("dnsmasq include cleanup: %s" % rm.get("error"),
                         source="routing")
-        reload_res = dn.reload()
+        # Рестарт только если что-то реально сняли: иначе на каждом
+        # «нечего убирать» мы бы дёргали DNS/DHCP впустую.
+        touched = (rm.get("removed_include") or rm.get("removed_file")
+                   or rm.get("removed_jail_mount"))
+        reload_res = dn.restart() if touched else dn.reload()
         return {"ok": bool(rm.get("ok")), "cleanup": rm,
                 "reload": reload_res}
 
-    dn.ensure_include()
+    inc_res = dn.ensure_include()
+    if not inc_res.get("ok"):
+        # Чаще всего это OpenWrt: не удалось прокинуть managed-файл внутрь
+        # ujail. include в dnsmasq.conf при этом НЕ добавлен — dnsmasq
+        # продолжит работать, просто без нашего domain-роутинга.
+        log.warning("dnsmasq include: %s" % inc_res.get("error"),
+                    source="routing")
+        return inc_res
     write_res = dn.write_managed_file(blocks)
     if not write_res.get("ok"):
         log.warning("dnsmasq managed-file: %s" % write_res.get("error"),
                     source="routing")
         return write_res
-    reload_res = dn.reload()
+
+    # SIGHUP конфиг НЕ перечитывает (man dnsmasq), а на OpenWrt ujail-mount'ы
+    # procd пересобирает только при рестарте инстанса. Поэтому при любом
+    # реальном изменении конфига нужен именно restart, иначе свежие
+    # nftset=/ipset= директивы не применятся и set останется пустым
+    # (issue #332). Если ничего не изменилось — обходимся дешёвым SIGHUP.
+    changed = (write_res.get("changed") or inc_res.get("added")
+               or (inc_res.get("jail_mount") or {}).get("changed"))
+    reload_res = dn.restart() if changed else dn.reload()
     return {"ok": write_res.get("ok") and reload_res.get("ok"),
+            "include": inc_res,
             "wrote":  write_res,
             "reload": reload_res}
 
