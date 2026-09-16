@@ -1,0 +1,1031 @@
+# План реализации: MCP-сервер в zapret-gui (промт для ИИ-агента)
+
+> Этот файл — **готовое задание для нейросети** (Claude Code / Codex / Cursor),
+> которая будет реализовывать фичу. Его можно скормить агенту целиком.
+> Референс-идея: MCP-сервер в проекте [b4](https://github.com/DanielLavrushin/b4)
+> (`/api/mcp`, Bearer-токен, два переключателя разрешений, read-only по
+> умолчанию, вырезание секретов из ответов). Мы делаем то же самое, но
+> с упором на **работу со стратегиями nfqws2 в цикле с обратной связью**.
+
+---
+
+## 0. Роль и задача
+
+Ты — инженер проекта `zapret-gui` (Python 3 + Bottle на роутере Keenetic/
+OpenWrt/Linux, vanilla-JS SPA, один `settings.json`). Твоя задача — добавить
+в проект **MCP-сервер** (Model Context Protocol), через который внешняя
+языковая модель (Claude Desktop, Claude Code, LM Studio, Cline, любой
+MCP-клиент) управляет всем функционалом GUI и, главное, **подбирает и
+отлаживает стратегии nfqws2, видя результат каждого своего изменения**.
+
+### Обязательное чтение перед первой строкой кода
+
+1. `AGENTS.md` — конвенции проекта (русский язык в коде и коммитах, никаких
+   новых зависимостей, синглтоны `get_*_manager()`).
+2. `CoderManual.md` §1 (стек и принципы), §4 (`app.py`), §5.1–5.3 (ядро,
+   nfqws2, тестеры), §6 (REST-конвенции), §7 (SPA), §8 (воркеры),
+   §9 (`settings.json`), §13 («куда добавить X»).
+3. `.claude/skills/nfqws2-strategies/SKILL.md` — **целиком**. Это источник
+   истины по nfqws2: CLI-флаги, lua-функции, payload-типы, инварианты
+   («тихий 0%»), сборка argv, сканер, blockcheck2.
+4. Код, который будешь переиспользовать (не переписывать!):
+   - `core/strategy_builder.py` — `build_nfqws_args`, `build_preview_command`,
+     `autowrap_bare_trick`, CRUD user-стратегий;
+   - `core/nfqws_manager.py` — `compose_command`, `start/stop/restart`,
+     `get_status`, **`dry_run()` (валидация через `--intercept=0`)**;
+   - `core/strategy_scanner.py` — `_save_current_state` / `_restore_previous_state`
+     / `_probe_one_strategy` / `_wrap_trick_args` / `_deep_probe` / baseline-логика;
+   - `core/models.py` — `SingleTestResult`, `StrategyProbeResult`,
+     `StrategyScanReport`, `CatalogEntry`, `DPIClassification`;
+   - `core/testers/probe.py` (`PROBE_CODES`), `testers/tls_tester.py`,
+     `body_tester.py`, `quic_tester.py`, `stun_tester.py`;
+   - `core/blockcheck2.py` (оригинальный скрипт bol-van + стрим),
+     `core/blockcheck.py` (наши пробы + классификация DPI);
+   - `core/log_buffer.py` (кольцевой лог + SSE), `core/config_manager.py`,
+     `core/strategy_state.py`, `core/lua_manager.py`, `core/blob_registry.py`,
+     `core/catalog_loader.py`, `core/targets.py`, `core/scan_targets.py`;
+   - `api/__init__.py:register_routes`, `tests/_wsgi_client.py`.
+
+### Жёсткие ограничения
+
+- **Только stdlib.** Код едет на роутер с `python3-light`; сеть — `urllib`,
+  JSON — `json`. Никаких `mcp`, `fastmcp`, `pydantic`, `jsonschema`, `httpx`.
+  JSON Schema мы **генерируем и валидируем сами** (простым валидатором на
+  ~150 строк: типы, required, enum, диапазоны).
+- **Русский язык** в комментариях, docstring'ах, логах, UI и коммитах.
+  Описания инструментов (`description` в `tools/list`) — **по-английски
+  + по-русски одной строкой**, т.к. их читает модель (пример ниже).
+- **Ничего не ломать.** Существующие REST-роуты, формат ответов
+  (`{ok: bool, …}`), поведение сканера и firewall остаются как есть.
+- **Никаких shell=True**, никакой конкатенации в команды: только `argv`-списки.
+- Ответы инструментов должны быть **компактными**: их читает модель с
+  ограниченным контекстом. Пагинация, лимиты, `truncated: true`.
+
+---
+
+## 1. Что именно делаем (обзор фичи)
+
+1. **Транспорт.** `POST /api/mcp` — Streamable HTTP (JSON-RPC 2.0 в теле,
+   ответ `application/json`). `GET`/`DELETE` → `405` (это нормально для
+   транспорта без SSE-стрима, так же делает b4). Дополнительно — **legacy
+   SSE-транспорт** (`GET /api/mcp/sse` + `POST /api/mcp/messages`) за
+   отдельным флагом: он нужен MCP-клиентам, которые ещё не умеют Streamable
+   HTTP (в частности некоторые сборки LM Studio). И **stdio-мост**
+   `zapret-gui mcp --stdio` для клиентов, умеющих только stdio (и для
+   запуска по SSH).
+2. **Авторизация.** Bearer-токен (64 hex), отдельный от GUI-пароля, хранится
+   в `settings.json` (`mcp.token`), сравнение через `hmac.compare_digest`.
+   При включённом MCP токен обязателен. Проверка `Origin` (защита от
+   DNS-rebinding). Рейт-лимит.
+3. **Разрешения.** Набор переключателей; `tools/list` **строится динамически**
+   из них, и при смене шлётся `notifications/tools/list_changed` — модель
+   физически не видит инструментов, которые ей не разрешены (подход b4).
+   Всё, что пишет, — по whitelist'у поддеревьев `settings.json` с
+   deny-списком полей; новая настройка по умолчанию **не** доступна на запись.
+4. **Секреты не покидают роутер.** Единая функция редактирования вывода:
+   пароль GUI, `mcp.token`, приватные ключи AWG/WARP, UUID/пароли sing-box и
+   mihomo, секрет Telegram-прокси, URL подписок, токены — маскируются во
+   **всех** ответах (тест-сторож перебирает все инструменты).
+5. **Инструменты (tools)** — на весь функционал: статус, логи, настройки,
+   стратегии, hostlist'ы/ipset'ы/blob'ы/lua, firewall, диагностика,
+   blockcheck/blockcheck2/сканер, sing-box, mihomo, AWG, usque/WARP,
+   Telegram-туннель, Opera Proxy, единый слой маршрутизации, обновления.
+6. **Ресурсы (resources)** — справочники, которые модель читает, чтобы не
+   выдумывать несуществующие флаги: скил nfqws2 целиком, реальный вывод
+   `nfqws2 -?` **с этого устройства**, карта lua-функций с параметрами,
+   каталоги стратегий, текущее состояние, описание каждой настройки.
+7. **Промты (prompts)** — готовые сценарии: «подобрать стратегию для домена»,
+   «разобрать, почему не работает», «проверить здоровье роутера».
+8. **Движок экспериментов** (`core/strategy_experiment.py`) — ядро фичи:
+   применить вариант стратегии → дождаться стабилизации → прогнать пробы →
+   вернуть метрики и хвост лога nfqws2 → сравнить с baseline и другими
+   вариантами → закоммитить победителя или **автоматически откатиться**.
+9. **Shell-доступ к роутеру** — отдельная группа инструментов, чтобы из
+   LM Studio можно было управлять не только zapret-gui, а **всем роутером**:
+   выполнить команду, посмотреть/записать файл, поставить пакет
+   (`opkg`/`apk`), перезапустить службу `init.d`, перезагрузить устройство.
+   Два уровня доступа (safe-список команд и полный `sh -c`), двухшаговое
+   подтверждение для разрушающего, дедмен-свитч для команд, которыми легко
+   отрезать себе доступ, и полный аудит. По умолчанию — выключено.
+10. **Самоправка кода GUI прямо на роутере** — модель читает и переписывает
+    модули `zapret-gui` на живом устройстве: правка → проверка синтаксиса и
+    импорта → снимок прежней версии → перезапуск GUI → проверка, что он
+    поднялся → авто-откат, если не поднялся или если правку не подтвердили.
+    Это цикл разработки без ноутбука и без пересборки пакета, но и самый
+    опасный инструмент набора: сервер MCP живёт **внутри** того процесса,
+    который модель переписывает.
+11. **UI + CLI + документация + тесты + скил.**
+
+---
+
+## 2. Архитектура и карта файлов
+
+Создать:
+
+```
+core/mcp/__init__.py
+core/mcp/server.py        — диспетчер JSON-RPC: initialize, tools/*, resources/*, prompts/*, ping
+core/mcp/auth.py          — токен, Origin-check, рейт-лимит, генерация/ротация токена
+core/mcp/registry.py      — реестр инструментов: @tool(...) + сбор по разрешениям
+core/mcp/schema.py        — сборка JSON Schema + мини-валидатор аргументов (stdlib)
+core/mcp/permissions.py   — переключатели, writable-поддеревья settings.json, deny-поля
+core/mcp/redact.py        — вырезание секретов из любого ответа
+core/mcp/audit.py         — журнал вызовов (JSONL, ротация) + снимки для undo
+core/mcp/resources.py     — ресурсы (скилы, CLI-справка, каталоги, состояние, docs настроек)
+core/mcp/prompts.py       — шаблоны сценариев
+core/mcp/session.py       — сессии и очереди сообщений (нужно только для legacy-SSE)
+core/mcp/tools/__init__.py        — автозагрузка модулей инструментов
+core/mcp/tools/{status,logs,config,strategies,nfqws,experiments,diagnostics,
+                lists,firewall,singbox,mihomo,awg,usque,tgproxy,opera,
+                routing,updates,shell,files,packages,services,code}.py
+core/shell_exec.py                — выполнение shell-команд: argv/sh -c, таймаут, лимит вывода, async-задачи, guard'ы
+core/code_editor.py               — правка файлов самого GUI: снимки, патчи, проверка синтаксиса и импорта
+core/code_guard.py                — сторож перезапуска: health-check после рестарта и авто-восстановление снимка
+core/strategy_experiment.py       — движок A/B-экспериментов (используется и MCP, и UI)
+core/nfqws_session.py             — общий контекст «временно применить argv и гарантированно вернуть как было» (+ глобальный мьютекс nfqws2/firewall)
+api/mcp.py                        — Bottle-роуты
+web/js/pages/mcp.js               — страница UI
+.claude/skills/mcp/SKILL.md       — предметный справочник (спека MCP + наш реестр)
+tests/test_mcp_*.py               — см. §9
+```
+
+Изменить:
+
+- `api/__init__.py` — зарегистрировать `api.mcp`.
+- `core/config_manager.py` — секция `mcp` в `DEFAULT_CONFIG` (§6).
+- `core/cli.py` — подкоманда `mcp` (+ в `COMMANDS`).
+- `core/strategy_scanner.py` — перевести сохранение/восстановление состояния
+  на общий `core/nfqws_session.py` (**без изменения поведения сканера**) и
+  взять общий мьютекс, чтобы сканер и эксперимент не дрались за nfqws2.
+- `web/index.html`, роутер, `web/js/components/sidebar.js`, `web/js/i18n/*` —
+  новая страница.
+- `README.md`, `CoderManual.md`, `AGENTS.md` (индекс скилов — генератором
+  `python3 tools/gen_agent_index.py`), `CHANGELOG.md`, `docs/upstream.json`
+  (запись про спецификацию MCP: репозиторий `modelcontextprotocol/modelcontextprotocol`,
+  `pinned` = ревизия спеки, `skill` = `mcp`).
+
+**Принцип разделения:** `core/mcp/tools/*` — тонкие обёртки, вся логика живёт
+в существующих менеджерах. Если для инструмента не хватает функции — она
+добавляется в соответствующий `core/*.py` (и становится доступна UI/CLI),
+а не пишется внутри MCP.
+
+---
+
+## 3. Протокол: что именно реализовать
+
+Ревизия спецификации — **2025-06-18** (зафиксировать константу
+`PROTOCOL_VERSION`; в `initialize` отвечать версией клиента, если мы её
+поддерживаем, иначе своей).
+
+Методы:
+
+| Метод | Обязательность | Замечания |
+|---|---|---|
+| `initialize` | да | `capabilities`: `tools.listChanged=true`, `resources.listChanged=true`, `prompts.listChanged=false`, `logging`; `serverInfo = {name:"zapret-gui", version: core.version.GUI_VERSION}` |
+| `notifications/initialized` | да | ответа не требует |
+| `ping` | да | пустой результат |
+| `tools/list` | да | список зависит от разрешений; поддержать `cursor` |
+| `tools/call` | да | результат — `{content:[{type:"text",text:"<json>"}], isError: bool, structuredContent: {...}}` |
+| `resources/list`, `resources/read`, `resources/templates/list` | да | URI-схема `zapret://…` |
+| `prompts/list`, `prompts/get` | да | |
+| `notifications/tools/list_changed` | да | при смене разрешений (для SSE — рассылкой; для stateless HTTP — просто корректный `tools/list`) |
+| `logging/setLevel` | опционально | |
+
+Ошибки — стандартные коды JSON-RPC (`-32700` parse, `-32600` invalid request,
+`-32601` method not found, `-32602` invalid params, `-32603` internal).
+**Ошибка исполнения инструмента — это не JSON-RPC ошибка**, а нормальный
+результат с `isError: true` и человекочитаемым текстом — модель должна уметь
+её прочитать и исправиться.
+
+Требования к HTTP-слою:
+- `POST /api/mcp`: тело — один объект или батч; `Content-Type: application/json`;
+  заголовок `MCP-Protocol-Version` на не-initialize запросах (если пришёл
+  неподдерживаемый — 400 с пояснением).
+- `GET /api/mcp` → `405` + `Allow: POST` (и понятный текст, что это
+  не ошибка, а свойство транспорта).
+- `GET /api/mcp/info` → метаданные для UI (включён ли, разрешения, версия,
+  сколько инструментов) — **без токена, но только с локального адреса**.
+- Сессии: выдавать `Mcp-Session-Id`, принимать обратно, но состояние сервера
+  от неё не зависит (stateless — так проще и надёжнее на роутере).
+- SSE-транспорт (флаг `mcp.transports.sse`): `GET /api/mcp/sse` отдаёт
+  `event: endpoint` с `/api/mcp/messages?session=<id>`, `POST /api/mcp/messages`
+  → `202 Accepted`, ответы уходят в SSE-поток. Держать не более N сессий,
+  keep-alive пингом раз в 15 с (как в `api/logs.py`).
+
+---
+
+## 4. Безопасность (повторяем уроки b4 и добавляем свои)
+
+1. **Токен.** `secrets.token_hex(32)`; генерируется по кнопке в UI/CLI;
+   показывается один раз + возможность «показать»/«ротировать»; хранится в
+   `settings.json` с правами файла 0600 (проверить `config_manager`).
+   Сравнение — `hmac.compare_digest`. Пустой токен ⇒ MCP выключен (401 всем).
+2. **Origin/Host.** Если заголовок `Origin` есть — он должен быть в
+   `gui.cors_origins` либо localhost-подобным; иначе 403. Это защита от
+   DNS-rebinding, требование спеки для локальных серверов.
+3. **Bind.** `mcp.bind`: `inherit` (по умолчанию, слушаем там же, где GUI) или
+   `local` (отдавать 403 всем, кроме 127.0.0.1/::1) — чтобы можно было
+   открыть GUI в LAN, а MCP оставить только для локального агента/SSH-туннеля.
+4. **Разрешения** (§5) + динамический `tools/list`.
+5. **Редактирование секретов** — `core/mcp/redact.py`, применяется в
+   **одной** точке (сериализация результата инструмента), рекурсивно по
+   dict/list. Правила: ключи, совпадающие с `(?i)pass|secret|token|key|licen|
+   uuid|auth|credential`, → `"***"`; URL подписок → `https://host/…`;
+   `private_key`/`preshared_key` → `"***"`; hostlist'ы и домены **не** трогаем.
+6. **Аудит.** Каждый `tools/call`: время, инструмент, аргументы (после
+   редактирования), результат (ok/ошибка), длительность → JSONL
+   `mcp-audit.jsonl` (ротация по `mcp.audit.keep`) + строка в лог-буфер
+   (`source="mcp"`). Мутирующие вызовы дополнительно пишут **снимок** «до»
+   для `mcp_undo_last`.
+7. **Дедмен-свитч.** Любое применение экспериментальной стратегии и любое
+   изменение firewall из MCP живёт с TTL: не подтвердили (`*_commit`) —
+   автоматически возвращается прежнее состояние. Без этого модель может
+   отрезать сама себя (и пользователя) от роутера.
+8. **Опасное — отдельно и с подтверждением.** Установка/обновление бинарей,
+   автозапуск, смена `gui.*`, удаление конфигов, перезагрузка роутера — только
+   при `permissions.dangerous=true`. Перезагрузка и всё, что подпадает под
+   `confirm_patterns` (§7.8), требует **двухшагового подтверждения**:
+   первый вызов возвращает `confirm_token` и описание последствий, второй —
+   с этим токеном — выполняет. `teardown` (снос всех runtime-артефактов)
+   отдельным инструментом не выставляем — только через shell при полном
+   доступе, осознанно.
+9. **Промпт-инъекция.** Логи, имена конфигов, домены и вывод blockcheck —
+   это данные из внешнего мира, которые попадают в контекст модели. В скиле
+   `mcp` и в описаниях инструментов явно помечать такие поля как
+   `untrusted data` и не форматировать их как инструкции.
+10. **Не рвать управление.** При любых firewall-операциях из MCP порт GUI и
+    SSH исключаются (проверить, что `core/firewall.py` это уже делает; если
+    нет — добавить и покрыть тестом).
+11. **Самоправка кода — всегда через сторожа.** Ни одна правка модуля GUI не
+    применяется «просто записью в файл»: снимок → проверка синтаксиса →
+    проверка импорта в подпроцессе → перезапуск под наблюдением
+    `core/code_guard.py` → подтверждение живого `/api/status` → и только
+    после явного `code_commit` правка считается принятой. Сторож запускается
+    **отдельным процессом до рестарта**, иначе некому будет откатывать:
+    сломанный GUI не поднимет ни MCP, ни свой собственный откат.
+12. **Shell — самый мощный и самый опасный инструмент.** `shell_full` = root
+    на роутере для всякого, у кого есть токен, и для модели, которая читает
+    логи и файлы (а значит — потенциально исполняет то, что кто-то в эти логи
+    записал). Отсюда обязательное: выключено по умолчанию; отдельное
+    разрешение; `stdin=/dev/null` (никаких интерактивных запросов); таймаут и
+    обрезка вывода; минимальный `env` без секретов процесса GUI; аудит каждой
+    команды с выводом; `deny_patterns` для заведомо катастрофического;
+    `guard`-параметр (команда отката по таймеру) для сетевых операций;
+    жирное предупреждение в UI и README.
+
+---
+
+## 5. Модель разрешений
+
+`settings.json → mcp.permissions` (все по умолчанию `false`, кроме чтения):
+
+| Ключ | Что открывает | Риск |
+|---|---|---|
+| (чтение) | всегда включено: статус, конфиг (редактированный), логи, списки, каталоги, результаты тестов | низкий |
+| `control` | start/stop/restart движков, применение существующих стратегий, перезагрузка списков (SIGHUP) | средний |
+| `strategies_write` | CRUD user-стратегий, hostlist'ов, ipset'ов, blob'ов, lua-скриптов | средний |
+| `config_write` | запись настроек в whitelisted-поддеревья | средний |
+| `tests` | запуск сканера, blockcheck, blockcheck2, проб (нагрузка на роутер и трафик наружу) | средний |
+| `experiments` | движок экспериментов (требует `control`) | высокий |
+| `tunnels_write` | конфиги и запуск sing-box/mihomo/AWG/usque/tgproxy/opera | высокий |
+| `dangerous` | установка/обновление бинарей, автозапуск, миграции, `unified`-правила, перезагрузка роутера | высокий |
+| `shell_readonly` | диагностические shell-команды из safe-списка (§7.8), чтение файлов, список каталогов | средний |
+| `shell_full` | произвольная команда через `sh -c`, запись файлов, `opkg`/`apk`, управление службами `init.d` — **полный root на роутере** | максимальный |
+| `self_edit` | чтение и правка модулей самого zapret-gui на устройстве + перезапуск GUI под сторожем | максимальный |
+| `self_edit_core` | вдобавок разрешает править «защищённое ядро»: `core/mcp/auth.py`, `core/mcp/permissions.py`, `core/code_guard.py`, `core/config_manager.py` (то, чем держится сама защита) | максимальный |
+
+Правила:
+
+- Инструмент объявляет `scope` (одно из значений выше) и `mutating: bool`.
+- `tools/list` отдаёт только разрешённые. Вызов неразрешённого — `isError`
+  с текстом «инструмент недоступен: включите разрешение X в настройках MCP».
+- **Whitelist записи в `settings.json`** — явный список путей в
+  `core/mcp/permissions.py`, например: `nfqws.*`, `filter.*`, `firewall.*`
+  (кроме `firewall.type`), `strategy.*`, `lists.*`, `blockcheck.*`,
+  `healthcheck.*`, `scan.*`, `block_detector.*`, `dns_routing.*`.
+  Deny-поля перечислены отдельно и имеют приоритет: `gui.*`, `mcp.*`,
+  `install.*`, `*.password`, `*.token`, `*.secret`, `*.private_key`,
+  `*.auth_*`. Тест-сторож `tests/test_mcp_writable_paths.py` фиксирует
+  список: добавили настройку — тест падает, пока её явно не отнесли к
+  writable или non-writable. Так новая настройка не становится
+  записываемой молча (это ровно то, что делает b4).
+
+---
+
+## 6. Настройки (`core/config_manager.py → DEFAULT_CONFIG`)
+
+```python
+"mcp": {
+    "enabled": False,
+    "token": "",                       # 64 hex; пусто = выключено
+    "bind": "inherit",                 # inherit | local
+    "transports": {"http": True, "sse": False},
+    "permissions": {
+        "control": False, "strategies_write": False, "config_write": False,
+        "tests": False, "experiments": False, "tunnels_write": False,
+        "dangerous": False,
+    },
+    "limits": {
+        "calls_per_minute": 60,        # рейт-лимит на токен
+        "response_kb": 32,             # жёсткая обрезка ответа инструмента
+        "tool_timeout_sec": 120,       # таймаут синхронного инструмента
+        "max_sessions": 4,             # для SSE-транспорта
+    },
+    "experiment": {
+        "default_ttl_sec": 180,        # дедмен-свитч
+        "stabilize_sec": 3,
+        "max_variants": 12,
+        "max_targets": 5,
+        "repeats": 2,
+        "keep_best_default": False,
+    },
+    "audit": {"enabled": True, "keep": 500},
+    "shell": {
+        "timeout_sec": 30,             # дефолтный таймаут синхронной команды
+        "max_timeout_sec": 300,        # потолок, который может запросить модель
+        "output_kb": 64,               # обрезка stdout+stderr
+        "workdir": "/opt",             # стартовый каталог
+        "max_jobs": 3,                 # одновременных async-команд
+        "allow_write_paths": ["/opt", "/tmp", "/etc"],   # для file_write
+        "guard_default_ttl_sec": 120,  # дедмен для команд с guard
+    },
+    "self_edit": {
+        "root": "",                    # пусто = каталог установки GUI (автодетект)
+        "snapshots_keep": 20,          # сколько версий хранить
+        "restart_timeout_sec": 45,     # сколько сторож ждёт живой /api/status
+        "commit_ttl_sec": 300,         # не подтвердил правку — откат и рестарт
+        "run_tests": False,            # гонять pytest перед применением, если он есть
+        "protected": ["core/mcp/auth.py", "core/mcp/permissions.py",
+                      "core/code_guard.py", "core/config_manager.py"],
+    },
+},
+```
+
+---
+
+## 7. Реестр инструментов
+
+Именование: `<домен>_<действие>` в snake_case (`nfqws_status`,
+`strategy_experiment_start`). Описание — одна строка на английском (её
+читает модель) плюс подробности в `inputSchema.description` полей;
+русский текст — в docstring кода и в скиле.
+
+Каждый инструмент возвращает `structuredContent` (машинно-читаемый dict) и
+`content[0].text` — тот же JSON строкой (совместимость с клиентами,
+не умеющими structuredContent).
+
+### 7.1 Чтение (всегда доступно)
+
+| Инструмент | Возвращает |
+|---|---|
+| `system_status` | сводка: платформа, uptime, RAM, версия GUI, что запущено (nfqws2, sing-box, mihomo, awg, usque, tgproxy, opera), текущая стратегия |
+| `config_get` | `settings.json` (редактированный), `path` — точечный путь, `depth` — ограничение глубины |
+| `config_describe` | описание настройки: тип, дефолт, что делает, writable ли для MCP |
+| `logs_tail` | хвост лога: `source`, `level`, `search`, `limit` (≤200), `since` |
+| `nfqws_status` | pid, uptime, external?, argv последнего запуска, exit code, счётчик ошибок в логе |
+| `nfqws_command_preview` | итоговый argv/командная строка для текущей или указанной стратегии |
+| `strategy_list` | стратегии (builtin+user) с `id/name/protocol/level/featured/is_active`, фильтры + пагинация |
+| `strategy_get` | одна стратегия целиком (профили, args) |
+| `catalog_search` | поиск по INI-каталогам: по протоколу, уровню, подстроке, приёму (`fake`, `split`, `disorder`, `oob`, …) |
+| `lua_functions_list` | доступные `--lua-desync` функции с параметрами и требованиями (из `lua_manager` + карты расширений) — **ключевой инструмент против «тихого 0%»** |
+| `blobs_list`, `hostlists_list`, `hostlist_get`, `ipsets_list`, `lists_list` | ассеты и списки (с пагинацией) |
+| `firewall_status` | применённые правила, backend, конфликты |
+| `diagnostics_run` | ping/DNS/HTTP по сервисам `core/targets.py`, конфликты процессов/окружения |
+| `probe_targets` | быстрая проба DNS→TCP→TLS→HTTP(+QUIC/STUN) по списку доменов **без** изменения состояния (baseline) |
+| `dpi_report` | последняя классификация DPI (`core/blockcheck.py`) |
+| `strategy_state_list` | выученные circular-стратегии из `state.tsv` |
+| `scan_status`, `scan_results` | состояние и результаты сканера |
+| `blockcheck2_status`, `blockcheck2_output` | статус и инкрементальный вывод официального скрипта |
+| `tunnels_status` | sing-box/mihomo/AWG/usque/tgproxy/opera: запущены ли, конфиг, трафик |
+| `updates_check` | версии движков и доступные обновления |
+| `audit_list` | последние вызовы MCP (для самоконтроля модели и пользователя) |
+
+### 7.2 Управление (`control`)
+
+`nfqws_start`, `nfqws_stop`, `nfqws_restart`, `nfqws_reload_lists` (SIGHUP),
+`strategy_apply` (по id), `firewall_apply`, `firewall_remove`,
+`tunnel_up`/`tunnel_down` (движок + имя конфига, требует `tunnels_write`).
+
+### 7.3 Правка стратегий и списков (`strategies_write`)
+
+| Инструмент | Смысл |
+|---|---|
+| `strategy_compose` | **декларативно собрать стратегию**: на вход профили в виде `{filter:{proto,ports,l7,hostlist}, desync:[{fn, params}], blobs:[…]}` → на выход готовый argv + preview + предупреждения линтера (голый приём без фильтра, неизвестная lua-функция, отсутствующий blob, нарушенный порядок `--lua-init`). Использует `strategy_builder.autowrap_bare_trick` и карту lua-функций |
+| `strategy_validate` | `nfqws_manager.dry_run()` (`--intercept=0`): парсинг опций + наличие файлов + **исполнение lua-init**. Возвращает returncode и вывод |
+| `strategy_save` | сохранить/обновить user-стратегию (после валидации) |
+| `strategy_delete` | удалить user-стратегию |
+| `hostlist_edit`, `ipset_edit`, `blob_add`, `lua_script_save` | правка ассетов (с проверками и лимитами размера) |
+
+### 7.4 Тесты и подбор (`tests`)
+
+`scan_start` (наш сканер: target, protocol, mode, resume), `scan_stop`,
+`scan_apply` (применить найденную), `blockcheck_start` (наши пробы),
+`blockcheck2_start` / `blockcheck2_stop` (оригинальный скрипт с параметрами
+`DOMAINS/IPVS/SCANLEVEL/REPEATS/…`), `healthcheck_run`, `connectivity_matrix`.
+
+Все тяжёлые операции — **асинхронные**: `*_start` возвращает `job_id` и
+сразу отдаёт управление; модель опрашивает `*_status`/`*_output`. Синхронных
+вызовов дольше `limits.tool_timeout_sec` быть не должно.
+
+### 7.5 Эксперименты (`experiments`) — §8
+
+`strategy_experiment_start`, `strategy_experiment_status`,
+`strategy_experiment_result`, `strategy_experiment_commit`,
+`strategy_experiment_rollback`, `strategy_experiment_stop`,
+`strategy_experiment_history`.
+
+### 7.6 Настройки и откат (`config_write`)
+
+`config_set` (только whitelisted пути; валидация типа по дефолту;
+возвращает diff «было/стало»), `mcp_undo_last` (откат последнего
+мутирующего вызова по снимку из аудита).
+
+### 7.7 Туннели (`tunnels_write`) и опасное (`dangerous`)
+
+`singbox_config_save`, `singbox_test_proxies`, `mihomo_config_save`,
+`awg_config_save`, `awg_up/down`, `usque_register`, `tgproxy_configure`,
+`opera_configure`, `subscription_refresh`, `pool_refresh`, `unified_rule_*`
+— под `tunnels_write`; `binary_install/update`, `autostart_enable/disable`,
+`gui_update`, `system_reboot` — под `dangerous` (перезагрузка — только через
+двухшаговое подтверждение, §7.8). Отдельного инструмента `teardown` (снос
+всех runtime-артефактов) нет — это осознанное решение, зафиксированное
+тестом.
+
+### 7.8 Shell и система (`shell_readonly` / `shell_full` / `dangerous`)
+
+Смысл: из LM Studio пользователь должен управлять **роутером целиком**, а не
+только нашим GUI («поставь пакет», «покажи, что жрёт память», «перезапусти
+dnsmasq», «почему не резолвится домен»). Логика — в `core/shell_exec.py`
+(она же пригодится диагностике), MCP — обёртка.
+
+| Инструмент | Разрешение | Что делает |
+|---|---|---|
+| `shell_exec` | `shell_readonly` / `shell_full` | Выполнить команду. При `shell_readonly` — только из safe-списка и **только argv-режим** (без `sh -c`, без пайпов, редиректов и подстановок). При `shell_full` — произвольная строка через `sh -c`. Параметры: `command` (строка) или `argv` (массив), `timeout_sec`, `workdir`, `guard` |
+| `shell_exec_async` | те же | То же для долгих команд: возвращает `job_id`; `shell_job_status`, `shell_job_output` (инкрементально, `?offset`), `shell_job_stop` — по образцу `core/blockcheck2.py` |
+| `shell_confirm` | те же | Второй шаг для команд, попавших в `confirm_patterns`: принимает `confirm_token` из первого вызова и выполняет команду |
+| `file_read` | `shell_readonly` | Прочитать файл: `path`, `offset`, `limit_kb`, `tail` (последние N строк). Безопаснее, чем `cat` (нет пайпов, есть лимиты, есть редактирование секретов) |
+| `file_list` | `shell_readonly` | Листинг каталога: имя, размер, права, mtime |
+| `file_write` | `shell_full` | Записать файл (только внутри `shell.allow_write_paths`), атомарно через `core/safe_io.atomic_write_*`, с бэкапом прежней версии в аудит (для `mcp_undo_last`) |
+| `package_list` / `package_install` / `package_remove` | `shell_readonly` / `shell_full` | Обёртки над `opkg`/`apk` (детект менеджера — как в `core/ext_binary_installer.py`). `package_remove` требует подтверждения |
+| `service_list` / `service_control` | `shell_readonly` / `shell_full` | `/opt/etc/init.d/*` (Entware) и `/etc/init.d/*` (OpenWrt): `start|stop|restart|status`. Имя службы валидируется по списку найденных скриптов — никакой подстановки в команду |
+| `system_reboot` | `dangerous` | Перезагрузка роутера. Только через `shell_confirm`, через `core/system_control.py` (на Keenetic — `ndmc`), с отложенным запуском в отвязанном процессе, чтобы успел уйти ответ |
+
+**Правила исполнения (`core/shell_exec.py`):**
+
+1. `stdin=/dev/null` — команда не может уйти в интерактивный запрос и подвиснуть.
+2. `env` — минимальный (`PATH`, `HOME`, `LANG=C`), без переменных процесса GUI.
+3. Таймаут обязателен (`timeout_sec` ≤ `shell.max_timeout_sec`), по истечении —
+   `SIGTERM`, затем `SIGKILL`; в ответе `timed_out: true`.
+4. Вывод: `stdout`+`stderr` слиты, обрезка до `shell.output_kb`
+   (`truncated: true`, сохраняется **хвост**, он информативнее), к тексту
+   применяется `redact()` — чтобы `cat` конфига с паролем не утёк в облачную модель.
+5. Ответ: `{ok, returncode, output, truncated, timed_out, duration_ms, command}`.
+6. `deny_patterns` (жёсткий отказ, не обходится подтверждением): запись в
+   `/dev/mtd*`, `mkfs`, `sysupgrade`, `firstboot`, `dd of=/dev/…`, `rm -rf /`
+   и `rm -rf /opt` без уточнения, изменение пароля root, `chmod -R 777 /`.
+   Список — константа модуля, покрытая тестом.
+7. `confirm_patterns` (двухшаговое подтверждение): `reboot`, `halt`,
+   `opkg remove`/`apk del`, `rm -rf`, `iptables -F`/`nft flush ruleset`,
+   `ifconfig … down`/`ip link set … down`, правка `/etc/passwd`,
+   остановка `dropbear`/`sshd`. Первый вызов возвращает
+   `isError: true` + `confirm_token` (живёт 60 с) + человеческое описание
+   последствий; выполнение — только через `shell_confirm`.
+8. `guard` (дедмен-свитч): `{revert_cmd: "…", ttl_sec: 120}` — после команды
+   заводится таймер, который выполнит `revert_cmd`, если не пришёл
+   `shell_confirm` с `run_id`. Обязателен (проверкой в коде) для команд,
+   матчащих сетевые `confirm_patterns` — именно так модель не отрежет себе и
+   пользователю доступ к роутеру.
+9. Параллелизм: одна синхронная команда за раз, ≤ `shell.max_jobs` async;
+   все вызовы — в аудит с командой, кодом возврата и первыми строками вывода.
+10. Никаких `shell=True` с f-строками: `shell_full` передаёт строку **одним
+    аргументом** в `["sh", "-c", command]`, остальные инструменты собирают
+    `argv` из валидированных частей.
+
+**Safe-список для `shell_readonly`** (первые кандидаты, расширяется в скиле):
+`uname, uptime, free, df, ls, cat, head, tail, ps, top -n1, netstat, ss, ip,
+ifconfig, route, arp, iptables -L/-S, nft list, conntrack -L, dmesg, logread,
+nslookup, dig, ping -c, traceroute, opkg list-installed, apk info, wg show,
+awg show, curl -sI, date, mount, lsmod, cat /proc/*`. Для каждого — разрешённые
+флаги; всё, что не в списке, — отказ с подсказкой «нужен `shell_full`».
+
+### 7.9 Самоправка GUI на роутере (`self_edit` / `self_edit_core`)
+
+Задача: модель правит код `zapret-gui` **на живом устройстве** и сразу видит
+результат — без ноутбука, git-клиента и пересборки пакета. Логика — в
+`core/code_editor.py` и `core/code_guard.py`, MCP — обёртка.
+
+| Инструмент | Разрешение | Что делает |
+|---|---|---|
+| `code_tree` | `self_edit` | Дерево файлов проекта (только внутри каталога установки): путь, размер, mtime, признак «защищённый». Фильтр по маске, пагинация |
+| `code_read` | `self_edit` | Прочитать файл с номерами строк: `path`, `offset`, `limit` |
+| `code_search` | `self_edit` | Поиск по коду (подстрока/регэксп) с контекстом ±2 строки — чтобы модель не читала файлы целиком и не жгла контекст |
+| `code_patch` | `self_edit` | Точечная правка: `path` + список `{old, new}` (точное совпадение, как в редакторах агентов) **или** unified diff. Неоднозначное совпадение — отказ с указанием, сколько раз найдено |
+| `code_write` | `self_edit` | Полная перезапись/создание файла (для новых модулей) |
+| `code_check` | `self_edit` | Проверки **без применения**: `.py` → `ast.parse` + `python3 -c "import <module>"` в подпроцессе; `.json` → `json.loads`; `.js` → `node --check`, если node есть; плюс `make lint`-эквивалент по всему дереву |
+| `code_test` | `self_edit` | Прогон тестов, если на устройстве есть pytest: `python3 -m pytest tests/ -q -k <pattern>` с таймаутом; нет pytest — честно вернуть `available: false` |
+| `code_apply` | `self_edit` | Применить накопленные правки: снимок → проверки → перезапуск GUI под сторожем → ждать живой `/api/status` → вернуть результат. Для `web/**` и других статических файлов перезапуск не нужен — достаточно обновить страницу (инструмент сам это определяет) |
+| `code_commit` | `self_edit` | Подтвердить применённую правку (иначе откат по `commit_ttl_sec`) |
+| `code_rollback` | `self_edit` | Откат к снимку: последнему или по `snapshot_id` |
+| `code_history` | `self_edit` | Список снимков: id, время, файлы, размер diff, статус (committed / reverted / pending) |
+| `code_diff` | `self_edit` | Unified diff: рабочее дерево против снимка или против эталонной версии установленного релиза |
+| `code_export_patch` | `self_edit` | Собрать все локальные правки в один unified diff — чтобы перенести их в репозиторий и оформить PR, а не потерять при следующем обновлении GUI |
+
+**Механика применения (`core/code_editor.py` + `core/code_guard.py`):**
+
+1. **Границы.** Разрешён только каталог установки GUI (автодетект по
+   `__file__`, переопределяется `self_edit.root`). Путь нормализуется,
+   `..` и симлинки наружу отклоняются. Файлы из `self_edit.protected`
+   требуют `self_edit_core`.
+2. **Снимок.** Перед первой правкой в сессии — копия затрагиваемых файлов в
+   `<config_dir>/code-snapshots/<timestamp>/` + манифест (пути, sha256,
+   версия GUI). Хранится `snapshots_keep` штук, старые вычищаются.
+   Если каталог установки — git-репозиторий, дополнительно фиксируется
+   `git rev-parse HEAD` и `git diff`, но зависимости от git нет (на роутере
+   его обычно нет).
+3. **Проверки до применения.** Синтаксис → импорт модуля в отдельном
+   процессе (`python3 -c "import core.foo"` с `cwd` проекта) → опционально
+   тесты. Любая упавшая проверка = отказ, файл на диске **не тронут**
+   (правки копятся в staging-копии, на место кладутся атомарно через
+   `core/safe_io.atomic_write_*`).
+4. **Перезапуск под сторожем.** `code_apply` запускает
+   `python3 -m core.code_guard --snapshot <id> --timeout <restart_timeout_sec>`
+   **отдельным отвязанным процессом** (как это уже делает
+   `core/system_control.py` для рестарта GUI), и только потом просит GUI
+   перезапуститься. Сторож ждёт, пока `/api/status` снова начнёт отвечать:
+   - ответил → пишет в снимок `applied`, ждёт `code_commit` до
+     `commit_ttl_sec`; не дождался → восстанавливает файлы и рестартует снова;
+   - не ответил за `restart_timeout_sec` → немедленно восстанавливает снимок,
+     рестартует GUI и пишет причину в персистентный лог.
+   Это единственный способ не превратить «модель поправила модуль» в
+   «роутер без веб-интерфейса и без MCP».
+5. **Разрыв сессии.** Рестарт рвёт HTTP-соединение — MCP-клиент увидит
+   ошибку. В описании `code_apply` явно сказать модели: «после вызова
+   подожди 5–10 секунд, повтори `system_status`, затем вызови `code_commit`».
+   Тот же текст — в скиле `mcp` и в README.
+6. **Аудит.** Каждая правка — в журнал: файл, размер diff, сам diff
+   (обрезанный), результат проверок, статус применения. `mcp_undo_last`
+   для правок кода равен `code_rollback`.
+7. **Расхождение с репозиторием.** Правки на устройстве живут до следующего
+   обновления GUI. `code_export_patch` + предупреждение при
+   `gui_update`: «на устройстве есть локальные правки (N файлов), обновление
+   их затрёт; выгрузи патч». Это нужно, чтобы удачные находки доезжали до
+   репозитория, а не терялись.
+
+---
+
+## 8. Ядро фичи: цикл «изменил → увидел результат»
+
+`core/strategy_experiment.py`, синглтон `get_experiment_runner()`.
+Движок должен быть полезен и из UI (кнопка «Сравнить варианты»), поэтому
+живёт в `core/`, а MCP — тонкая обёртка.
+
+### 8.1 Контракт
+
+```python
+runner.start(
+    variants=[                      # 1..mcp.experiment.max_variants
+        {"label": "A", "args": ["--filter-tcp=443", "--lua-desync=fake:..."]},
+        {"label": "B", "strategy_id": "tcp_oob"},
+        {"label": "C", "profiles": [...]},          # декларативно, через strategy_compose
+    ],
+    targets=["youtube.com", "rutracker.org"],       # ≤ max_targets; дефолт — из core/targets.py
+    probes=["tls", "http", "body", "quic"],         # какие пробы гонять
+    repeats=2,
+    baseline=True,        # прогнать без обхода: «сайт и так открыт» ⇒ вывод недостоверен
+    ttl_sec=180,          # дедмен-свитч
+    keep_best=False,      # оставить лучший вариант применённым после завершения
+) -> {"ok": True, "run_id": "exp-20260916-153012"}
+```
+
+`get_status()` → `{state: idle|running|finished|failed|reverted, run_id,
+variant: "B", variant_index: 2, total: 3, phase: "probing", progress: 0.55,
+eta_sec: 40, ttl_left_sec: 120}`.
+
+`get_result(run_id=None)` → компактный отчёт:
+
+```json
+{
+  "run_id": "exp-20260916-153012",
+  "baseline": {"youtube.com": {"ok": false, "code": "TLS_RST", "latency_ms": 0},
+               "rutracker.org": {"ok": false, "code": "DNS_HIJACK"}},
+  "variants": [
+    {
+      "label": "B",
+      "args": ["--filter-tcp=443", "--filter-l7=tls", "--lua-desync=fake:..."],
+      "validation": {"ok": true, "returncode": 0},
+      "started_nfqws": true,
+      "per_target": {
+        "youtube.com": {"ok": true, "code": "OK", "latency_ms": 310,
+                         "throughput_kbps": 4200, "body_passed": true, "http_code": 200},
+        "rutracker.org": {"ok": false, "code": "TLS_TIMEOUT", "latency_ms": 0}
+      },
+      "success_rate": 0.5, "score": 0.42,
+      "delta_vs_baseline": {"youtube.com": "fixed", "rutracker.org": "no_change"},
+      "nfqws_log": ["lua: fake blob loaded", "rawsend: sendto: Operation not permitted"],
+      "hints": ["rawsend запрещён — проверь POSTNAT-правила и desync_mark_postnat"]
+    }
+  ],
+  "best": "B",
+  "ranking": ["B", "A", "C"],
+  "warnings": ["baseline: rutracker.org недоступен и без обхода — цель могла лежать"]
+}
+```
+
+### 8.2 Как исполняется один вариант
+
+1. **Мьютекс.** Взять глобальный lock `core/nfqws_session.py` (общий со
+   `strategy_scanner`). Занято — вернуть `isError` с пояснением «идёт скан,
+   остановите его или дождитесь».
+2. **Снимок состояния** (текущая стратегия, запущен ли nfqws2, применён ли
+   firewall) — через общий помощник, вынесенный из сканера.
+3. **Baseline** (если запрошен): остановить обход, прогнать пробы. Логика
+   «цель открыта и без обхода ⇒ любые выводы недостоверны» уже есть в
+   сканере (`_run_baseline_test`) — переиспользовать, не дублировать.
+4. Для каждого варианта:
+   `strategy_validate` (dry-run) → применить firewall + запустить nfqws2 →
+   `stabilize_sec` → пробы (`repeats` раз, брать медиану) → снять хвост лога
+   `source="nfqws"` за окно варианта → остановить.
+5. **Автовосстановление** в `finally` на каждом шаге (как в сканере) +
+   поток-дедмен: если за `ttl_sec` не пришёл `commit`, вернуть снимок и
+   пометить прогон `reverted`.
+6. `commit(label)` — оставить вариант применённым, при желании сохранить его
+   user-стратегией (`strategy_save`) и сделать активным.
+
+### 8.3 Метрики и «почему не сработало»
+
+- Коды проб — единый словарь `PROBE_CODES` (`core/testers/probe.py`), никаких
+  свободных строк: модель должна получать стабильные символы.
+- `score` — формула сканера (успех, скорость, тело, латентность), чтобы
+  ранжирование совпадало с тем, что показывает UI.
+- `hints` — правила-детекторы поверх лога и кодов: `rawsend: Operation not
+  permitted` → подсказка про POSTNAT/mark; `lua: attempt to call a nil value`
+  → неизвестная функция (см. `lua_functions_list`); «0% на всех целях при
+  валидном dry-run» → проверить NFQUEUE-правила и `queue_num`; «падает при
+  старте» → проверить `--user`/права. Каждый hint — одна строка, ссылка на
+  раздел скила.
+- Ограничение длины: `nfqws_log` ≤ 20 строк, отчёт ≤ `limits.response_kb`.
+
+### 8.4 Почему это ровно тот «фидбек», который нужен ИИ
+
+Модель получает замкнутый цикл без участия человека:
+`lua_functions_list` / `catalog_search` (что вообще можно) →
+`strategy_compose` (собрать) → `strategy_validate` (движок принял argv и lua) →
+`strategy_experiment_start` (применить и измерить) → `..._result`
+(что изменилось по каждой цели + лог движка + подсказки) → правка → повтор →
+`..._commit` + `strategy_save`. Каждый шаг наблюдаем, любой шаг обратим.
+
+---
+
+## 9. Тесты (обязательны, `python3 -m pytest tests/ -q`)
+
+Использовать `tests/_wsgi_client.py` (без сети) и monkeypatch менеджеров.
+
+| Файл | Что фиксирует |
+|---|---|
+| `test_mcp_protocol.py` | `initialize` → capabilities/serverInfo; `tools/list`; `tools/call`; батч; коды ошибок `-32700/-32600/-32601/-32602`; ошибка инструмента приходит как `isError`, а не как JSON-RPC ошибка |
+| `test_mcp_transport.py` | `GET /api/mcp` → 405 + `Allow: POST`; неподдерживаемый `MCP-Protocol-Version` → 400; SSE-транспорт отдаёт `event: endpoint` и доставляет ответ |
+| `test_mcp_auth.py` | нет токена → 401; неверный токен → 401; чужой `Origin` → 403; `bind=local` + внешний IP → 403; рейт-лимит → 429 |
+| `test_mcp_permissions.py` | `tools/list` меняется от переключателей; запрещённый инструмент не вызывается по имени; `experiments` без `control` не включается |
+| `test_mcp_redaction.py` | сторож: прогнать **все** read-only инструменты на фикстуре settings.json с известными секретами и убедиться, что ни один не утёк ни в `content`, ни в `structuredContent` |
+| `test_mcp_writable_paths.py` | сторож whitelist'а: каждый ключ `DEFAULT_CONFIG` отнесён либо к writable, либо к non-writable; новый ключ ломает тест |
+| `test_mcp_schema.py` | у каждого инструмента: валидная схема, непустое описание ≤ 300 символов, snake_case-имя, объявлены `scope`/`mutating`; мини-валидатор корректно отбраковывает неверные аргументы |
+| `test_mcp_experiment.py` | снимок → применение → пробы → авто-revert по TTL; `commit`/`rollback`; отказ при занятом сканере; baseline-предупреждение; отчёт укладывается в лимит |
+| `test_mcp_hints.py` | правила-детекторы дают ожидаемые подсказки на эталонных строках лога |
+| `test_mcp_audit.py` | мутирующий вызов пишет снимок; `mcp_undo_last` возвращает прежнее значение; ротация журнала |
+| `test_mcp_stdio.py` | мост читает/пишет JSON-RPC построчно и корректно проксирует в HTTP |
+| `test_mcp_tools_docs.py` | сторож синхронности: каждый инструмент описан в `.claude/skills/mcp/SKILL.md` и в README (по образцу `tests/test_agent_skill_index.py`) |
+| `test_mcp_shell.py` | safe-список: разрешённая команда выполняется, `sh -c` при `shell_readonly` отклоняется; таймаут → `timed_out`; обрезка вывода сохраняет хвост; `env` не содержит переменных процесса GUI; `stdin` закрыт |
+| `test_mcp_shell_guards.py` | `deny_patterns` отклоняются всегда (в т.ч. с лишними пробелами, кавычками и `env`-префиксом); `confirm_patterns` требуют `confirm_token`, токен одноразовый и протухает; сетевая команда без `guard` отклоняется; дедмен выполняет `revert_cmd` по TTL |
+| `test_mcp_shell_redaction.py` | вывод `cat` конфига с паролем/ключом приходит замаскированным |
+| `test_mcp_files.py` | `file_write` вне `allow_write_paths` отклоняется; запись атомарна; прежняя версия попадает в аудит и откатывается `mcp_undo_last` |
+| `test_mcp_code_editor.py` | границы каталога (`..`, симлинк наружу, абсолютный путь вне root — отказ); `code_patch` с неоднозначным совпадением отклоняется; правка защищённого файла без `self_edit_core` отклоняется; битый синтаксис не доезжает до диска; снимок создаётся и содержит прежнее содержимое |
+| `test_mcp_code_guard.py` | сторож восстанавливает снимок, если health-check не прошёл; откатывает по `commit_ttl_sec` без `code_commit`; `code_commit` отменяет откат; ротация снимков (`snapshots_keep`) |
+| `test_mcp_no_dangerous.py` | нет инструмента `teardown`; `system_reboot` существует только под `dangerous` и не выполняется без подтверждения |
+
+Плюс `make lint` и `node --test tests/*.js` (если трогаешь JS).
+
+---
+
+## 10. UI (`web/js/pages/mcp.js`)
+
+Страница «MCP-сервер» (пункт сайдбара рядом с «Настройками», IIFE с
+`render/destroy`, вызовы через `API.*`, тексты через i18n):
+
+1. Переключатель «Включить MCP-сервер» + статус (адрес, число инструментов).
+2. Токен: «Сгенерировать», «Показать», «Скопировать», «Ротировать».
+   Предупреждение, что токен даёт доступ к роутеру.
+3. Разрешения: чекбоксы с человеческим описанием риска; при изменении —
+   мгновенный эффект (`tools/list_changed`), без перезапуска GUI.
+4. Готовые сниппеты подключения (кнопка «копировать»):
+   - Claude Code: `claude mcp add --transport http zapret-gui http://<ip>:8080/api/mcp --header "Authorization: Bearer <token>"`
+   - Claude Desktop / LM Studio (`mcpServers`):
+     ```json
+     {"mcpServers": {"zapret-gui": {"url": "http://192.168.1.1:8080/api/mcp",
+       "headers": {"Authorization": "Bearer <token>"}}}}
+     ```
+   - stdio (для клиентов без HTTP): `zapret-gui mcp --stdio`
+5. Журнал вызовов (последние 50) + кнопка «Отменить последнее изменение».
+6. Блок «Активный эксперимент»: вариант, прогресс, сколько осталось до
+   авто-отката, кнопки «Закоммитить» / «Откатить сейчас».
+7. Блок «Правка кода (self-edit)»: переключатели `self_edit` /
+   `self_edit_core` с предупреждением («модель сможет переписать сам GUI;
+   при неудачном рестарте изменения откатятся автоматически»), список
+   снимков с кнопками «Показать diff» / «Откатить», индикатор «применена
+   правка, ждёт подтверждения: осталось N с» и кнопка «Выгрузить патч».
+8. Блок «Shell-доступ»: два переключателя (`shell_readonly`, `shell_full`) с
+   явным предупреждением («полный доступ к роутеру от имени root: модель
+   сможет ставить пакеты, править файлы и перезагружать устройство»),
+   список последних выполненных команд с кодом возврата, кнопка
+   «Запретить shell немедленно» (гасит оба переключателя и убивает активные
+   async-задачи) и список ожидающих подтверждения команд с кнопками
+   «Подтвердить» / «Отклонить» — чтобы человек мог подтвердить опасное
+   из GUI, а не только токеном из модели.
+
+---
+
+## 11. CLI (`core/cli.py`)
+
+```
+zapret-gui mcp status                 # включён, адрес, разрешения, число инструментов
+zapret-gui mcp token show|rotate
+zapret-gui mcp tools [--json]         # список инструментов с описаниями
+zapret-gui mcp call <tool> '<json>'   # локальный вызов (для отладки)
+zapret-gui mcp stdio [--url ... --token ...]   # stdio↔HTTP мост
+zapret-gui mcp audit [--limit 50]     # журнал вызовов, включая shell-команды
+zapret-gui mcp code list|diff|rollback [<snapshot_id>]   # снимки самоправки
+zapret-gui mcp code export-patch > /tmp/local.patch      # выгрузить локальные правки
+```
+
+---
+
+## 12. Документация
+
+- `README.md` — пользовательский раздел «Управление через ИИ (MCP)»: зачем,
+  как включить, как подключить Claude Desktop / Claude Code / LM Studio,
+  что модель может и чего не может, честный абзац про риски (токен = доступ
+  к роутеру; модель видит домены и логи). Отдельный подраздел про shell:
+  чем `shell_readonly` отличается от `shell_full`, почему полный доступ стоит
+  включать только для локальной модели (LM Studio на своей машине), и что
+  прочитанный лог или конфиг может содержать чужой текст, который модель
+  примет за инструкцию. И подраздел про самоправку: что модель может
+  переписывать сам GUI, как работает авто-откат, почему после `code_apply`
+  рвётся соединение и что локальные правки надо выгружать патчем, иначе их
+  затрёт обновление.
+- `CoderManual.md` — §про `core/mcp/` и `api/mcp.py` в структуре бэкенда,
+  строка в таблице REST и в «куда добавить X» («новый MCP-инструмент →
+  `core/mcp/tools/<домен>.py` + скил `mcp` + тест»).
+- `.claude/skills/mcp/SKILL.md` — новый предметный скил: ревизия спеки,
+  наш транспорт, полный реестр инструментов с сигнатурами, модель
+  разрешений, формат отчёта эксперимента, грабли. Источник истины —
+  `modelcontextprotocol.io` (спека 2025-06-18). После добавления:
+  `python3 tools/gen_agent_index.py`.
+- `docs/upstream.json` — запись про спецификацию MCP (`pinned` = ревизия,
+  `verified_at`, `skill: "mcp"`).
+- `CHANGELOG.md` — по конвенции проекта.
+- `TODO.md` — убрать сделанное, добавить оставшиеся идеи (§14).
+
+---
+
+## 13. Порядок работы: 8 PR-ов с критериями приёмки
+
+**PR1 — каркас протокола.**
+`core/mcp/{server,registry,schema,auth,permissions,redact}.py`, `api/mcp.py`,
+секция `mcp` в конфиге, 5 read-only инструментов (`system_status`,
+`nfqws_status`, `strategy_list`, `logs_tail`, `config_get`).
+*Приёмка:* `claude mcp add` подключается, `tools/list` и `tools/call`
+работают, 401/403/405 корректны, тесты `test_mcp_protocol/transport/auth`
+зелёные, секреты не утекают.
+
+**PR2 — полный read-only + ресурсы + промты.**
+Все инструменты §7.1, `core/mcp/resources.py` (скил nfqws2, живой
+`nfqws2 -?`, карта lua-функций, каталоги, текущее состояние, описания
+настроек), `core/mcp/prompts.py`.
+*Приёмка:* модель может объяснить состояние роутера и предложить стратегию,
+не имея права ничего менять; `test_mcp_redaction` покрывает все инструменты.
+
+**PR3 — запись, аудит, undo.**
+`control`, `strategies_write`, `config_write`; `core/mcp/audit.py`,
+`mcp_undo_last`; whitelist-сторож.
+*Приёмка:* запись вне whitelist'а отклоняется; каждый мутирующий вызов
+виден в журнале и откатывается.
+
+**PR4 — движок экспериментов (главный).**
+`core/nfqws_session.py` (+ перевод сканера на него без смены поведения),
+`core/strategy_experiment.py`, инструменты §7.5, `strategy_compose`,
+`strategy_validate`, правила-подсказки.
+*Приёмка:* на dev-машине без nfqws2 движок корректно говорит «бинарь
+недоступен»; на устройстве полный цикл A/B с авто-откатом по TTL;
+одновременный запуск со сканером отклоняется; отчёт ≤ лимита.
+
+**PR5 — shell-доступ к роутеру.**
+`core/shell_exec.py`, инструменты §7.8 (`shell_*`, `file_*`, `package_*`,
+`service_*`, `system_reboot`), safe-список, `deny_patterns`/`confirm_patterns`,
+`guard`-дедмен, аудит с выводом команд.
+*Приёмка:* при `shell_readonly` модель диагностирует роутер (ps/df/logread/
+ip/nslookup), но не может ничего изменить; при `shell_full` ставит пакет и
+перезапускает службу; команда из `deny_patterns` отклоняется; `reboot`
+требует подтверждения; команда, гасящая интерфейс, без `guard` не
+выполняется, а с `guard` откатывается по TTL; всё видно в журнале.
+
+**PR6 — самоправка кода на устройстве.**
+`core/code_editor.py`, `core/code_guard.py`, инструменты §7.9, снимки,
+health-gated рестарт, `code_export_patch`.
+*Приёмка:* правка модуля с ошибкой синтаксиса до диска не доезжает; удачная
+правка применяется и переживает рестарт; **намеренно сломанный** модуль
+(например, `raise` на импорте) приводит к автоматическому восстановлению
+GUI сторожем — проверить руками на устройстве, это главный тест фичи;
+без `code_commit` правка откатывается по TTL; локальные правки выгружаются
+одним патчем.
+
+**PR7 — UI, CLI, stdio-мост, SSE-транспорт.**
+*Приёмка:* включение/токен/разрешения (включая оба shell-переключателя и
+кнопку «запретить shell немедленно») из GUI без рестарта; LM Studio
+подключается (HTTP или SSE); `zapret-gui mcp stdio` работает по SSH.
+
+**PR8 — документация и скил.**
+*Приёмка:* `python3 tools/gen_agent_index.py --check`,
+`test_mcp_tools_docs` и `make upstream-offline` зелёные.
+
+---
+
+## 14. Идеи следующего круга (не в первом заходе)
+
+- **Встроенный агент**: клиент к OpenAI-совместимому API (LM Studio/Ollama)
+  прямо в GUI — «кнопка: подбери стратегию сам», с теми же инструментами
+  внутри. Отдельная страница, отдельный флаг, вся логика — поверх уже
+  готового реестра инструментов.
+- **Обучение на истории**: складывать результаты экспериментов в локальную
+  базу (домен → что сработало у этого провайдера) и отдавать её ресурсом —
+  тогда модель начинает с того, что уже работало.
+- `resources/subscribe` + `notifications/resources/updated` для живого
+  статуса вместо опроса.
+- **Авто-PR из роутера**: `code_export_patch` + отправка патча в GitHub —
+  удачная правка с устройства сразу превращается в pull request.
+- **Терминал в GUI** поверх `core/shell_exec.py` (async-задачи + SSE уже
+  будут готовы) — удобно и человеку, и для разбора того, что наделала модель.
+- Экспорт удачной стратегии в формат каталога `catalogs/*.txt` (PR в апстрим
+  сообществу).
+
+---
+
+## 15. Чего делать нельзя (чек-лист самопроверки перед коммитом)
+
+- [ ] Не добавил внешних зависимостей (`pip`, новые пакеты opkg).
+- [ ] Не продублировал логику менеджеров внутри `core/mcp/` — только обёртки.
+- [ ] Не сломал поведение `strategy_scanner` при выносе общего состояния.
+- [ ] Ни один инструмент не выполняет `shell=True` и не склеивает команды
+      строкой; единственная точка исполнения произвольной строки —
+      `core/shell_exec.py` через `["sh", "-c", command]`, и она закрыта
+      разрешением `shell_full`.
+- [ ] Ни один ответ не содержит пароль/токен/приватный ключ/секрет (тест).
+- [ ] Нет синхронных инструментов дольше `tool_timeout_sec`.
+- [ ] Любое изменение состояния обратимо: снимок + `undo` или TTL + авто-откат.
+- [ ] Нет инструмента `teardown`; `system_reboot` — только под `dangerous`
+      и только через двухшаговое подтверждение.
+- [ ] Самоправка выключена по умолчанию; правки идут только через снимок +
+      проверки + сторож; защищённые файлы недоступны без `self_edit_core`;
+      выход за каталог установки невозможен (тест на `..` и симлинки).
+- [ ] Shell выключен по умолчанию; `deny_patterns` не обходятся кавычками,
+      лишними пробелами и `env`-префиксом (тест); вывод shell проходит
+      через `redact()`.
+- [ ] MCP выключен по умолчанию, токен пуст, все разрешения на запись
+      (включая `shell_readonly`/`shell_full`) — `false`.
+- [ ] Обновлены `CHANGELOG.md`, `README.md`, `CoderManual.md`, скил, индекс AGENTS.
+- [ ] `python3 -m pytest tests/ -q`, `make lint`, `python3 tools/gen_agent_index.py --check` — зелёные.
+
+---
+
+## Приложение A. Пример обмена
+
+```http
+POST /api/mcp HTTP/1.1
+Authorization: Bearer 3f9a…(64 hex)
+Content-Type: application/json
+MCP-Protocol-Version: 2025-06-18
+
+{"jsonrpc":"2.0","id":7,"method":"tools/call",
+ "params":{"name":"strategy_experiment_start","arguments":{
+   "variants":[{"label":"A","args":["--filter-tcp=443","--filter-l7=tls",
+                                     "--lua-desync=fake:blob=tls_clienthello_www_google_com"]},
+               {"label":"B","strategy_id":"tcp_oob"}],
+   "targets":["youtube.com"],"baseline":true,"ttl_sec":120}}}
+```
+
+```json
+{"jsonrpc":"2.0","id":7,"result":{
+  "content":[{"type":"text","text":"{\"run_id\":\"exp-20260916-153012\",\"state\":\"running\",\"eta_sec\":75}"}],
+  "structuredContent":{"run_id":"exp-20260916-153012","state":"running","eta_sec":75},
+  "isError":false}}
+```
+
+## Приложение B. Описание инструмента (образец)
+
+```python
+@tool(
+    name="strategy_experiment_start",
+    scope="experiments",
+    mutating=True,
+    title="Run A/B strategy experiment",
+    description=("Apply nfqws2 strategy variants one by one, probe targets and "
+                 "return per-target metrics, engine log tail and hints. "
+                 "Auto-reverts after ttl_sec unless committed. / Прогнать "
+                 "варианты стратегии с измерением результата и авто-откатом."),
+    schema={
+        "type": "object",
+        "properties": {
+            "variants": {"type": "array", "minItems": 1, "maxItems": 12,
+                          "items": {"type": "object", "properties": {
+                              "label": {"type": "string"},
+                              "args": {"type": "array", "items": {"type": "string"}},
+                              "strategy_id": {"type": "string"},
+                              "profiles": {"type": "array"}}}},
+            "targets": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+            "probes": {"type": "array", "items": {"enum": ["tls","http","body","quic","stun"]}},
+            "repeats": {"type": "integer", "minimum": 1, "maximum": 5},
+            "baseline": {"type": "boolean"},
+            "ttl_sec": {"type": "integer", "minimum": 30, "maximum": 900},
+            "keep_best": {"type": "boolean"},
+        },
+        "required": ["variants"],
+    },
+)
+def strategy_experiment_start(args: dict) -> dict:
+    """Запустить эксперимент со стратегиями (обёртка над core/strategy_experiment)."""
+    ...
+```
+
+## Приложение C. Shell: подтверждение и дедмен-свитч
+
+Первый вызов опасной команды — отказ с токеном и объяснением:
+
+```json
+{"name":"shell_exec","arguments":{"command":"opkg remove dnsmasq-full"}}
+→ {"isError": true,
+   "structuredContent": {
+     "need_confirm": true,
+     "confirm_token": "cf-9e1a…",           // живёт 60 секунд, одноразовый
+     "matched_rule": "opkg remove",
+     "consequences": "Удаление пакета может оставить LAN без DNS и DHCP.",
+     "hint": "Повтори через shell_confirm с этим confirm_token, если уверен."}}
+```
+
+Второй — исполнение:
+
+```json
+{"name":"shell_confirm","arguments":{"confirm_token":"cf-9e1a…"}}
+→ {"ok": true, "returncode": 0, "output": "Removing package dnsmasq-full…", "duration_ms": 1840}
+```
+
+Команда, которой легко отрезать себе доступ, обязана нести `guard`:
+
+```json
+{"name":"shell_exec","arguments":{
+  "command":"iptables -F FORWARD",
+  "guard":{"revert_cmd":"/opt/etc/init.d/S99zapret restart","ttl_sec":120}}}
+→ {"ok": true, "run_id": "sh-20260916-161120", "guard_expires_in": 120,
+   "hint":"Подтверди shell_confirm с run_id, иначе revert_cmd выполнится автоматически."}
+```
+
+Нет подтверждения за 120 с → `revert_cmd` выполняется сам, событие уходит в
+лог (`source="mcp"`) и в журнал аудита.
+
+## Приложение D. Сценарии, которые должны работать «из коробки» (для LM Studio)
+
+Проверить руками на устройстве перед закрытием фичи:
+
+1. «Почему не открывается rutracker?» → `probe_targets` → `dpi_report` →
+   `logs_tail` → вывод с объяснением.
+2. «Подбери стратегию для YouTube» → `catalog_search` + `lua_functions_list` →
+   `strategy_compose` → `strategy_validate` → `strategy_experiment_start` →
+   `..._result` → правка → `..._commit` → `strategy_save`.
+3. «Сколько свободно места и памяти?» → `shell_exec` (`df -h`, `free`).
+4. «Поставь htop» → `package_install` (требует `shell_full`).
+5. «Перезапусти dnsmasq» → `service_control`.
+6. «Покажи последние 50 строк системного лога» → `shell_exec` (`logread`) или
+   `file_read` (`/var/log/messages`).
+7. «Перезагрузи роутер» → `system_reboot` → подтверждение → перезагрузка.
+8. «Что ты вообще можешь?» → `tools/list` + ресурс `zapret://docs/overview`.
+
+## Приложение E. Самоправка: как выглядит удачный цикл
+
+```
+code_search {"pattern": "def compose_command", "path": "core/"}
+code_read   {"path": "core/nfqws_manager.py", "offset": 640, "limit": 60}
+code_patch  {"path": "core/nfqws_manager.py",
+             "edits": [{"old": "    argv.append(\"--daemon\")",
+                        "new": "    if not dry:\n        argv.append(\"--daemon\")"}]}
+code_check  {"paths": ["core/nfqws_manager.py"]}
+   → {"syntax": "ok", "import": "ok", "lint": "ok"}
+code_apply  {"reason": "фикс: не добавлять --daemon при валидации"}
+   → {"snapshot_id": "snap-20260916-1712", "restarting": true,
+      "hint": "подожди 5–10 с, вызови system_status, затем code_commit"}
+   … соединение рвётся, GUI перезапускается, сторож ждёт /api/status …
+system_status {}            → GUI жив, версия та же
+code_commit  {"snapshot_id": "snap-20260916-1712"}
+   → {"ok": true, "state": "committed"}
+code_export_patch {}        → unified diff для переноса в репозиторий
+```
+
+Если бы модуль не импортировался, `code_check` вернул бы ошибку и правка не
+попала бы на диск. Если бы GUI не поднялся — `core/code_guard.py` вернул бы
+снимок и перезапустил GUI сам, а в персистентном логе осталась бы причина.
