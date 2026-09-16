@@ -23,7 +23,9 @@
       со стратегиями nfqws2 с обратной связью (применил → измерил → откатил),
       shell-доступ ко всему роутеру (пакеты, службы, файлы) и самоправка
       модулей GUI на устройстве с авто-откатом. Готовый план и ТЗ —
-      [`docs/mcp-server-plan.md`](docs/mcp-server-plan.md).
+      [`docs/mcp-server-plan.md`](docs/mcp-server-plan.md), порядок работ и
+      бюджет контекста по сессиям —
+      [`docs/mcp-implementation-roadmap.md`](docs/mcp-implementation-roadmap.md).
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)
