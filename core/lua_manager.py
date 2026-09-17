@@ -55,6 +55,11 @@ class LuaManager:
         self._lock = threading.Lock()
         self._luac_cache = None  # lazily resolved
         self._lua_cache = None
+        # Карта --lua-desync функций: (сигнатура файлов, результат).
+        # Отдельный лок: парсинг читает скрипты через get_script(),
+        # а self._lock держат методы записи — брать его повторно нельзя.
+        self._desync_lock = threading.Lock()
+        self._desync_cache = None
 
     # ─── Пути ─────────────────────────────────────────────
 
@@ -320,6 +325,75 @@ class LuaManager:
                 "modified_from_bundled": modified_from_bundled,
             }
         return stats
+
+    # ─── Карта --lua-desync функций ──────────────────────
+
+    def desync_functions(self, refresh=False):
+        """Карта функций, вызываемых из ``--lua-desync=<имя>:...``.
+
+        Собирается **разбором самих скриптов**, а не руками: список,
+        записанный в код GUI, разойдётся с bundle в первый же апстрим
+        и вернёт ровно тот «тихий 0%», против которого нужен
+        (вызов несуществующей функции — ошибка рантайма nfqws2 на
+        конкретном пакете, а не ошибка запуска).
+
+        Читаем через :meth:`get_script` — то есть **те файлы, которые
+        реально лежат на lua_path**, с откатом на bundled. Правленый
+        на устройстве скрипт даёт правленую карту.
+
+        Returns:
+            list[dict]: ``name``, ``file``, ``builtin``, ``nfqws1``,
+            ``tpws``, ``standard_args``, ``args`` (``name``/``text``),
+            ``needs_blob``, ``notes``, ``overridden_in``.
+        """
+        signature = self._lua_signature()
+        with self._desync_lock:
+            cached = self._desync_cache
+            if not refresh and cached and cached[0] == signature:
+                return [dict(item) for item in cached[1]]
+
+        found = {}
+        for name in self.list_names():
+            content = self.get_script(name)
+            if not content or "desync" not in content:
+                continue
+            builtin = self._is_bundled(name)
+            for item in _parse_desync_functions(content):
+                item["file"] = name + ".lua"
+                item["builtin"] = builtin
+                previous = found.get(item["name"])
+                if previous is None:
+                    item["overridden_in"] = []
+                    found[item["name"]] = item
+                else:
+                    # Второе определение того же имени: в lua побеждает
+                    # загруженное последним, и молчать об этом нельзя —
+                    # именно так расширение подменяет функцию апстрима.
+                    previous["overridden_in"].append(item["file"])
+
+        result = [found[key] for key in sorted(found)]
+        with self._desync_lock:
+            self._desync_cache = (signature, [dict(i) for i in result])
+        return result
+
+    def _lua_signature(self):
+        """Отпечаток набора скриптов: путь, имя, размер, mtime.
+
+        Кеш карты живёт до правки любого скрипта: после
+        ``save_script``/``reset_to_bundled`` карта обязана измениться,
+        иначе модель получит описание функции, которой уже нет.
+        """
+        parts = [self.lua_path]
+        for name in self.list_names():
+            filepath = self._file_path(name)
+            if not os.path.exists(filepath):
+                filepath = self._bundled_path(name)
+            try:
+                st = os.stat(filepath)
+                parts.append("%s:%d:%d" % (name, st.st_size, int(st.st_mtime)))
+            except OSError:
+                parts.append("%s:?" % name)
+        return "|".join(parts)
 
     # ─── Проверка синтаксиса ─────────────────────────────
 
@@ -699,6 +773,90 @@ def _builtin_check(content):
         "warnings": warnings,
         "checker": "builtin",
     }
+
+
+# ══════════ Разбор --lua-desync функций из текста скрипта ══════════
+#
+# Формат комментария-шапки задан апстримом (zapret-antidpi.lua) и
+# соблюдается нашими расширениями:
+#
+#     -- nfqws1 : "--dpi-desync=fake"
+#     -- standard args : direction, payload, fooling, ip_id
+#     -- arg : blob=<blob> - fake payload
+#     function fake(ctx, desync)
+#
+# Точкой входа десинка считается только сигнатура ``(ctx, desync)``:
+# вспомогательные функции того же файла модели не нужны — из
+# ``--lua-desync=`` они не вызываются.
+
+_DESYNC_DEF_RE = re.compile(
+    r"^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*ctx\s*,\s*desync\s*\)",
+    re.M)
+
+# Строка шапки: "-- ключ : значение" (двоеточие может быть без пробела).
+_DOC_LINE_RE = re.compile(r"^--+\s*([A-Za-z0-9_ ]+?)\s*:\s*(.*)$")
+
+# Имя параметра в "-- arg : blob=<blob> - описание" / "-- arg : optional - …".
+_ARG_NAME_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _parse_desync_functions(content):
+    """Разобрать один скрипт: список точек входа с их шапками."""
+    lines = content.splitlines()
+    out = []
+    for match in _DESYNC_DEF_RE.finditer(content):
+        line_no = content.count("\n", 0, match.start())
+        header = _collect_header(lines, line_no)
+        item = {
+            "name": match.group(1),
+            "nfqws1": "",
+            "tpws": "",
+            "standard_args": [],
+            "args": [],
+            "notes": [],
+        }
+        for key, value in header:
+            low = key.lower()
+            if low == "nfqws1":
+                item["nfqws1"] = value.strip(' "')
+            elif low == "tpws":
+                item["tpws"] = value.strip(' "')
+            elif low in ("standard args", "standard arg"):
+                item["standard_args"] = [p.strip() for p in value.split(",")
+                                         if p.strip()]
+            elif low == "arg":
+                name = _ARG_NAME_RE.match(value)
+                item["args"].append({
+                    "name": name.group(1) if name else "",
+                    "text": value.strip(),
+                })
+            elif value:
+                item["notes"].append("%s: %s" % (key.strip(), value.strip()))
+        item["needs_blob"] = any(a["name"] in ("blob", "fake_blob")
+                                 for a in item["args"])
+        out.append(item)
+    return out
+
+
+def _collect_header(lines, def_line):
+    """Собрать непрерывный блок комментариев над строкой определения.
+
+    Возвращает пары (ключ, значение) в порядке появления; строки, не
+    похожие на "-- ключ : значение", пропускаются — свободный текст
+    апстрима (примеры, TODO) модели ничего не добавляет.
+    """
+    header = []
+    index = def_line - 1
+    while index >= 0:
+        line = lines[index].strip()
+        if not line.startswith("--"):
+            break
+        match = _DOC_LINE_RE.match(line)
+        if match:
+            header.append((match.group(1), match.group(2)))
+        index -= 1
+    header.reverse()
+    return header
 
 
 # ═══════════════════ Singleton ═══════════════════

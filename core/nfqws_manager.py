@@ -290,6 +290,7 @@ class NFQWSManager:
         self._rawsend_explained = False   # подсказку про EPERM даём 1 раз
         self._external = False        # процесс поднят не нами (автозапуск)
         self._last_external_scan = 0.0    # троттлинг скана /proc
+        self._help_cache = None       # (сигнатура бинарника, вывод `-?`)
 
         # Пробуем восстановить PID из файла при инициализации
         self._recover_pid()
@@ -634,6 +635,82 @@ class NFQWSManager:
             # тогда не от него, и UI об этом честно говорит.
             "external": bool(running and self._external),
         }
+
+    def get_help(self, refresh: bool = False, timeout: float = 6.0) -> dict:
+        """Справка `nfqws2 -?` **с этого устройства**.
+
+        Единственный честный источник списка флагов: у разных версий
+        zapret2 он разный, а захардкоженный в GUI текст описывал бы
+        чужой бинарник. Модели этот вывод нужен, чтобы не сочинять
+        несуществующие опции (их nfqws2 не примет, и стратегия просто
+        не запустится).
+
+        Кеш — на время жизни процесса, но **привязан к самому файлу**
+        (путь, размер, mtime): после обновления zapret2 справка меняется,
+        и старая уже врёт.
+
+        Args:
+            refresh: перечитать, даже если ответ уже в кеше.
+            timeout: сколько ждать бинарник (справка печатается сразу).
+
+        Returns:
+            dict: ``available`` (бинарник есть и запустился), ``binary``,
+            ``text``, ``returncode``, ``cached``, при неудаче — ``error``.
+        """
+        from core.config_manager import get_config_manager
+        binary = get_config_manager().get("zapret", "nfqws_binary")
+
+        if not binary or not os.path.isfile(binary):
+            return {"available": False, "binary": binary or "",
+                    "text": "", "returncode": None, "cached": False,
+                    "error": "бинарник nfqws2 недоступен: %s"
+                             % (binary or "путь не задан")}
+        if not os.access(binary, os.X_OK):
+            return {"available": False, "binary": binary,
+                    "text": "", "returncode": None, "cached": False,
+                    "error": "бинарник nfqws2 не исполняемый: %s" % binary}
+
+        try:
+            st = os.stat(binary)
+            signature = (binary, st.st_size, int(st.st_mtime))
+        except OSError as e:
+            return {"available": False, "binary": binary, "text": "",
+                    "returncode": None, "cached": False,
+                    "error": "не читается %s: %s" % (binary, e)}
+
+        cached = self._help_cache
+        if not refresh and cached and cached[0] == signature:
+            result = dict(cached[1])
+            result["cached"] = True
+            return result
+
+        # `-?` — штатный ключ справки nfqws2 (docs/manual.md zapret2).
+        # Выход при этом ненулевой, это нормально: значим сам текст.
+        try:
+            proc = subprocess.run(
+                [binary, "-?"], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, timeout=timeout, check=False)
+            text = (proc.stdout.decode("utf-8", errors="replace")
+                    if proc.stdout else "")
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            return {"available": False, "binary": binary, "text": "",
+                    "returncode": None, "cached": False,
+                    "error": "таймаут справки nfqws2 (%.0fс)" % timeout}
+        except OSError as e:
+            return {"available": False, "binary": binary, "text": "",
+                    "returncode": None, "cached": False,
+                    "error": "не удалось запустить %s: %s" % (binary, e)}
+
+        if not text.strip():
+            return {"available": False, "binary": binary, "text": "",
+                    "returncode": rc, "cached": False,
+                    "error": "nfqws2 -? не вывел ничего (код %s)" % rc}
+
+        result = {"available": True, "binary": binary, "text": text,
+                  "returncode": rc, "cached": False}
+        self._help_cache = (signature, dict(result))
+        return result
 
     # ─────────────────────── command builder ───────────────────────
 

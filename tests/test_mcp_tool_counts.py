@@ -25,8 +25,9 @@ from core.mcp import registry
 #
 # S2: четыре read-only инструмента-эталона (system_status, nfqws_status,
 # config_get, logs_tail). Остальные scope наполняют S4–S13.
+# S3: + docs_get, config_describe — справочники, тоже чтение.
 BY_SCOPE = {
-    "read": 4,
+    "read": 6,
     "control": 0,
     "strategies_write": 0,
     "config_write": 0,
@@ -88,7 +89,8 @@ class TestToolCounts(unittest.TestCase):
 
     def test_read_tools_are_named_in_the_table(self):
         names = sorted(spec.name for spec in registry.available_tools({}))
-        self.assertEqual(names, ["config_get", "logs_tail", "nfqws_status",
+        self.assertEqual(names, ["config_describe", "config_get",
+                                 "docs_get", "logs_tail", "nfqws_status",
                                  "system_status"])
 
 
