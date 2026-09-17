@@ -21,7 +21,7 @@ import uuid
 
 from bottle import request, response
 
-from core.mcp import auth, permissions, registry, server
+from core.mcp import auth, permissions, prompts, registry, resources, server
 
 
 # Заголовок, которым клиент сообщает ревизию спеки (обязателен после
@@ -162,6 +162,11 @@ def register(app):
             "tools_total": len(server.all_tools()),
             "tools_available": len(server.available_tools(perms)),
             "tools_by_scope": registry.scope_counts(perms),
+            # Справочники и сценарии разрешений не требуют: их число
+            # показывает UI, и по нему видно, что клиент подключился к
+            # полноценному серверу, а не к пустой заглушке.
+            "resources": len(resources.list_resources()),
+            "prompts": len(prompts.list_prompts()),
             "endpoint": "/api/mcp",
         })
 

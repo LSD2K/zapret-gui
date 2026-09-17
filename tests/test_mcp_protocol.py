@@ -257,20 +257,21 @@ class TestQuietMethods(unittest.TestCase):
 
     Клиенты опрашивают их сразу после initialize; «метод не найден»
     попадает им в лог как ошибка подключения, и пользователь идёт
-    чинить то, что не сломано.
+    чинить то, что не сломано. С S3 они отвечают не пустотой, а
+    настоящими списками (содержимое стережёт test_mcp_resources.py).
     """
 
-    def test_resources_list_is_empty_not_missing(self):
+    def test_resources_list_answers_with_resources(self):
         r = call("resources/list")
-        self.assertEqual(r["result"]["resources"], [])
+        self.assertTrue(r["result"]["resources"])
 
     def test_resource_templates_list(self):
         r = call("resources/templates/list")
-        self.assertEqual(r["result"]["resourceTemplates"], [])
+        self.assertTrue(r["result"]["resourceTemplates"])
 
-    def test_prompts_list_is_empty_not_missing(self):
+    def test_prompts_list_answers_with_prompts(self):
         r = call("prompts/list")
-        self.assertEqual(r["result"]["prompts"], [])
+        self.assertTrue(r["result"]["prompts"])
 
     def test_resources_read_says_not_found(self):
         r = call("resources/read", {"uri": "zapret://docs/strategies"})

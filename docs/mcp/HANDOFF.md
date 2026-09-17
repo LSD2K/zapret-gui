@@ -8,160 +8,149 @@
 
 ---
 
-## Состояние: после S2 (реестр, разрешения, секреты)
+## Состояние: после S3 (ресурсы, справочники, промты)
 
-**Дата:** 2026-09-17 · **Ветка/PR:** `claude/zen-fermat-zyyjgm`
+**Дата:** 2026-09-17 · **Ветка/PR:** `claude/ecstatic-fermat-o8i1ou`
 
 ### Сделано
 
-- `core/mcp/registry.py` (≈420) — `@tool`, проверки объявления,
-  автозагрузка `core/mcp/tools/*` через `pkgutil`, `call()`,
-  `tool_result()` (маскировка + обрезка), `scope_counts()`.
-- `core/mcp/permissions.py` (≈390) — 11 разрешений, зависимости,
-  `allowed/denial/describe`, граница записи настроек
-  (`is_writable`, `why_not_writable`, `writable_paths`,
-  `non_writable_paths`, `ENUMS`).
-- `core/mcp/redact.py` (≈190) — маска по ключам, URL подписок,
-  `redact_text()` для сырого текста.
-- `core/mcp/tools/{__init__,status,config,logs}.py` — четыре
-  read-only инструмента-эталона.
-- `core/mcp/server.py` — реестр вырезан, остались методы протокола и
-  псевдонимы (`register_tool`, `all_tools`, `tool_result`, `_REGISTRY`…).
-- `api/mcp.py` — `/api/mcp/info` отдаёт `permissions_effective`,
-  `permissions_info`, `tools_by_scope`.
-- `core/config_manager.py` — `ConfigManager.effective()`.
-- `core/log_buffer.py` — `get_filtered(source=, since=)`, `get_sources()`.
-- `.claude/skills/mcp/SKILL.md` + `python3 tools/gen_agent_index.py`.
-- тесты: `test_mcp_permissions.py` (21), `test_mcp_redaction.py` (13),
-  `test_mcp_tool_counts.py` (8, включая автозагрузку),
-  `test_mcp_writable_paths.py` (8), `test_mcp_tools.py` (21),
-  `test_mcp_schema.py` (+13) — **всего по `test_mcp_*` 198 зелёных**;
-  весь `tests/` — 3028 passed, 1 skipped; `make lint` чист.
+- `core/mcp/resources.py` (≈680) — схема `zapret://…`, семь ресурсов,
+  два шаблона URI, `render()` как **единственная** точка рендера и
+  редактирования секретов для этого канала, `describe_path()`,
+  `skill_sections()`, `complete()` для `completion/complete`.
+- `core/mcp/config_docs.py` (≈420) — словарь описаний настроек:
+  69 путей (все 43 writable + `zapret.*`, `firewall.*`, `gui.*`,
+  `mcp.limits.*`). **Данные, а не код**: тип/дефолт/значение туда не
+  пишутся, их даёт `describe_path()` живьём.
+- `core/mcp/prompts.py` (≈300) — три сценария; имена инструментов не
+  зашиты в текст, отсутствующие помечаются при рендере.
+- `core/mcp/tools/docs.py` (≈330) — `docs_get` (пагинация по
+  `mcp.limits.response_kb`) и `config_describe` (путь, префикс, поиск,
+  честное «описания нет»).
+- `core/mcp/server.py` — `resources/list`, `resources/read`,
+  `resources/templates/list`, `prompts/list`, `prompts/get`,
+  `completion/complete` отвечают по-настоящему; в `instructions`
+  добавлено «читайте docs_get, не придумывайте флаги».
+- `core/lua_manager.py` — `LuaManager.desync_functions()`: карта
+  `--lua-desync` разбором скриптов (117 функций), кеш по сигнатуре
+  файлов.
+- `core/nfqws_manager.py` — `NFQWSManager.get_help()`: живой
+  `nfqws2 -?`, кеш по (путь, размер, mtime).
+- `api/mcp.py` — `/api/mcp/info` отдаёт `resources` и `prompts`.
+- тесты: `test_mcp_resources.py` (28), `test_mcp_resources_mirror.py`
+  (19), `test_mcp_prompts.py` (13); правлены `test_mcp_protocol.py`
+  (пустые списки → настоящие) и `test_mcp_tool_counts.py`
+  (`read: 4 → 6`). По `test_mcp_*` — **258 зелёных**; весь `tests/` —
+  3088 passed, 1 skipped; `make lint` чист.
 
 ### Зафиксированные контракты
 
-**Объявление инструмента.**
+**Ресурс.** `resources.render(uri) -> {uri, title, mime_type, text, …}`;
+`UnknownResource` на чужой URI. Новый ресурс — запись в `_specs()` +
+рендерер, возвращающий `{"text": …}`; редактирование секретов,
+`mime_type` и `params` дописывает `_finish()`. Ресурс обязан попасть в
+`TOPICS` — иначе он доступен только тому, кто помнит схему URI (сторож
+это проверяет).
 
-```python
-from core.mcp.registry import tool
+**Зеркало.** Всё, что отдаёт `resources/read`, обязано читаться
+`docs_get` **дословно**. Живые ресурсы (меняются сами) перечислены в
+`resources.VOLATILE` и сравниваются по набору полей.
 
-@tool(name="logs_tail", scope="read", mutating=False, title="…",
-      description="EN / RU, ≤300", schema={"type": "object", …})
-def logs_tail(args: dict) -> dict: ...
-```
+**Форма «нет данных» против «нет такого».** `available: False` —
+честное «на устройстве этого нет» (нет бинарника, нет скила), ответ
+остаётся `ok: true`. `found: False` + `error` + `hint` — «запрошено
+несуществующее» (раздел 99, каталог `basic/nope`); `docs_get` делает из
+этого `isError`.
 
-`scope` — `"read"` или ключ из `permissions.PERMISSIONS`; хранится как
-`None` для чтения. `mutating=True` при `scope="read"` — `ToolError`.
-Модуль кладётся в `core/mcp/tools/`, **нигде не перечисляется**.
+**Пагинация.** `offset`/`limit` в символах, `truncated` +
+`next_offset`; страница — `mcp.limits.response_kb // 3` символов
+(`tools/docs.py:_page_budget`). Поля-подсказки (`sections`, `catalogs`)
+отдаются только на первой странице.
 
-**Вызов.** `registry.call(name, args, perms) -> dict` (готовый результат
-`tools/call`). Бросает `registry.UnknownTool` и `schema.SchemaError` —
-обе ловит `server._m_tools_call` и превращает в `-32602`. Всё остальное
-(нет разрешения, падение обработчика) — `isError` внутри результата.
+**Описания настроек.** `config_docs.DOCS[path] = {text, unit?, empty?,
+see?}`. Каждый writable-путь обязан быть описан (сторож). **S6:** в
+отказе `config_set` ссылаться сюда — `resources.describe_path(path)`
+уже возвращает `writable`, `writable_reason`, `enum`, `text`, `empty`.
 
-**Сериализация ровно одна** — `registry.tool_result(payload, is_error)`:
-`redact.redact()` → `json.dumps` → обрезка по `mcp.limits.response_kb`.
-`server.tool_result` — псевдоним, вызывающих менять не надо.
+**Промт.** Шаг — пара (имя инструмента, зачем). Существование
+проверяется при рендере; несуществующий помечается в тексте. Новый
+инструмент из S4–S10 автоматически перестаёт быть «пока недоступным» —
+править промты не нужно.
 
-**Разрешения.** `permissions.allowed(scope, perms)`,
-`permissions.denial(scope, perms)` (`{ok, error, permission, requires,
-missing, hint}`), `effective()`, `describe()`, `normalize()`.
-`REQUIRES = {"experiments": ("control", "probes"), "self_edit_core":
-("self_edit",)}`.
-
-**Запись настроек** (для S6): `permissions.is_writable(path)` — только
-листья внутри `WRITABLE_SECTIONS`, минус `DENY_PATHS`,
-`DENY_PATH_PREFIXES`, `DENY_KEY_RE` (расположения) и секретные ключи.
-`writable_paths()` отдаёт `{path, type, value, default, enum?}` — это
-готовый ответ `config_writable_paths`. Сейчас writable 43 пути, все
-перечислены в `tests/test_mcp_writable_paths.py::WRITABLE`.
-
-**Маскировка.** `redact.redact(payload)` — по ключам (`SECRET_KEY_RE`),
-URL под `URL_KEY_RE` → `https://host/…`, строки под `TEXT_KEYS`
-(`stdout`, `stderr`, `message`, `command`…) — ещё и `redact_text()`.
-S12/S13: сырой текст класть под ключ из `TEXT_KEYS` либо звать
-`redact.redact_text()` явно.
-
-**Счётчик инструментов — контракт.** `tests/test_mcp_tool_counts.py`
-держит таблицу `BY_SCOPE` (сейчас `read: 4`, остальные `0`). **Каждая
-следующая сессия правит её, добавляя свои инструменты** — это не
-формальность: цифра, изменившаяся не в той строке, означает инструмент,
-опубликованный не под тем разрешением.
-
-**Форма ответа инструмента** (эталон — `core/mcp/tools/*.py`): `ok`,
-при ошибке `error` + `hint`, у списков `items`/`count`/`truncated`,
-«нет данных» — честный ответ и что есть рядом (`available`, `sources`).
+**Счётчик инструментов.** `tests/test_mcp_tool_counts.py::BY_SCOPE`
+сейчас `read: 6`, остальные `0`. **Каждая следующая сессия правит его,
+добавляя свои** — и список имён в `test_read_tools_are_named_in_the_table`.
 
 ### Следующий шаг
 
-**S3** — [`03-resources.md`](03-resources.md): ресурсы, `docs_get`,
-`config_describe`, промты. Подключаться так:
+S3 закрыт; жёстких зависимостей ни у кого не осталось, кроме своих.
+Ближайшие по роадмапу и по пользе:
 
-1. `server._m_resources_list` / `_m_resources_read` / `_m_prompts_*` —
-   сейчас честные пустые списки, наполнять их там же.
-2. Новые инструменты (`docs_get`, `config_describe`) — файлом в
-   `core/mcp/tools/`, по образцу `tools/config.py`.
-3. `config_describe` берёт `permissions.writable_paths()` — ответ уже
-   содержит тип, текущее значение и `ENUMS`.
-4. После добавления инструментов — поправить `BY_SCOPE` в
-   `tests/test_mcp_tool_counts.py` и таблицу в
-   `.claude/skills/mcp/SKILL.md`.
+**S4** — [`04-readonly-nfqws.md`](04-readonly-nfqws.md): read-only
+инструменты nfqws2. Подключаться: файл в `core/mcp/tools/`, по образцу
+`tools/status.py`; каталоги уже читаются
+(`resources._catalog_manager()`), карта lua — `LuaManager.desync_functions()`,
+справка CLI — `NFQWSManager.get_help()`. `catalog_search` и
+`lua_functions_list` уже названы в промте `strategy_for_domain` — как
+только появятся, пометка «инструмента пока нет» уйдёт сама.
 
-S4/S5/S6/S12 не зависят от S3 и могут идти параллельно — реестр готов.
+**S6** — [`06-config-write.md`](06-config-write.md): `config_set`.
+Отказ обязан звать `permissions.why_not_writable()` **и**
+`resources.describe_path()`, иначе модель получит «нельзя» без «а что
+можно».
+
+**S11** — [`11-compose-validate.md`](11-compose-validate.md) теперь
+обеспечен справочником: `strategy_validate` строится на
+`NFQWSManager.dry_run()`, а линтер имён — на `desync_functions()`
+(имя, которого нет в карте, — та самая «тихая» ошибка).
 
 ### Что оказалось не так, как написано в задании
 
-1. **Секций `lists.*` и `install.*` в конфиге нет.** Задание называло их
-   среди writable-поддеревьев; в `DEFAULT_CONFIG` таких секций не
-   существует (списки живут файлами, пути к ним — в `zapret.*`, и они
-   закрыты как расположения). Whitelist содержит девять реально
-   существующих секций.
-2. **`register_tool()` из S1 оставлен** (низкий уровень, мягкие
-   умолчания) — на нём держатся тесты S1, регистрирующие временные
-   инструменты. Строгая проверка `scope`/`mutating` — в декораторе
-   `@tool`, все настоящие инструменты объявляются только им.
-3. **Пришлось тронуть `core/config_manager.py` и `core/log_buffer.py`**
-   (в задании их нет). `ConfigManager.effective()` — иначе `config_get`
-   отдавал бы пустое дерево везде, где менеджер не загружен (CLI,
-   тесты), и модель считала бы настройки отсутствующими.
-   `get_filtered(source=, since=)` — иначе хвост журнала пришлось бы
-   фильтровать на стороне модели, тратя её контекст. Обе правки
-   обратносовместимы и доступны теперь UI/CLI.
-4. **`test_mcp_writable_paths.py` написан здесь, а не отдан в S6** —
-   модель путей готова, сторож получился бесплатно.
-5. **Аудит вызовов не делался** — его место в S6 (JSONL + снимки для
-   `mcp_undo_last`). Сейчас в реестре только строки в лог-буфере:
-   `debug` на успешный вызов, `warning` на отклонённый.
+1. **Карты lua-функций в `lua_manager` не было** — задание говорило
+   «взять оттуда», но менеджер умел только файлы. Написан разбор шапок
+   (`-- nfqws1 :`, `-- standard args :`, `-- arg :` над
+   `function имя(ctx, desync)`) — формат апстрима, соблюдается и нашими
+   расширениями. Метод доступен теперь и UI/CLI.
+2. **Живого `nfqws2 -?` тоже неоткуда было взять** — `dry_run()` не
+   подходит (он про конкретный argv). Добавлен `get_help()`.
+3. **`zapret://state/current` нельзя зеркалить дословно** — состояние
+   меняется между двумя чтениями. Заведён `resources.VOLATILE`; сторож
+   сравнивает такие ресурсы по набору полей.
+4. **`config_describe` без аргументов отдаёт оглавление, а не всё** —
+   69 полных описаний в один ответ не влезают, а обрезанный список
+   соврал бы про их число.
+5. **`docs_get()` без аргументов отдаёт обзор**, а не отказ: вызов без
+   аргументов — это вопрос «что тут есть», и отвечать на него ошибкой
+   значит тратить ещё один вызов модели.
+6. **Секции `lists.*` в конфиге по-прежнему нет** (см. S2): задание S3
+   называло её среди того, что надо описать. Описаны реально
+   существующие `zapret.lists_path`/`ipset_path` — они про расположение
+   и закрыты на запись.
 
 ### Грабли
 
-- **Служебное поле со словом `key` маскируется.** `_keys` в ответе
-  `config_get` уезжало моделью как `"***"`: `redact` не знает, что поле
-  наше. Отсюда `_fields`. То же ждёт любое `*_key`, `*_token` в
-  служебных структурах.
-- **Метку времени нельзя округлять.** Модель возвращает `ts` в `since`,
-  чтобы дочитать хвост: округление вниз (было `round(ts, 3)`) отдаёт
-  последнюю запись второй раз, вверх — теряет соседнюю. Отдаём как есть.
-- **Тест, считающий записи в общем лог-буфере, нестабилен.** В него
-  пишут фоновые потоки других тестов и сама строка аудита вызова:
-  фильтруйте по своему `source`, а не по `nfqws`/`mcp`.
-- **Тест, регистрирующий инструмент, обязан убирать ТОЛЬКО своё.**
-  Безусловный `_REGISTRY.pop(name)` в `finally` выносит настоящий
-  инструмент, если тест проверял дубликат по его имени.
-- **Автозагрузка и `importlib.invalidate_caches()`.** Модуль, положенный
-  в `core/mcp/tools/` уже после старта процесса, без сброса кеша
-  импортёра не виден — `load_tools(force=True)` это делает.
-- **Ленивая загрузка ставит флаг только после успеха.** Иначе упавший
-  импорт одного модуля инструментов оставил бы реестр наполовину
-  собранным и «загруженным».
-- **`scope_allowed` спрашивает `permissions.allowed()`**, а не
-  `perms.get(scope)`: иначе `experiments` без `control`/`probes` был бы
-  доступен, хотя его зависимости не выполнены.
-- **Новый скил требует записи в `docs/upstream.json`.** Сторож
-  `tests/test_upstream_manifest.py` падает на скиле без апстрима.
-  Для `mcp` записан не чужой код, а **ревизия спеки** (`2025-06-18`,
-  она же `server.PROTOCOL_VERSION`), и `mentions` требуют, чтобы её
-  дословно упоминали скил и `core/mcp/server.py`.
+- **Плоский ответ теряет имя ключа, по которому маскируются секреты.**
+  `config_describe(path="gui.auth_password")` отдавал пароль в поле
+  `value`: `redact` смотрит на **имя ключа**, а оно осталось в `path`.
+  Разворачиваете путь в плоские поля — маскируйте сами
+  (`redact.is_secret_key(parts[-1])`). То же ждёт любой будущий
+  инструмент, отдающий «путь + значение».
+- **`resources/read` — второй канал наружу, мимо `tool_result()`.**
+  Редактирование секретов пришлось повторить в `render()`; сторож
+  `TestNoSecretsInResources` подставляет настоящий пароль в конфиг и
+  перебирает все ресурсы.
+- **Существующий тест «пустой список — это норма» ломается по делу.**
+  `test_mcp_protocol.py` фиксировал заглушки S1 (`resources: []`).
+  Такой тест надо править вместе с реализацией, а не «чинить» код.
+- **Сводка в конце промта перечисляет те же имена инструментов без
+  пометки** — сторож, читающий все строки подряд, падал на ней. Имена
+  проверяются только в строках шагов.
+- **Кеш справки `nfqws2 -?` — по файлу, а не по пути.** После
+  обновления zapret2 путь тот же, содержимое другое.
+- **Не класть карту lua в код.** Список имён, записанный руками,
+  разойдётся с bundle и вернёт ровно тот «тихий 0%», против которого
+  задуман: в lua вызов несуществующего глобала — ошибка рантайма на
+  конкретном пакете, а не ошибка запуска.
 
 ---
 

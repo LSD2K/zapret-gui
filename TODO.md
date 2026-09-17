@@ -36,11 +36,15 @@
       `core/mcp/tools/*`, модель разрешений и граница записи настроек,
       маскировка секретов в одной точке, четыре read-only
       инструмента-эталона и скил [`mcp`](.claude/skills/mcp/SKILL.md).
-      Точка выключена по умолчанию: токен пуст, все 11 разрешений
-      `false`. Следующий шаг — **S3**
-      ([`docs/mcp/03-resources.md`](docs/mcp/03-resources.md)): ресурсы,
-      `docs_get`, `config_describe`, промты; S4/S5/S6/S12 от него не
-      зависят и могут идти параллельно.
+      **Сделано: S3** — ресурсы `zapret://…` (живой `nfqws2 -?`, карта
+      `--lua-desync`, каталоги, состояние), их зеркало инструментом
+      `docs_get`, описания настроек `config_describe` и промты-сценарии
+      (`core/mcp/{resources,config_docs,prompts}.py`,
+      `core/mcp/tools/docs.py`). Точка выключена по умолчанию: токен
+      пуст, все 11 разрешений `false`. Следующий шаг — **S4**
+      ([`docs/mcp/04-readonly-nfqws.md`](docs/mcp/04-readonly-nfqws.md)):
+      read-only инструменты nfqws2; S5/S6/S12 от него не зависят и могут
+      идти параллельно.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)
