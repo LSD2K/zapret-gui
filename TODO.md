@@ -26,6 +26,12 @@
       [`docs/mcp-server-plan.md`](docs/mcp-server-plan.md), порядок работ и
       бюджет контекста по сессиям —
       [`docs/mcp-implementation-roadmap.md`](docs/mcp-implementation-roadmap.md).
+      **План нарезан на рабочие задания** (сессия S0): общий контракт —
+      [`docs/mcp/00-contract.md`](docs/mcp/00-contract.md), по файлу на
+      сессию `docs/mcp/NN-*.md`, эстафета —
+      [`docs/mcp/HANDOFF.md`](docs/mcp/HANDOFF.md). Следующий шаг — **S1**
+      ([`docs/mcp/01-transport.md`](docs/mcp/01-transport.md)): транспорт,
+      JSON-RPC, авторизация. Сам план целиком агенту не подаётся.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)
