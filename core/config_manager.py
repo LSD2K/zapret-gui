@@ -618,6 +618,21 @@ class ConfigManager:
         with self._lock:
             return copy.deepcopy(self._config)
 
+    def effective(self) -> dict:
+        """Полная конфигурация: дефолты, накрытые сохранённым.
+
+        Отличие от `get_all()` — не зависит от того, была ли загрузка и
+        есть ли ключ в файле: то, чего нет в `settings.json`, приезжает
+        из `DEFAULT_CONFIG`. Именно так настройки видит работающий GUI
+        (`load()` мержит дефолты при старте), и так же их должны видеть
+        читатели, которым менеджер достался «холодным» — MCP, CLI,
+        самодиагностика.
+        """
+        merged = copy.deepcopy(DEFAULT_CONFIG)
+        with self._lock:
+            ConfigManager._deep_merge(merged, copy.deepcopy(self._config))
+        return merged
+
     def update_section(self, section: str, data: dict) -> bool:
         """
         Обновить секцию конфигурации.
