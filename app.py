@@ -585,12 +585,31 @@ def create_app(config_dir: str = None) -> Bottle:
             pass
         return origin in _allowed_origins()
 
+    def _is_mcp_path(path: str) -> bool:
+        """Путь ведёт в MCP-точку (включая /api/v1/ alias)."""
+        return (path == "/api/mcp" or path.startswith("/api/mcp/")
+                or path == "/api/v1/mcp" or path.startswith("/api/v1/mcp/"))
+
     @app.hook("before_request")
     def _security_gate():
         # OPTIONS (CORS preflight) — без проверок: браузер не шлёт ни
         # креденшелы, ни тело; ответ отдаёт options_handler.
         if request.method == "OPTIONS":
             return
+        # 0) MCP со своим токеном проходит мимо гейта GUI. У MCP-клиента
+        #    нет ни Basic-кред, ни браузерного Origin, зато есть
+        #    Bearer-токен — и своя проверка (core/mcp/auth.check), более
+        #    строгая: bind, Origin, рейт-лимит. Без этой врезки при
+        #    gui.auth_enabled=true точка отдавала бы 401 ещё до неё.
+        #    Токен действует ТОЛЬКО здесь: на других маршрутах
+        #    token_is_valid не спрашивается вовсе.
+        if _is_mcp_path(request.path):
+            try:
+                from core.mcp.auth import token_is_valid
+                if token_is_valid(request.headers.get("Authorization", "")):
+                    return
+            except Exception:
+                pass
         # 1) CSRF: мутирующий cross-origin запрос отвергаем. Браузер шлёт
         #    Origin на POST/PUT/DELETE; same-origin SPA проходит. Без этого
         #    Basic-креды браузер сам приложил бы к cross-site запросу.

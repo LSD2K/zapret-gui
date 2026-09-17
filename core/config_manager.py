@@ -366,6 +366,71 @@ DEFAULT_CONFIG = {
         "whitelist": [],        # домены-исключения
         "interval_sec": 300,
     },
+
+    # --- MCP-сервер (Model Context Protocol) ---
+    # Внешняя модель (Claude Desktop/Code, LM Studio, Cline) ходит в
+    # POST /api/mcp тем же веб-сервером, что обслуживает GUI: адрес, порт
+    # и TLS — это gui.host/gui.port, отдельного слушателя нет.
+    #
+    # По умолчанию ВЫКЛЮЧЕН и пуст: enabled=False, token="" (пустой токен
+    # = выключено, 401 всем), все разрешения False. Новая настройка не
+    # становится доступной на запись сама по себе — её надо включить руками.
+    "mcp": {
+        "enabled": False,
+        "token": "",                       # 64 hex; пусто = выключено
+        # Разрешить вместо Bearer-токена обычную Basic-авторизацию GUI.
+        # Тогда MCP-доступ равен доступу к GUI — удобно, но шире.
+        "allow_gui_auth": False,
+        "bind": "inherit",                 # inherit | local
+        "transports": {"http": True, "sse": False},
+        # Разрешения (все 11 — см. docs/mcp/00-contract.md §4). Заводятся
+        # сразу целиком, хотя инструменты под shell_*/self_edit* появятся
+        # позже: иначе tools/list, счётчик инструментов и сторож
+        # writable-путей разойдутся между версиями.
+        "permissions": {
+            "control": False, "strategies_write": False,
+            "config_write": False, "probes": False, "experiments": False,
+            "tunnels_write": False, "dangerous": False,
+            "shell_readonly": False, "shell_full": False,
+            "self_edit": False, "self_edit_core": False,
+        },
+        "limits": {
+            "calls_per_minute": 60,        # рейт-лимит на токен
+            "response_kb": 32,             # жёсткая обрезка ответа инструмента
+            "tool_timeout_sec": 120,       # таймаут синхронного инструмента
+            "max_sessions": 4,             # для SSE-транспорта
+        },
+        "experiment": {
+            "default_ttl_sec": 180,        # дедмен-свитч
+            "stabilize_sec": 3,
+            "max_variants": 12,
+            "max_targets": 5,
+            "repeats": 2,
+            "keep_best_default": False,
+        },
+        "audit": {"enabled": True, "keep": 500},
+        "shell": {
+            "timeout_sec": 30,             # дефолтный таймаут команды
+            "max_timeout_sec": 300,        # потолок, который может запросить модель
+            "output_kb": 64,               # обрезка stdout+stderr
+            "workdir": "/opt",             # стартовый каталог
+            "max_jobs": 3,                 # одновременных async-команд
+            "allow_write_paths": ["/opt", "/tmp", "/etc"],   # для file_write
+            "guard_default_ttl_sec": 120,  # дедмен для команд с guard
+        },
+        "self_edit": {
+            "root": "",                    # пусто = каталог установки GUI
+            "snapshots_keep": 20,          # сколько версий хранить
+            "restart_timeout_sec": 45,     # сколько сторож ждёт /api/status
+            "commit_ttl_sec": 300,         # не подтвердил правку — откат
+            "run_tests": False,            # гонять pytest перед применением
+            # Список путей — данные, а не импорт: файлы могут появиться
+            # позже (их заводят сессии S12/S13), проверять существование
+            # на старте GUI нельзя.
+            "protected": ["core/mcp/auth.py", "core/mcp/permissions.py",
+                          "core/code_guard.py", "core/config_manager.py"],
+        },
+    },
 }
 
 
