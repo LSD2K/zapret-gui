@@ -32,6 +32,18 @@ NFT_TABLE = "zapret_gui"
 # Маркер комментария iptables для поиска и удаления
 IPT_COMMENT = "zapret-gui"
 
+# Номер очереди в тексте правила — во всех формах, в каких его печатают
+# iptables (`--queue-num 300`, `--queue-balance 300:303`) и nft
+# (`queue num 300`, `queue to 300-303`, `queue flags bypass to 300`).
+_QUEUE_NUM_RE = re.compile(
+    r"(?:--queue-num|--queue-balance|queue\s+num|queue\s+to|"
+    r"queue\s+flags\s+\S+\s+to)\s+(?P<nums>[\d:\-]+)")
+
+# Насколько широкий диапазон очередей считаем настоящим. `--queue-balance`
+# бывает на пару десятков очередей; «диапазон» шире — это разобранный не
+# так текст, и раскрывать его в тысячи чисел незачем.
+_QUEUE_RANGE_MAX = 64
+
 
 def _nft_port_set(spec: str) -> str:
     """
@@ -424,6 +436,144 @@ class FirewallManager:
             "rules": rules if applied else [],
             "rules_count": len(rules) if applied else 0,
         }
+
+    def queue_numbers(self, rules=None) -> list:
+        """Номера NFQUEUE, на которые уводят применённые правила.
+
+        Читаются из самих правил, а не из конфига: конфиг говорит, что
+        мы собирались сделать, а правила — что стоит в ядре сейчас.
+        Расхождение между ними — самая тихая из поломок обхода (см.
+        :meth:`get_conflicts`).
+        """
+        rules = self.get_rules() if rules is None else rules
+        seen = set()
+        for line in rules:
+            for match in _QUEUE_NUM_RE.finditer(str(line)):
+                # `--queue-num 300` — одно число; `--queue-balance 300:303`
+                # и `queue to 300-303` — диапазон, и он раскрывается
+                # целиком: движок на 301 в диапазоне 300:303 работает, и
+                # считать это расхождением нельзя.
+                bounds = [p for p in
+                          match.group("nums").replace("-", ":").split(":")
+                          if p.strip().isdigit()]
+                if not bounds:
+                    continue
+                low, high = int(bounds[0]), int(bounds[-1])
+                if high < low or high - low > _QUEUE_RANGE_MAX:
+                    seen.add(low)
+                    continue
+                seen.update(range(low, high + 1))
+        return sorted(seen)
+
+    def get_conflicts(self, rules=None) -> list:
+        """Расхождения между правилами, конфигом и движком.
+
+        Каждое из них выглядит одинаково снаружи — «обход включён, но не
+        работает», — и ни одно не видно ни в статусе движка, ни в
+        статусе firewall по отдельности. Поэтому сводятся они здесь, а
+        не в UI: тем же списком пользуется страница GUI, CLI и MCP.
+
+        Returns:
+            list[dict]: ``id``, ``severity`` (``error``/``warning``),
+            ``title``, ``detail``, ``hint``. Пустой список — всё сходится.
+        """
+        from core.config_manager import get_config_manager
+
+        rules = self.get_rules() if rules is None else rules
+        applied = self._rules_applied(rules)
+        cfg = get_config_manager()
+        try:
+            want_qnum = int(cfg.get("nfqws", "queue_num", default=300))
+        except (TypeError, ValueError):
+            want_qnum = 300
+
+        try:
+            from core.nfqws_manager import get_nfqws_manager
+            engine_running = bool(get_nfqws_manager().is_running())
+        except Exception:                       # noqa: BLE001 — граница
+            engine_running = None
+
+        found = []
+
+        queues = self.queue_numbers(rules)
+        if applied and engine_running is False:
+            where = (" %s" % ", ".join(str(q) for q in queues)
+                     if queues else "")
+            found.append({
+                "id": "rules_without_engine",
+                "severity": "error",
+                "title": "правила стоят, а nfqws2 не запущен",
+                "detail": "пакеты уводятся в очередь%s, читать её некому"
+                          % where,
+                "hint": "запустите движок или снимите правила — с "
+                        "--queue-bypass трафик идёт мимо обхода, без него "
+                        "он встаёт",
+            })
+        if not applied and engine_running:
+            found.append({
+                "id": "engine_without_rules",
+                "severity": "error",
+                "title": "движок запущен, а правила не применены",
+                "detail": "в NFQUEUE ничего не приходит, стратегия не "
+                          "срабатывает ни на одном пакете",
+                "hint": "примените правила firewall — без них движок "
+                        "молчит и в журнале пусто",
+            })
+
+        if applied and queues and want_qnum not in queues:
+            found.append({
+                "id": "queue_mismatch",
+                "severity": "error",
+                "title": "движок и правила смотрят в разные очереди",
+                "detail": "правила уводят в %s, движок слушает %d "
+                          "(nfqws.queue_num)"
+                          % (", ".join(str(q) for q in queues), want_qnum),
+                "hint": "приведите nfqws.queue_num и правила к одному "
+                        "номеру и перезапустите обход",
+            })
+
+        both = self._foreign_backend_rules()
+        if applied and both:
+            found.append({
+                "id": "two_backends",
+                "severity": "warning",
+                "title": "правила есть и в iptables, и в nftables",
+                "detail": "активный бэкенд — %s; чужие правила: %d"
+                          % (self.detect_fw_type() or "не определён",
+                             len(both)),
+                "hint": "один пакет попадёт в очередь дважды; снимите "
+                        "правила неиспользуемого бэкенда",
+            })
+
+        if not self.detect_fw_type():
+            found.append({
+                "id": "no_backend",
+                "severity": "error",
+                "title": "ни iptables, ни nft не найдены",
+                "detail": "перенаправить трафик в NFQUEUE нечем",
+                "hint": "Entware: opkg install iptables; OpenWrt: opkg "
+                        "install iptables-nft или nftables",
+            })
+
+        return found
+
+    def _foreign_backend_rules(self) -> list:
+        """Наши правила, стоящие НЕ тем бэкендом, который активен сейчас.
+
+        Собираются напрямую геттерами второго бэкенда: `get_rules()`
+        отдаёт только активный, и правила, оставшиеся от прошлой
+        конфигурации (сменили `firewall.type`, обновили прошивку),
+        иначе не видны вообще.
+        """
+        active = self.detect_fw_type()
+        try:
+            if active == "iptables":
+                return self._get_nftables_rules()
+            if active == "nftables":
+                return self._get_iptables_rules()
+        except Exception:                       # noqa: BLE001 — граница
+            return []
+        return []
 
     # ──────────────── WAN interfaces ────────────────
 

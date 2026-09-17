@@ -739,7 +739,7 @@ class NFQWSManager:
             from core.config_manager import get_config_manager
             cfg = get_config_manager()
         if binary is None:
-            binary = cfg.get("zapret", "nfqws_binary")
+            binary = resolve_binary(cfg)
 
         strategy_args = list(strategy_args or [])
         base_args = self._build_base_args(cfg)
@@ -1489,6 +1489,30 @@ class NFQWSManager:
                 os.remove(PID_FILE)
         except OSError:
             pass
+
+
+def resolve_binary(cfg=None) -> str:
+    """Путь к nfqws2 — с откатом на дефолт, а не на ``None``.
+
+    ``cfg.get()`` отдаёт только то, что записано в ``settings.json``, а
+    путь к бинарнику там по умолчанию не записан. У работающего GUI это
+    не видно (``load()`` мержит дефолты при старте), а вот «холодному»
+    читателю — MCP, CLI, самодиагностике — доставался ``None``, и argv
+    собирался с ``None`` в нулевом элементе: ``compose_command`` падал
+    на разборе аргументов ещё до того, как кто-нибудь успевал сказать
+    «бинарника нет».
+    """
+    if cfg is None:
+        from core.config_manager import get_config_manager
+        cfg = get_config_manager()
+    binary = cfg.get("zapret", "nfqws_binary")
+    if binary:
+        return binary
+    try:
+        return (cfg.effective().get("zapret") or {}).get(
+            "nfqws_binary") or ""
+    except Exception:                           # noqa: BLE001 — граница
+        return ""
 
 
 def _format_uptime(seconds: int) -> str:

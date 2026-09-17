@@ -24,10 +24,14 @@ from core.mcp import registry
 # scope → сколько инструментов его открывает. Отсутствие ключа — ноль.
 #
 # S2: четыре read-only инструмента-эталона (system_status, nfqws_status,
-# config_get, logs_tail). Остальные scope наполняют S4–S13.
+# config_get, logs_tail). Остальные scope наполняют S5–S13.
 # S3: + docs_get, config_describe — справочники, тоже чтение.
+# S4: + 13 read-only по nfqws2 — стратегии (5), списки и ассеты (6),
+# firewall (1), трафик (1). Все они читают и ничего не меняют, поэтому
+# уезжают в тот же набор «без единого разрешения»; write-операции по
+# тем же доменам заводит S7.
 BY_SCOPE = {
-    "read": 6,
+    "read": 19,
     "control": 0,
     "strategies_write": 0,
     "config_write": 0,
@@ -87,11 +91,29 @@ class TestToolCounts(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assertEqual(counts.get(scope, 0), expected)
 
+    READ_TOOLS = [
+        # S2 — эталоны
+        "config_get", "logs_tail", "nfqws_status", "system_status",
+        # S3 — справочники
+        "config_describe", "docs_get",
+        # S4 — стратегии
+        "catalog_search", "nfqws_command_preview", "strategy_get",
+        "strategy_list", "strategy_state_list",
+        # S4 — списки и ассеты
+        "blobs_list", "hostlist_get", "hostlists_list", "ipsets_list",
+        "lists_list", "lua_functions_list",
+        # S4 — перехват и трафик
+        "firewall_status", "traffic_recent",
+    ]
+
     def test_read_tools_are_named_in_the_table(self):
         names = sorted(spec.name for spec in registry.available_tools({}))
-        self.assertEqual(names, ["config_describe", "config_get",
-                                 "docs_get", "logs_tail", "nfqws_status",
-                                 "system_status"])
+        self.assertEqual(names, sorted(self.READ_TOOLS))
+
+    def test_the_named_table_matches_the_count(self):
+        # Две записи об одном и том же расходятся молча: список имён
+        # правят, число — забывают (или наоборот).
+        self.assertEqual(len(self.READ_TOOLS), BY_SCOPE["read"])
 
 
 class TestAutoload(unittest.TestCase):
