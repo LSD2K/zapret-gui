@@ -15,7 +15,11 @@ description: >-
   живой `nfqws2 -?`, карта `--lua-desync`, каталоги, зеркало «ресурс =
   инструмент» через `docs_get`), описаниях настроек
   (`core/mcp/config_docs.py`, `config_describe`) и промтах-сценариях
-  (`core/mcp/prompts.py`),
+  (`core/mcp/prompts.py`), read-only инструментах по nfqws2 (стратегии и
+  каталоги, хостлисты и ipset'ы, blob'ы и функции `--lua-desync`, правила
+  firewall, «дошёл ли трафик до движка»), общей форме списка и пагинации
+  (`core/mcp/tools/_paging.py`: `items`/`total`/`offset`/`limit`/
+  `truncated`, ужимание окна под лимит ответа),
   транспорте и авторизации (Bearer-токен, Origin, bind, рейт-лимит,
   `/api/mcp/info`), мини-валидаторе JSON Schema (`core/mcp/schema.py`),
   диспетчере JSON-RPC (`core/mcp/server.py`, ревизия спеки 2025-06-18,
@@ -26,7 +30,7 @@ description: >-
   привязка — наш код `core/mcp/*.py`, `core/mcp/tools/*.py`, `api/mcp.py`.
 ---
 
-# MCP-сервер zapret-gui — справочник для сессий S3+
+# MCP-сервер zapret-gui — справочник для сессий S5+
 
 Слепок того, **как устроен MCP в этом репозитории**. Читать вместо того,
 чтобы заново разбирать уже написанный код: контракт (`docs/mcp/00-contract.md`)
@@ -53,6 +57,7 @@ description: >-
 | `core/mcp/config_docs.py` | описания настроек (данные, не код) |
 | `core/mcp/prompts.py` | промты-сценарии |
 | `core/mcp/tools/*.py` | сами инструменты, по модулю на домен |
+| `core/mcp/tools/_paging.py` | общая форма списка и окно под лимит ответа (реестр модули с `_` пропускает) |
 
 ## Как объявляется инструмент
 
@@ -142,11 +147,57 @@ UI), и `tools_by_scope`.
 | `logs_tail` | read | нет | `tools/logs.py` | хвост журнала: `source`, `level`, `search`, `since`, `limit` ≤ 200 |
 | `docs_get` | read | нет | `tools/docs.py` | любой ресурс `zapret://…` постранично: `uri`/`topic`, `section`, `offset`/`limit` |
 | `config_describe` | read | нет | `tools/docs.py` | описание настройки: тип, дефолт, единица, что значит 0/пусто, writable |
+| `strategy_list` | read | нет | `tools/strategies.py` | стратегии (builtin+user) с `is_active`; фильтры protocol/level/source/featured/active_only |
+| `strategy_get` | read | нет | `tools/strategies.py` | одна стратегия целиком: профили, их args, `techniques`, blob'ы |
+| `catalog_search` | read | нет | `tools/strategies.py` | поиск по INI-каталогам: `query`, `technique`, protocol, level, label |
+| `nfqws_command_preview` | read | нет | `tools/strategies.py` | итоговый argv стратегии — через `build_preview_command`, как при живом запуске |
+| `strategy_state_list` | read | нет | `tools/strategies.py` | выученное circular'ом из `state.tsv`: host, `group`, номер, возраст |
+| `hostlists_list` | read | нет | `tools/lists.py` | списки доменов: сколько записей, путь, есть ли файл |
+| `hostlist_get` | read | нет | `tools/lists.py` | окно одного списка + `search`; на 50 000 доменов отдаёт окно, не дамп |
+| `ipsets_list` | read | нет | `tools/lists.py` | списки IP: перечень, с `name` — содержимое |
+| `lists_list` | read | нет | `tools/lists.py` | именованные списки единого слоя: домены и CIDR по списку |
+| `blobs_list` | read | нет | `tools/lists.py` | реестр blob'ов и **существует ли файл** (`missing_only`) |
+| `lua_functions_list` | read | нет | `tools/lists.py` | функции `--lua-desync` с этого устройства: параметры, `needs_blob` |
+| `firewall_status` | read | нет | `tools/firewall.py` | правила NFQUEUE, бэкенд, `queue_numbers`, `conflicts` |
+| `traffic_recent` | read | нет | `tools/traffic.py` | дошёл ли трафик до движка: домен/профиль/вердикт за N минут |
 
 Эталон формы — первые четыре: одинаковые имена полей, одинаковая
 обработка «нет данных», одинаковые лимиты. Новый инструмент делается по ним.
 `docs_get`/`config_describe` — эталон **постраничного** ответа
 (`offset`/`limit`/`truncated`/`next_offset`).
+
+### Списки: одна форма на всех (`tools/_paging.py`)
+
+Модуль с подчёркиванием — реестр такие пропускает. Через него проходит
+**каждый** список, и он же задаёт контракт:
+
+| Поле | Что значит |
+|---|---|
+| `items` | окно записей |
+| `total` | сколько подошло под фильтр **всего**, а не сколько отдано |
+| `count` | сколько в `items` |
+| `offset` / `limit` | какое окно отдано |
+| `truncated` | есть ли что-то за окном; при `true` — ещё и `next_offset` |
+
+`page()` **меряет собранный ответ и ужимает окно под
+`mcp.limits.response_kb`** (`shrunk_to_fit`, `requested_limit`): ответ сверх
+лимита реестр заменяет ЦЕЛИКОМ на «слишком много», и модель получает не
+страницу данных, а сообщение об ошибке. `empty(reason, hint)` — пустой
+список с объяснением; `unavailable(what, reason, hint)` — честное «этого на
+устройстве нет» при `ok: true`.
+
+### Что добавлено в `core/*.py` ради этих инструментов
+
+Логика в менеджерах, а не в `tools/*` — поэтому доступна и UI, и CLI:
+
+| Где | Что | Зачем |
+|---|---|---|
+| `models.CatalogEntry.desync_names()` | имена функций `--lua-desync` записи | «приём» стратегии; по ним же ищет `catalog_search` |
+| `catalog_loader.CatalogManager.find_entries()` | фильтры + окно + `total` | `search_entries` не умеет ни уровень, ни приём, ни окно |
+| `blob_registry.list_blobs()` | весь реестр + `exists` файла | нет файла = ПУСТОЙ fake, «тихий 0%» |
+| `firewall.get_conflicts()` / `queue_numbers()` | расхождения правил, движка и конфига | три разные поломки выглядят снаружи одинаково |
+| `nfqws_manager.resolve_binary()` | путь к бинарю с откатом на дефолт | `cfg.get()` отдавал `None`, и argv собирался с `None` в нулевом элементе |
+| `core/traffic_recent.py` | три источника «видел ли движок трафик» | «настроен ли домен» ≠ «дошёл ли пакет» |
 
 ## Ресурсы, справочники и промты (S3)
 
@@ -258,6 +309,7 @@ S12/S13 (shell, самоправка) отдают сырой текст: кла
 | `tests/test_mcp_resources.py` | `resources/*`, пагинация, «нет бинаря» ≠ падение | при новом ресурсе |
 | `tests/test_mcp_resources_mirror.py` | ресурс = `docs_get` дословно; writable-путь без описания | при новом ресурсе или настройке |
 | `tests/test_mcp_prompts.py` | промт не обещает несуществующий инструмент | при новом промте |
+| `tests/test_mcp_tools_nfqws.py` | инструменты S4: общая форма списка (перебором), пагинация, фильтры, «менеджера нет» ≠ падение, размер ответа | при новом списочном инструменте |
 
 Прогон: `python3 -m unittest discover -s tests -p "test_mcp_*.py"`; полный —
 `python3 -m unittest discover -s tests -t .`.
@@ -268,9 +320,23 @@ S12/S13 (shell, самоправка) отдают сырой текст: кла
   «пока не сделано».** Клиенты опрашивают их сразу после `initialize`.
 - **Реестр глобальный.** Тест, регистрирующий свой инструмент, обязан убрать
   его в `finally` — и **только если сам добавил** (иначе вынесет настоящий).
-- **Не называйте служебные поля со словом `key`.** `_keys` уедет моделью как
-  `"***"`: маскировка не знает, что поле ваше (поэтому в `config_get` —
-  `_fields`).
+- **Не называйте поля со словом `key` — и со словом `auth`.** `_keys`,
+  `by_key`, `author` уезжают модели как `"***"`: маскировка смотрит на имя
+  ключа и не знает, что поле ваше. Отсюда `_fields` в `config_get`, `group`
+  вместо `key` в `strategy_state_list` и `made_by` вместо `author` в
+  каталогах. Полный список масок — `redact.SECRET_KEY_RE`; ослаблять его
+  ради красивого имени поля нельзя, переименовывается поле.
+- **Фабрика менеджера — внутри `try`, а не перед ним.** На устройстве без
+  zapret2 падает сама `get_*_manager()`, и инструмент, обернувший только
+  вызов метода, всё равно отдаёт трассировку вместо ответа — ровно там, где
+  он нужнее всего.
+- **`cfg.get()` — это не `effective()`.** `get()` отдаёт только то, что
+  записано в `settings.json`; у «холодного» менеджера (MCP, CLI) порты и
+  путь к бинарнику оттуда приезжают как `None`. Дефолты живут в
+  `effective()`.
+- **`limit=100` не значит «влезет 100».** Сотня записей каталога — 40 КБ при
+  лимите 32; без ужимания в `_paging.page()` модель получила бы вместо
+  страницы «ответ слишком большой».
 - **Метку времени отдавайте без округления.** Модель возвращает `ts` в
   `since`, чтобы дочитать хвост: округление вниз повторяет последнюю запись,
   вверх — теряет соседнюю.

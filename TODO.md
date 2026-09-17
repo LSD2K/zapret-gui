@@ -40,11 +40,21 @@
       `--lua-desync`, каталоги, состояние), их зеркало инструментом
       `docs_get`, описания настроек `config_describe` и промты-сценарии
       (`core/mcp/{resources,config_docs,prompts}.py`,
-      `core/mcp/tools/docs.py`). Точка выключена по умолчанию: токен
-      пуст, все 11 разрешений `false`. Следующий шаг — **S4**
-      ([`docs/mcp/04-readonly-nfqws.md`](docs/mcp/04-readonly-nfqws.md)):
-      read-only инструменты nfqws2; S5/S6/S12 от него не зависят и могут
-      идти параллельно.
+      `core/mcp/tools/docs.py`). **Сделано: S4** — тринадцать read-only
+      инструментов по nfqws2: стратегии и каталоги (`strategy_list`,
+      `strategy_get`, `catalog_search`, `nfqws_command_preview`,
+      `strategy_state_list`), списки и ассеты (`hostlists_list`,
+      `hostlist_get`, `ipsets_list`, `lists_list`, `blobs_list`,
+      `lua_functions_list`), правила перехвата (`firewall_status` с
+      детектором расхождений) и «дошёл ли трафик до движка»
+      (`traffic_recent` — лог nfqws2, DNS-детектор, conntrack); общая
+      форма списка и пагинация с ужиманием под лимит ответа
+      (`core/mcp/tools/_paging.py`). Точка выключена по умолчанию: токен
+      пуст, все 11 разрешений `false`. Следующий шаг — **S5**
+      ([`docs/mcp/05-readonly-tunnels.md`](docs/mcp/05-readonly-tunnels.md))
+      или **S6**
+      ([`docs/mcp/06-config-write.md`](docs/mcp/06-config-write.md));
+      S5/S6/S12 друг от друга не зависят и могут идти параллельно.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)

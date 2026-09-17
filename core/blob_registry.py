@@ -197,6 +197,79 @@ def reload_registry():
         _registry.clear()
 
 
+def list_blobs() -> list:
+    """Весь реестр: имя, значение декларации, откуда оно и есть ли файл.
+
+    Нужен всем, кто проверяет стратегию до запуска. Имя, которого в
+    реестре нет, и имя, чей файл не существует, дают одинаково тихий
+    результат: nfqws2 запустится, отправит ПУСТОЙ fake и обход не
+    сработает — без ошибки при старте и без строки в журнале.
+
+    Returns:
+        list[dict]: ``name``, ``value`` (часть после ``NAME:``),
+        ``kind`` (``file``/``inline``/``builtin``), ``path`` (для
+        файловых), ``exists``, ``builtin``. Отсортирован по имени.
+    """
+    _ensure_loaded()
+    with _lock:
+        pairs = sorted(_registry.items())
+
+    out = []
+    for name in sorted(BUILTIN_BLOB_NAMES):
+        # Встроенные в nfqws2 имена в реестре не лежат (и не должны:
+        # декларировать их не надо), но модели они нужны — иначе она
+        # сочтёт fake_default_tls неизвестным и полезет его объявлять.
+        out.append({
+            "name": name,
+            "value": "",
+            "kind": "builtin",
+            "path": "",
+            "exists": True,
+            "builtin": True,
+        })
+
+    for name, value in pairs:
+        item = {
+            "name": name,
+            "value": value,
+            "kind": "inline" if str(value).startswith("0x") else "file",
+            "path": "",
+            "exists": True,
+            "builtin": False,
+        }
+        if item["kind"] == "file":
+            item["path"] = _blob_file_path(value)
+            item["exists"] = bool(item["path"]
+                                  and os.path.exists(item["path"]))
+        out.append(item)
+    return out
+
+
+def _blob_file_path(value: str) -> str:
+    """Путь к файлу из значения декларации ``@bin/file.bin``.
+
+    Относительные пути резолвятся тем же ``bin_path``, что и при сборке
+    argv (``CatalogManager.resolve_paths_in_args``), иначе «файла нет»
+    здесь означало бы «файла нет по другому пути», а это хуже, чем
+    молчание.
+    """
+    value = str(value or "").strip()
+    if not value.startswith("@"):
+        return ""
+    path = value[1:]
+    if os.path.isabs(path):
+        return path
+    if path.startswith("bin/"):
+        path = path[4:]
+    try:
+        from core.config_manager import get_config_manager
+        zapret = (get_config_manager().effective().get("zapret") or {})
+        base = zapret.get("bin_path") or "/opt/zapret2/files/fake"
+    except Exception:                   # noqa: BLE001 — граница
+        base = "/opt/zapret2/files/fake"
+    return os.path.join(base, path)
+
+
 def get_blob_value(name: str):
     """Значение декларации для имени blob'а или None, если не известно."""
     _ensure_loaded()

@@ -531,6 +531,28 @@ class CatalogEntry:
             return []
         return [line.strip() for line in self.args.split("\n") if line.strip()]
 
+    def desync_names(self) -> list[str]:
+        """Имена функций, вызываемых стратегией через ``--lua-desync=``.
+
+        Это «приём» стратегии в терминах каталога: ``fake``, ``split``,
+        ``multisplit``, ``disorder``, ``oob``… По ним ищут (MCP
+        ``catalog_search``, поиск в UI) и по ним же проверяют, что все
+        имена есть в карте ``LuaManager.desync_functions()`` — вызов
+        несуществующей функции nfqws2 примет при запуске и оборвёт
+        обработку на первом пакете.
+
+        Порядок — как в аргументах, дубликаты убраны.
+        """
+        names: list[str] = []
+        for arg in self.get_args_list():
+            if not arg.startswith("--lua-desync="):
+                continue
+            # "--lua-desync=fake:blob=x:repeats=6" → "fake"
+            name = arg.split("=", 1)[1].split(":", 1)[0].strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "section_id": self.section_id,

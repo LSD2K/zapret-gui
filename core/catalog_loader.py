@@ -623,6 +623,67 @@ class CatalogManager:
 
         return results
 
+    def find_entries(
+        self,
+        query: str = "",
+        protocol: str = "",
+        level: str = "",
+        technique: str = "",
+        label: str = "",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[CatalogEntry], int]:
+        """Поиск по каталогам с фильтрами и окном.
+
+        Отличие от :meth:`search_entries` — три вещи, без которых поиск
+        по каталогам бесполезен тому, кто не знает их наизусть:
+
+        * **фильтр по приёму** (``technique``): ``fake``, ``multisplit``,
+          ``disorder``… — имя функции ``--lua-desync``. Именно приёмом
+          стратегии и отличаются друг от друга, а в имени секции он
+          назван не всегда;
+        * **фильтр по уровню** (``basic``/``advanced``/``direct``);
+        * **окно** (``offset``/``limit``) и **общее число** найденного:
+          без фильтров каталоги отдают тысячи записей, и ответ, где
+          нет ``total``, врёт о размере выборки.
+
+        Пустой фильтр — «любой». ``query`` ищется в имени, авторе,
+        описании и ``section_id``; регистр не важен.
+
+        Returns:
+            ``(окно записей, сколько найдено всего)``. Порядок
+            стабильный: ключ каталога, затем ``section_id``.
+        """
+        self._ensure_loaded()
+
+        q = (query or "").strip().lower()
+        proto = (protocol or "").strip().lower()
+        lvl = (level or "").strip().lower()
+        tech = (technique or "").strip().lower()
+        lab = (label or "").strip().lower()
+
+        found: list[CatalogEntry] = []
+        with self._lock:
+            for key in sorted(self._cache.keys()):
+                key_level, _, key_proto = key.partition("/")
+                if proto and key_proto != proto:
+                    continue
+                if lvl and key_level != lvl:
+                    continue
+                for entry in sorted(self._cache[key],
+                                    key=lambda e: e.section_id):
+                    if lab and entry.label.lower() != lab:
+                        continue
+                    if tech and not _entry_has_technique(entry, tech):
+                        continue
+                    if q and not _entry_matches(entry, q):
+                        continue
+                    found.append(entry)
+
+        offset = max(0, int(offset or 0))
+        limit = max(1, int(limit or 50))
+        return found[offset:offset + limit], len(found)
+
     def get_stats(self) -> dict[str, Any]:
         """
         Статистика по каталогам.
@@ -752,6 +813,27 @@ class CatalogManager:
 
 _catalog_manager: Optional[CatalogManager] = None
 _catalog_lock = threading.Lock()
+
+
+def _entry_matches(entry: CatalogEntry, needle: str) -> bool:
+    """Подстрока в имени, авторе, описании или id секции."""
+    return (
+        needle in entry.name.lower()
+        or needle in entry.author.lower()
+        or needle in entry.description.lower()
+        or needle in entry.section_id.lower()
+    )
+
+
+def _entry_has_technique(entry: CatalogEntry, needle: str) -> bool:
+    """Использует ли стратегия приём ``needle``.
+
+    Сравниваем с **именами функций** ``--lua-desync``, а не с текстом
+    аргументов: подстрока `fake` иначе находится в `blob=fake_default_tls`
+    у любой стратегии, и фильтр перестаёт фильтровать. Префикс разрешён
+    (`split` находит `multisplit`), потому что приёмы так и называют.
+    """
+    return any(needle in name.lower() for name in entry.desync_names())
 
 
 def get_catalog_manager() -> CatalogManager:
