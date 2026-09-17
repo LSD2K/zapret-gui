@@ -151,8 +151,14 @@ class LogBuffer:
         return [e.to_dict() for e in entries if e.timestamp > since_timestamp]
 
     def get_filtered(self, level: str = None, search: str = None,
-                     n: int = 100) -> list:
-        """Получить записи с фильтрацией по уровню и тексту."""
+                     n: int = 100, source: str = None,
+                     since: float = None) -> list:
+        """Получить записи с фильтрацией по уровню, тексту и источнику.
+
+        `level` — минимальный уровень (он и все, что важнее),
+        `source` — точное имя подсистемы (`nfqws`, `mcp`, `awg`),
+        `since` — только записи новее этой метки времени (unix).
+        """
         with self._lock:
             entries = list(self._buffer)
 
@@ -161,11 +167,25 @@ class LogBuffer:
             entries = [e for e in entries
                        if LEVELS.get(e.level, LEVELS["INFO"])["priority"] >= min_priority]
 
+        if source:
+            source_lower = str(source).lower()
+            entries = [e for e in entries
+                       if (e.source or "").lower() == source_lower]
+
+        if since:
+            entries = [e for e in entries if e.timestamp > float(since)]
+
         if search:
             search_lower = search.lower()
             entries = [e for e in entries if search_lower in e.message.lower()]
 
         return [e.to_dict() for e in entries[-n:]]
+
+    def get_sources(self) -> list:
+        """Какие источники сейчас есть в буфере (для подсказки в UI/MCP)."""
+        with self._lock:
+            entries = list(self._buffer)
+        return sorted({e.source for e in entries if e.source})
 
     def clear(self):
         """Очистить буфер."""

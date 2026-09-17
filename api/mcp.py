@@ -21,7 +21,7 @@ import uuid
 
 from bottle import request, response
 
-from core.mcp import auth, server
+from core.mcp import auth, permissions, registry, server
 
 
 # Заголовок, которым клиент сообщает ревизию спеки (обязателен после
@@ -148,6 +148,12 @@ def register(app):
             "bind": cfg.get("bind", "inherit"),
             "transports": cfg.get("transports", {}),
             "permissions": perms,
+            # Разрешение может стоять, но не действовать: experiments без
+            # control/probes выключен. UI обязан показывать именно это,
+            # иначе пользователь видит включённый флаг и выключенные
+            # инструменты (модель разрешений — core/mcp/permissions.py).
+            "permissions_effective": permissions.effective(perms),
+            "permissions_info": permissions.describe(perms),
             "limits": cfg.get("limits", {}),
             "protocol_version": server.PROTOCOL_VERSION,
             "supported_protocol_versions":
@@ -155,6 +161,7 @@ def register(app):
             "gui_version": _gui_version(),
             "tools_total": len(server.all_tools()),
             "tools_available": len(server.available_tools(perms)),
+            "tools_by_scope": registry.scope_counts(perms),
             "endpoint": "/api/mcp",
         })
 

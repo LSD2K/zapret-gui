@@ -150,6 +150,25 @@
         "reason": "апстрим переписан с Go на Python в v1.0.0 — другая раскладка репозитория и другие ассеты релиза; мы намеренно ставим последний Go-релиз",
         "revisit": "когда решим переезжать на Python-ветку: понадобится новый arch_map/sha256 в BINARIES['tgwsproxy'] и пересверка §3 скила по новому источнику флагов"
       }
+    },
+    {
+      "id": "mcp-spec",
+      "repo": "modelcontextprotocol/modelcontextprotocol",
+      "kind": "branch",
+      "branch": "main",
+      "pinned": "2025-06-18",
+      "verified_at": "2026-09-17",
+      "skill": ".claude/skills/mcp/SKILL.md",
+      "mentions": [
+        ".claude/skills/mcp/SKILL.md",
+        "core/mcp/server.py"
+      ],
+      "paths": [
+        "schema/2025-06-18/schema.json",
+        "docs/specification/2025-06-18/index.mdx"
+      ],
+      "vendored": {},
+      "note": "Пиннинг — не версия чужого кода, а РЕВИЗИЯ спеки, на которой говорит наш сервер (server.PROTOCOL_VERSION). Ревизии date-based и выходят редко, но выход новой — это не «обновить число»: меняются методы и поля, а клиенты переходят не все, поэтому старые ревизии остаются в SUPPORTED_PROTOCOL_VERSIONS. paths стерегут, что пиннингу всё ещё соответствует реальная папка спеки: переименуют — узнаем сразу, а не когда клиент перестанет подключаться."
     }
   ]
 }

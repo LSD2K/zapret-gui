@@ -171,5 +171,151 @@ class TestNormalize(unittest.TestCase):
         self.assertIn("a", out["properties"])
 
 
+class TestToolDeclarations(unittest.TestCase):
+    """Каждый инструмент в реестре объявлен по правилам контракта §3.
+
+    Проверяется то, что уезжает модели и чего не видно на глаз: схема,
+    которую валидатор не разберёт; описание на полстраницы, съедающее
+    её контекст; забытый `scope`, открывающий инструмент всем.
+    """
+
+    def setUp(self):
+        from core.mcp import registry
+        self.registry = registry
+        self.tools = registry.all_tools()
+
+    def test_registry_is_not_empty(self):
+        self.assertGreaterEqual(len(self.tools), 4)
+
+    def test_names_are_snake_case(self):
+        for spec in self.tools:
+            with self.subTest(tool=spec.name):
+                self.assertRegex(spec.name, self.registry.NAME_RE)
+
+    def test_descriptions_are_short_and_bilingual(self):
+        # Описание читает модель: английский нужен ей, русский — нам,
+        # и оно уезжает целиком в каждый tools/list.
+        for spec in self.tools:
+            with self.subTest(tool=spec.name):
+                self.assertTrue(spec.description.strip())
+                self.assertLessEqual(len(spec.description),
+                                     self.registry.MAX_DESCRIPTION)
+                self.assertTrue(any("a" <= c.lower() <= "z"
+                                    for c in spec.description),
+                                "нет английской части")
+                self.assertTrue(any("а" <= c.lower() <= "я"
+                                    for c in spec.description),
+                                "нет русской части")
+
+    def test_scope_and_mutating_are_declared(self):
+        from core.mcp import permissions as perms
+        for spec in self.tools:
+            with self.subTest(tool=spec.name):
+                self.assertTrue(spec.scope is None
+                                or spec.scope in perms.SCOPES)
+                self.assertIsInstance(spec.mutating, bool)
+                if spec.mutating:
+                    self.assertIsNotNone(
+                        spec.scope,
+                        "мутирующий инструмент без scope доступен всем")
+
+    def test_schema_is_an_object_the_validator_understands(self):
+        for spec in self.tools:
+            with self.subTest(tool=spec.name):
+                self.assertEqual(spec.schema["type"], "object")
+                self.assertIsInstance(spec.schema["properties"], dict)
+                for key, sub in spec.schema["properties"].items():
+                    kind = sub.get("type")
+                    kinds = [kind] if isinstance(kind, str) else list(kind
+                                                                      or ())
+                    for one in kinds:
+                        self.assertIn(one, s.KNOWN_TYPES,
+                                      "%s.%s: тип %r валидатор не знает"
+                                      % (spec.name, key, one))
+
+    def test_empty_arguments_pass_validation(self):
+        # Клиент вправе не передать arguments вовсе; инструмент с
+        # обязательными полями обязан объявить их в required.
+        for spec in self.tools:
+            with self.subTest(tool=spec.name):
+                if spec.schema.get("required"):
+                    continue
+                s.validate({}, spec.schema, "arguments")
+
+
+class TestDeclarationIsCheckedAtImport(unittest.TestCase):
+    """Неверное объявление — исключение, а не тихая регистрация.
+
+    Инструмент, зарегистрировавшийся «как-нибудь», уедет модели и будет
+    ею вызван: ошибку надо получить на импорте, у себя, а не в чужом
+    клиенте.
+    """
+
+    def setUp(self):
+        from core.mcp import registry
+        self.registry = registry
+        registry.load_tools()
+
+    def declare(self, **kwargs):
+        """Объявить инструмент и убрать за собой.
+
+        Убираем ТОЛЬКО то, что добавили сами: проверка дубликата зовёт
+        declare() с именем настоящего инструмента, и безусловный pop()
+        вынес бы его из реестра для всех последующих тестов.
+        """
+        options = {"name": "test_decl_tool", "scope": "read",
+                   "mutating": False, "description": "test / тест",
+                   "schema": {"type": "object", "properties": {}}}
+        options.update(kwargs)
+        existed = options["name"] in self.registry._REGISTRY
+        try:
+            self.registry.tool(**options)(lambda args: {"ok": True})
+        finally:
+            if not existed:
+                self.registry._REGISTRY.pop(options["name"], None)
+
+    def test_valid_declaration_passes(self):
+        self.declare()
+
+    def test_name_must_be_snake_case(self):
+        for bad in ("ConfigGet", "config-get", "2fast", "config__get"):
+            with self.subTest(name=bad):
+                with self.assertRaises(self.registry.ToolError):
+                    self.declare(name=bad)
+
+    def test_description_is_required_and_bounded(self):
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(description="")
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(description="x" * 301)
+
+    def test_scope_and_mutating_are_mandatory(self):
+        with self.assertRaises(self.registry.ToolError):
+            self.registry.tool(name="test_decl_tool",
+                               description="t / т")(lambda args: {})
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(scope="конечно_можно")
+
+    def test_mutating_tool_cannot_be_read_scope(self):
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(mutating=True)
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(scope=None, mutating=True)
+
+    def test_broken_schema_is_caught(self):
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(schema={"type": "obj"})
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(schema={"type": "object",
+                                 "properties": {"a": {"type": "str"}}})
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(schema={"type": "object", "properties": {},
+                                 "required": ["a"]})
+
+    def test_duplicate_name_is_refused(self):
+        with self.assertRaises(self.registry.ToolError):
+            self.declare(name="config_get")
+
+
 if __name__ == "__main__":
     unittest.main()

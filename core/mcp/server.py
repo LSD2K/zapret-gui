@@ -21,17 +21,16 @@
   успешного, ни ошибочного. Батч отвечает массивом только по тем
   элементам, у которых ``id`` был.
 
-Реестр инструментов здесь **временный**: в S1 нужны два «подопытных»,
-на которых проверяется форма ответа. Настоящий реестр с декоратором
-``@tool``, разрешениями и редактированием секретов делает S2 —
-``register_tool`` и фильтр по ``scope`` уже сейчас написаны под него.
+Реестр инструментов живёт в ``core/mcp/registry.py``, сами инструменты —
+в ``core/mcp/tools/*.py``. Здесь остались только методы протокола и
+тонкие псевдонимы реестра (``register_tool``, ``all_tools``,
+``tool_result``…): диспетчер не должен знать, как устроено объявление
+инструмента, а вызывающие — где оно лежит.
 """
 
-import json
-import time
-import traceback
-
 from core.log_buffer import log
+from core.mcp import permissions as perms_mod
+from core.mcp import registry
 from core.mcp import schema as schema_mod
 from core.version import GUI_VERSION
 
@@ -45,8 +44,9 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 SERVER_NAME = "zapret-gui"
 
-# Сколько инструментов отдаём за одну страницу tools/list.
-TOOLS_PAGE_SIZE = 50
+# Сколько инструментов отдаём за одну страницу tools/list (размер
+# страницы задаёт реестр — он же нарезает список).
+TOOLS_PAGE_SIZE = registry.PAGE_SIZE
 
 # Коды JSON-RPC.
 PARSE_ERROR = -32700
@@ -58,82 +58,24 @@ INTERNAL_ERROR = -32603
 RESOURCE_NOT_FOUND = -32002
 
 
-class ToolSpec:
-    """Объявление инструмента в реестре."""
+# ─────────────────── реестр: псевдонимы (S2) ────────────────────────
+#
+# Сам реестр — в core/mcp/registry.py. Здесь оставлены имена, которыми
+# пользуются диспетчер, api/mcp.py и тесты: переезд реестра не должен
+# требовать правок в каждом вызывающем.
 
-    __slots__ = ("name", "handler", "title", "description", "schema",
-                 "scope", "mutating")
+ToolSpec = registry.ToolSpec
+register_tool = registry.register_tool
+tool = registry.tool
+get_tool = registry.get_tool
+all_tools = registry.all_tools
+available_tools = registry.available_tools
+scope_allowed = registry.scope_allowed
+tool_result = registry.tool_result
 
-    def __init__(self, name, handler, title, description, schema,
-                 scope=None, mutating=False):
-        self.name = name
-        self.handler = handler
-        self.title = title
-        self.description = description
-        self.schema = schema_mod.normalize_tool_schema(schema)
-        self.scope = scope
-        self.mutating = bool(mutating)
-
-    def to_wire(self) -> dict:
-        """Вид инструмента в ответе ``tools/list``."""
-        item = {
-            "name": self.name,
-            "description": self.description,
-            "inputSchema": self.schema,
-        }
-        if self.title:
-            item["title"] = self.title
-        # Подсказки клиенту: read-only инструмент можно звать без
-        # подтверждения, мутирующий — спросив пользователя.
-        item["annotations"] = {
-            "title": self.title or self.name,
-            "readOnlyHint": not self.mutating,
-            "destructiveHint": False,
-            "openWorldHint": False,
-        }
-        meta = {"scope": self.scope or "read", "mutating": self.mutating}
-        item["_meta"] = {"zapret-gui": meta}
-        return item
-
-
-# Реестр: имя → ToolSpec. Порядок объявления сохраняется (важен для
-# постраничной выдачи: курсор — это позиция в этом порядке).
-_REGISTRY = {}
-
-
-def register_tool(name, handler, *, description, title="", schema=None,
-                  scope=None, mutating=False):
-    """Зарегистрировать инструмент. Повторное имя — ошибка программиста."""
-    if name in _REGISTRY:
-        raise ValueError("инструмент %r уже зарегистрирован" % name)
-    _REGISTRY[name] = ToolSpec(name, handler, title, description,
-                               schema or {}, scope, mutating)
-    return _REGISTRY[name]
-
-
-def get_tool(name):
-    return _REGISTRY.get(name)
-
-
-def all_tools():
-    """Все объявленные инструменты, в порядке регистрации."""
-    return list(_REGISTRY.values())
-
-
-def available_tools(perms=None):
-    """Инструменты, доступные при данных разрешениях."""
-    perms = perms if perms is not None else _permissions()
-    return [t for t in _REGISTRY.values() if scope_allowed(t, perms)]
-
-
-def scope_allowed(spec: ToolSpec, perms: dict) -> bool:
-    """Открыт ли ``scope`` инструмента текущими разрешениями.
-
-    Инструмент без ``scope`` — чтение, оно доступно всегда.
-    """
-    if not spec.scope:
-        return True
-    return bool(perms.get(spec.scope))
+# Тот же самый словарь, а не копия: тест, который убирает за собой
+# инструмент через _REGISTRY.pop(), обязан попасть в настоящий реестр.
+_REGISTRY = registry._REGISTRY
 
 
 # ─────────────────────────── точка входа ────────────────────────────
@@ -324,7 +266,10 @@ def _m_ping(params, ctx):
 
 def _m_tools_list(params, ctx):
     perms = _permissions_from(ctx)
-    tools = available_tools(perms)
+    # Реестр отдаёт список, отсортированный по имени: курсор — это
+    # позиция в нём, и она не должна зависеть от того, в каком порядке
+    # импортировались модули инструментов.
+    tools = registry.available_tools(perms)
 
     start = 0
     cursor = params.get("cursor")
@@ -354,16 +299,6 @@ def _m_tools_call(params, ctx):
                             "поле 'name': нужно имя инструмента",
                             {"field": "name"})
 
-    spec = get_tool(name)
-    if spec is None:
-        known = ", ".join(sorted(t.name for t in available_tools(
-            _permissions_from(ctx))))
-        raise _JsonRpcError(
-            INVALID_PARAMS,
-            "инструмент %s не найден; доступны: %s" % (name, known or "нет"),
-            {"field": "name"},
-        )
-
     arguments = params.get("arguments")
     if arguments is None:
         arguments = {}
@@ -372,42 +307,17 @@ def _m_tools_call(params, ctx):
                             "поле 'arguments': ожидается object",
                             {"field": "arguments", "expected": "object"})
 
-    perms = _permissions_from(ctx)
-    if not scope_allowed(spec, perms):
-        # Не хватает разрешения — это ответ инструмента, а не ошибка
-        # протокола: модель должна прочитать текст и сказать пользователю,
-        # что включить.
-        return tool_result(
-            {"ok": False,
-             "error": "нет разрешения %s" % spec.scope,
-             "permission": spec.scope,
-             "hint": "включите разрешение «%s» в настройках MCP"
-                     % spec.scope},
-            is_error=True,
-        )
-
+    # Весь цикл вызова (разрешение → валидация → вызов → редактирование
+    # секретов → обрезка) — в реестре. Сюда возвращаются только две
+    # ситуации, которые про сам протокол, а не про инструмент: имени нет
+    # в реестре и аргументы не по схеме.
     try:
-        arguments = schema_mod.validate(arguments, spec.schema, "arguments")
+        return registry.call(name, arguments, _permissions_from(ctx))
+    except registry.UnknownTool as e:
+        raise _JsonRpcError(INVALID_PARAMS, str(e.args[0] if e.args else e),
+                            {"field": "name"})
     except schema_mod.SchemaError as e:
         raise _JsonRpcError(INVALID_PARAMS, e.message, e.to_error_data())
-
-    started = time.time()
-    try:
-        payload = spec.handler(arguments)
-    except Exception as e:                      # noqa: BLE001 — граница
-        log.error("MCP: инструмент %s упал: %s" % (name, e), source="mcp")
-        log.debug(traceback.format_exc(), source="mcp")
-        return tool_result(
-            {"ok": False, "error": "%s: %s" % (type(e).__name__, e),
-             "tool": name},
-            is_error=True,
-        )
-
-    if not isinstance(payload, dict):
-        payload = {"ok": True, "result": payload}
-    payload.setdefault("ok", True)
-    payload.setdefault("elapsed_ms", int((time.time() - started) * 1000))
-    return tool_result(payload, is_error=not payload.get("ok", True))
 
 
 def _m_resources_list(params, ctx):
@@ -480,70 +390,6 @@ _METHODS = {
 }
 
 
-# ───────────────────────── результат инструмента ─────────────────────
-
-def tool_result(payload: dict, is_error: bool = False) -> dict:
-    """Собрать ответ ``tools/call`` из словаря инструмента.
-
-    Отдаём и ``structuredContent`` (машинно-читаемо), и тот же JSON
-    строкой в ``content[0].text`` — клиенты, не умеющие
-    ``structuredContent``, иначе увидят пустой ответ.
-
-    Здесь же — **единственная точка** обрезки по ``mcp.limits.response_kb``.
-    Редактирование секретов (``core/mcp/redact.py``) встраивается сюда же
-    в S2: одна точка на все инструменты, а не по одной на каждый.
-    """
-    text = _dumps(payload)
-    limit = _response_limit_bytes()
-    if limit and len(text.encode("utf-8")) > limit:
-        payload, text = _truncated(payload, limit)
-    return {
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": payload,
-        "isError": bool(is_error),
-    }
-
-
-def _truncated(payload: dict, limit: int):
-    """Заменить слишком большой ответ на объяснение, а не на обрубок.
-
-    Обрезать JSON посередине нельзя: клиент получит неразбираемую
-    строку и не поймёт, что произошло. Честнее отдать валидный объект,
-    который прямо говорит «слишком много, сузьте запрос».
-    """
-    size = len(_dumps(payload).encode("utf-8"))
-    keep = {k: v for k, v in payload.items()
-            if isinstance(v, (bool, int, float, str)) or v is None}
-    short = {
-        "ok": payload.get("ok", True),
-        "truncated": True,
-        "size_bytes": size,
-        "limit_bytes": limit,
-        "hint": "ответ больше лимита mcp.limits.response_kb — сузьте "
-                "запрос (фильтр, limit, пагинация)",
-    }
-    # Скаляры верхнего уровня оставляем: по ним видно, что вообще
-    # произошло, и они заведомо короткие.
-    for key, value in keep.items():
-        if key not in short and len(short) < 24:
-            short[key] = value
-    return short, _dumps(short)
-
-
-def _response_limit_bytes() -> int:
-    try:
-        from core.mcp import auth
-        kb = int(auth.settings().get("limits", {}).get("response_kb", 32))
-    except Exception:
-        kb = 32
-    return max(0, kb) * 1024
-
-
-def _dumps(payload) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=False,
-                      default=str)
-
-
 # ────────────────────────────── разрешения ──────────────────────────
 
 def _permissions_from(ctx) -> dict:
@@ -552,112 +398,4 @@ def _permissions_from(ctx) -> dict:
 
 
 def _permissions() -> dict:
-    from core.mcp import auth
-    return auth.permissions()
-
-
-# ───────────────────── временные инструменты S1 ─────────────────────
-#
-# Два «подопытных», на которых проверяется форма ответа tools/call.
-# В S2 они переезжают в core/mcp/tools/status.py под декоратор @tool —
-# здесь они живут только потому, что реестра ещё нет.
-
-def _tool_system_status(args: dict) -> dict:
-    """Сводка по устройству: платформа, аптайм, память, что запущено."""
-    from core.config_manager import get_config_manager
-    from core.system_info import get_system_info
-
-    cfg = get_config_manager()
-    return {
-        "ok": True,
-        "system": get_system_info(),
-        "gui_version": GUI_VERSION,
-        "strategy": {
-            "id": cfg.get("strategy", "current_id"),
-            "name": cfg.get("strategy", "current_name") or "Не выбрана",
-        },
-        "engines": _engines_running(),
-        "timestamp": int(time.time()),
-    }
-
-
-def _engines_running() -> dict:
-    """Какие движки сейчас подняты. Недоступный движок — ``None``.
-
-    Каждый опрашивается отдельно и под ``try``: на устройстве может не
-    быть половины из них, и это не повод ронять сводку целиком.
-    """
-    engines = {}
-
-    def probe(name, fn):
-        try:
-            engines[name] = fn()
-        except Exception:
-            engines[name] = None
-
-    probe("nfqws", lambda: bool(
-        _nfqws_manager().get_status().get("running")))
-    probe("firewall", lambda: bool(
-        __import__("core.firewall", fromlist=["x"])
-        .get_firewall_manager().get_status().get("applied")))
-    probe("awg", lambda: _count_active(
-        __import__("core.awg_manager", fromlist=["x"])
-        .get_awg_manager().list_configs(), "active"))
-    probe("singbox", lambda: _count_active(
-        __import__("core.singbox_manager", fromlist=["x"])
-        .get_singbox_manager().list_configs(), "running"))
-    probe("mihomo", lambda: _count_active(
-        __import__("core.mihomo_manager", fromlist=["x"])
-        .get_mihomo_manager().list_configs(), "running"))
-    return engines
-
-
-def _count_active(configs, key) -> int:
-    return sum(1 for c in (configs or [])
-               if isinstance(c, dict) and c.get(key))
-
-
-def _tool_nfqws_status(args: dict) -> dict:
-    """Состояние движка nfqws2: pid, аптайм, argv последнего запуска."""
-    from core.config_manager import get_config_manager
-
-    status = dict(_nfqws_manager().get_status())
-    cfg = get_config_manager()
-    status["strategy"] = {
-        "id": cfg.get("strategy", "current_id"),
-        "name": cfg.get("strategy", "current_name") or "Не выбрана",
-    }
-    status["ok"] = True
-    return status
-
-
-def _nfqws_manager():
-    from core.nfqws_manager import get_nfqws_manager
-    return get_nfqws_manager()
-
-
-def register_builtin_tools():
-    """Зарегистрировать инструменты S1 (идемпотентно)."""
-    if "system_status" in _REGISTRY:
-        return
-    register_tool(
-        "system_status", _tool_system_status,
-        title="System status",
-        description=("Router summary: platform, uptime, RAM, GUI version, "
-                     "current strategy and which engines are running. / "
-                     "Сводка по устройству и запущенным движкам."),
-        schema={"type": "object", "properties": {},
-                "additionalProperties": False},
-    )
-    register_tool(
-        "nfqws_status", _tool_nfqws_status,
-        title="nfqws2 status",
-        description=("State of the nfqws2 DPI-bypass engine: running, pid, "
-                     "uptime, binary, argv of the last start, exit code. / "
-                     "Состояние движка nfqws2."),
-        schema={"type": "object", "properties": {},
-                "additionalProperties": False},
-    )
-
-
-register_builtin_tools()
+    return perms_mod.current()
