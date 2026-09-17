@@ -22,7 +22,9 @@ import sys
 def make_environ(method: str, path: str, *,
                  body: bytes = None,
                  query: str = "",
-                 content_type: str = "") -> dict:
+                 content_type: str = "",
+                 headers: dict = None,
+                 remote_addr: str = "127.0.0.1") -> dict:
     env = {
         "REQUEST_METHOD":    method.upper(),
         "PATH_INFO":         path,
@@ -31,6 +33,7 @@ def make_environ(method: str, path: str, *,
         "SERVER_PORT":       "80",
         "SERVER_PROTOCOL":   "HTTP/1.1",
         "HTTP_HOST":         "localhost",
+        "REMOTE_ADDR":       remote_addr,
         "wsgi.version":      (1, 0),
         "wsgi.url_scheme":   "http",
         "wsgi.input":        io.BytesIO(),
@@ -44,6 +47,13 @@ def make_environ(method: str, path: str, *,
         env["CONTENT_LENGTH"] = str(len(body))
         if content_type:
             env["CONTENT_TYPE"] = content_type
+    # Произвольные заголовки: нужны там, где проверяется не тело, а
+    # политика доступа — Authorization, Origin, MCP-Protocol-Version.
+    for name, value in (headers or {}).items():
+        key = "HTTP_" + name.upper().replace("-", "_")
+        if key in ("HTTP_CONTENT_TYPE", "HTTP_CONTENT_LENGTH"):
+            key = key[5:]
+        env[key] = value
     return env
 
 
@@ -57,12 +67,15 @@ class WSGIClient:
 
     def _call(self, method: str, path: str, *,
               body: bytes = None,
-              content_type: str = ""):
+              content_type: str = "",
+              headers: dict = None,
+              remote_addr: str = "127.0.0.1"):
         # Query-string отделяем сами: в PATH_INFO он превращался в часть
         # пути, и запрос вида "/api/x?y=1" молча отдавал 404.
         path, _, query = path.partition("?")
         env = make_environ(method, path, query=query,
-                           body=body, content_type=content_type)
+                           body=body, content_type=content_type,
+                           headers=headers, remote_addr=remote_addr)
         result = {"status": "", "headers": []}
 
         def start_response(status, headers, exc_info=None):
@@ -119,6 +132,45 @@ class WSGIClient:
             return self._call("POST", path, body=data,
                               content_type="application/json")
         return self._call("POST", path, body=body or b"")
+
+    def request(self, method: str, path: str, *, body=None,
+                content_type: str = "", headers: dict = None,
+                remote_addr: str = "127.0.0.1"):
+        """Полный ответ: (код, {заголовок: значение}, разобранное тело).
+
+        Нужен там, где проверяется политика ответа, а не только данные:
+        Allow у 405, WWW-Authenticate у 401, Retry-After у 429.
+        """
+        data = body
+        if isinstance(body, (dict, list)):
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            content_type = content_type or "application/json"
+        elif isinstance(body, str):
+            data = body.encode("utf-8")
+
+        path, _, query = path.partition("?")
+        env = make_environ(method, path, query=query, body=data,
+                           content_type=content_type, headers=headers,
+                           remote_addr=remote_addr)
+        result = {"status": "", "headers": []}
+
+        def start_response(status, resp_headers, exc_info=None):
+            result["status"] = status
+            result["headers"] = resp_headers
+            return lambda s: None
+
+        body_iter = self.app(env, start_response)
+        try:
+            chunks = [b if isinstance(b, bytes) else b.encode("utf-8")
+                      for b in body_iter]
+            raw = b"".join(chunks)
+        finally:
+            close = getattr(body_iter, "close", None)
+            if callable(close):
+                close()
+        parsed = _parse_response(result["status"], raw)
+        resp_headers = {k.lower(): v for k, v in result["headers"]}
+        return parsed["_status"], resp_headers, parsed
 
     def put(self, path: str, body=None):
         if isinstance(body, (dict, list)):

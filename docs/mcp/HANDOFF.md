@@ -8,61 +8,147 @@
 
 ---
 
-## Состояние: после S0 (нарезка плана)
+## Состояние: после S1 (транспорт и протокол)
 
-**Дата:** 2026-09-16 · **Ветка/PR:** `claude/nice-dijkstra-idateo`
+**Дата:** 2026-09-17 · **Ветка/PR:** `claude/nice-dijkstra-idateo`
 
 ### Сделано
 
-- `docs/mcp-server-plan.md` разложен на рабочую нарезку `docs/mcp/`:
-  `00-contract.md` (общие правила, читается всегда) + 16 файлов-заданий
-  `NN-*.md` (по одному на сессию) + этот `HANDOFF.md`.
-- Сам план **не менялся по существу** — только врезка сверху о том, что в
-  работу подаётся нарезка. Он остаётся источником и архивом.
+- `core/mcp/schema.py` (≈300) — мини-валидатор JSON Schema и
+  `normalize_tool_schema()`. Поддержано: `type` (в т.ч. список),
+  `required`, `enum`, `minimum/maximum`, `minLength/maxLength/pattern`,
+  `minItems/maxItems`, `properties`, `items`, `default`,
+  `additionalProperties: false`. Остального (`anyOf`, `$ref`, `format`)
+  **нет намеренно**.
+- `core/mcp/server.py` (≈560) — диспетчер JSON-RPC + временный реестр
+  инструментов + два инструмента S1 (`system_status`, `nfqws_status`).
+- `core/mcp/auth.py` (≈330) — bind → Origin → токен → рейт-лимит,
+  `settings()`/`permissions()`, сворачивание отказов.
+- `api/mcp.py` (≈260) — `POST /api/mcp`, `GET/DELETE` → 405, `GET
+  /api/mcp/info`, класс `_Headers`.
+- `core/config_manager.py` — секция `mcp` в `DEFAULT_CONFIG`.
+- `api/__init__.py` — `reg_mcp(app)` последним, после `reg_dns_routing`.
+- `app.py` — врезка в `_security_gate`: запрос на `/api/mcp*` с верным
+  Bearer проходит мимо Basic-гейта GUI.
+- `tests/_wsgi_client.py` — `make_environ`/`_call` принимают `headers` и
+  `remote_addr`; добавлен `client.request()` → `(код, заголовки, тело)`.
+- тесты: `test_mcp_schema.py` (20), `test_mcp_protocol.py` (36),
+  `test_mcp_transport.py` (22), `test_mcp_auth.py` (36) — **114 зелёных**;
+  весь `tests/` — 2943 passed, 1 skipped; `make lint` чист.
 
 ### Зафиксированные контракты
 
-Кода ещё нет — зафиксированы только правила, все в
-[`00-contract.md`](00-contract.md): форма инструмента (`@tool` + `scope` +
-`mutating` + ответ с `structuredContent`), 12 разрешений, инварианты
-безопасности, бюджет чтения, регламент сессии.
+**Диспетчер.** `server.dispatch(payload, ctx=None) -> dict | list | None`.
+`payload` — уже разобранный JSON (объект или батч); `None` в ответе значит
+«только уведомления, отвечать нечем» → HTTP 202. Нечитаемое тело:
+`server.parse_error(detail) -> dict` (код `-32700`, `id: null`).
+
+`ctx` — словарь: `permissions` (dict), `session_id`, `subject`
+(`"token"`/`"gui"`), `protocol_version`. **Если `ctx["permissions"]` нет —
+берутся из конфига**; в тестах это удобно, в рантайме их всегда кладёт
+`api/mcp.py`.
+
+**Реестр (временный, S2 заменяет на `@tool`).**
+`register_tool(name, handler, *, description, title="", schema=None,
+scope=None, mutating=False)`; `get_tool`, `all_tools()`,
+`available_tools(perms)`, `scope_allowed(spec, perms)`.
+`ToolSpec.to_wire()` отдаёт `{name, title, description, inputSchema,
+annotations, _meta["zapret-gui"]={scope, mutating}}`.
+Инструмент **без `scope`** — чтение, доступен всегда. `handler(args: dict)
+-> dict`; в ответ дописываются `ok` (если не задан) и `elapsed_ms`.
+
+**Ответ `tools/call`** — `server.tool_result(payload: dict, is_error=False)`:
+`{content:[{type:"text", text:<тот же JSON строкой>}], structuredContent,
+isError}`. Это **единственная точка сериализации результата** — сюда S2
+встраивает `core/mcp/redact.py`, и сюда же уже встроена обрезка по
+`mcp.limits.response_kb`.
+
+**Авторизация.** `auth.check(*, method, remote_addr, headers, auth_pair=None,
+count_call=True) -> AuthDecision(ok, status, error, headers, subject,
+reason)`. `headers` — любой объект с `.get(name, default)`.
+Ещё наружу: `auth.settings()` (секция `mcp` поверх дефолтов — **всегда
+полная**, можно читать без `default=`), `auth.permissions()`,
+`auth.is_enabled()`, `auth.generate_token()`, `auth.token_is_valid(header)`,
+`auth.is_local_address(addr)`, `auth.origin_allowed(origin, host)`,
+`auth.reset_rate_limit()` (для тестов).
+
+**Валидатор.** `schema.validate(value, schema, field="args")` → копия с
+подставленными `default`; бросает `schema.SchemaError(message, field,
+expected)` с `.to_error_data()` для `error.data`.
+
+**Роут.** `api/mcp.py::register(app)`, подключён в `api/__init__.py`
+последним. `api/v1_compat.py` автоматически делает алиас `/api/v1/mcp`
+(только POST — он зеркалит первый метод пути).
+
+**Тесты поднимают приложение** через `tests/_wsgi_client.py`:
+`WSGIClient(build_test_app())` — только API; `app_module.create_app()` —
+приложение целиком (нужно, если проверяется гейт из `app.py`).
+Конфиг в тестах — глобальный синглтон: `get_config_manager().set(...)` в
+`setUp` и откат в `tearDown`, плюс `auth.reset_rate_limit()`.
 
 ### Следующий шаг
 
-**S1** — [`01-transport.md`](01-transport.md): `core/mcp/{server,auth,schema}.py`,
-`api/mcp.py`, секция `mcp` в `DEFAULT_CONFIG`, два инструмента-заглушки,
-тесты протокола/транспорта/авторизации.
+**S2** — [`02-registry.md`](02-registry.md): настоящий реестр `@tool`,
+разрешения, `core/mcp/redact.py`, скил `.claude/skills/mcp/SKILL.md`.
+Подключаться так:
+
+1. Декоратор `@tool` пишется поверх `register_tool()` — сигнатура уже
+   совпадает с формой из контракта §3.
+2. `system_status` и `nfqws_status` переезжают из «временных инструментов
+   S1» (низ `core/mcp/server.py`, после разделителя) в
+   `core/mcp/tools/status.py` **без изменения поведения** — на них
+   завязаны `test_mcp_protocol.py` и `test_mcp_transport.py`. Убрать вызов
+   `register_builtin_tools()` внизу `server.py`.
+3. Редактирование секретов встраивается в `server.tool_result()` — одна
+   точка, менять её вызывающих не надо.
 
 ### Что оказалось не так, как написано в задании
 
-Расхождения внутри самого плана, найденные при нарезке (решения приняты в
-пользу непротиворечивости и записаны в задания):
+1. **`config_manager` не ставит `0600` явно** — права получаются сами:
+   `safe_io.atomic_write_bytes()` пишет через `tempfile.mkstemp()` (тот
+   создаёт файл с `0600`), а `os.replace()` переносит inode вместе с
+   правами. Менять ничего не стали, но **зафиксировали тестом**
+   (`test_mcp_auth.py::TestTokenStorage`): иначе замена `mkstemp` на
+   `open()` когда-нибудь тихо откроет `settings.json` с токеном всем.
+2. **Пришлось тронуть `app.py`** (в задании его нет). Глобальный
+   `before_request`-гейт при `gui.auth_enabled=true` отдавал 401 любому
+   MCP-клиенту ещё до `auth.check`: у того нет Basic-кред, только Bearer.
+   Врезка пускает `/api/mcp*` с верным токеном дальше — и только их.
+3. **`tests/_wsgi_client.py` не умел заголовки и `REMOTE_ADDR`** — без
+   них не проверить ни `Authorization`, ни `Origin`, ни `bind=local`.
+   Добавлено обратносовместимо (`headers=`, `remote_addr=`,
+   `client.request()`); старые вызовы не тронуты.
+4. **Найден и исправлен баг, к MCP отношения не имеющий:** `bottle`
+   декодирует заголовок как latin-1 → utf-8 и бросает `UnicodeError` на
+   мусорных байтах → 500. Для `/api/mcp` это 500 вместо 401 от одного
+   неверного байта в токене. Лечится классом `_Headers` в `api/mcp.py`
+   (S12/S13 стоит переиспользовать его, а не `request.headers`).
+5. **`Content-Type` проверяется мягко:** пустой — пропускаем, заданный и
+   не `application/json` — `415`. Спека требует `application/json`, но
+   часть клиентов не шлёт заголовок вовсе.
 
-1. **`mcp.permissions` в §6 плана неполный.** В словаре `DEFAULT_CONFIG`
-   перечислено 7 ключей, а в §5 их 11 (нет `shell_readonly`, `shell_full`,
-   `self_edit`, `self_edit_core`). **Решение:** S1 заводит сразу все 11 со
-   значением `False` — иначе `tools/list`, тест счётчиков инструментов и
-   сторож writable-путей разойдутся между S1 и S12/S13.
-2. **`mcp.self_edit.protected` ссылается на файлы, которых на момент S1 нет**
-   (`core/mcp/auth.py`, `core/code_guard.py`). Это нормально: список
-   защищённых путей — данные, а не импорт; проверять существование файла на
-   старте GUI нельзя.
-3. **Нумерация сессий и PR-ов не совпадает.** В плане §13 — 8 PR-ов, в
-   роадмапе — 16 сессий. Ориентир для работы — **сессии**; критерии приёмки
-   PR-ов из §13 растащены по заданиям соответствующих сессий.
-4. **`docs/upstream.json`**: записи про спецификацию MCP ещё нет, её заводит
-   S16 (`pinned` = ревизия спеки `2025-06-18`, `skill: "mcp"`).
-5. **`00-contract.md` вышел на ~4.5K токенов вместо обещанных в роадмапе
-   ~1.5K.** Ужимать дальше нечего: вес — в двух таблицах (12 разрешений и
-   карта 17 сессий), а они и есть то, ради чего файл читается. Входной
-   бюджет сессии при этом держится: контракт ~4.5K + задание ~2–3K +
-   HANDOFF ~1.5K + скил `mcp` ~4K ≈ **12K из 35K**, остальное — на точечную
-   разведку. Если станет тесно — первым кандидатом на вынос идёт §6
-   (бюджет чтения): он дублирует §1 роадмапа.
-6. **Задания вышли по 2–3K токенов** (7–12 КБ), как и планировалось; самые
-   плотные — S1, S2, S12, S13 (по ~3K): там спека транспорта, эталон формы
-   инструмента и правила исполнения, которые нельзя ужать без потери
-   смысла.
+### Грабли
+
+- **`-32601` на `resources/*` и `prompts/*` — это не «пока не сделано», а
+  сломанное подключение.** Клиенты опрашивают их сразу после
+  `initialize`. Отвечаем пустыми списками; `resources/read` — `-32002`.
+- **Рейт-лимит считается только после успешной авторизации.** Иначе
+  перебор токена снаружи выбивает квоту у легального клиента — отказ в
+  обслуживании без единого угаданного токена (тест есть).
+- **Порядок проверок — часть безопасности, а не вкусовщина.** `bind` и
+  `Origin` идут раньше токена: иначе чужой сайт узнаёт по коду ответа,
+  верен ли токен.
+- **Тело ответа — байты.** `json.dumps(..., ensure_ascii=False).encode()`:
+  вернёшь `str` с кириллицей — `Content-Length` разъедется с
+  содержимым, и клиент получит обрезанный JSON (тест есть).
+- **Обрезка большого ответа не режет JSON посередине** — отдаётся
+  валидный объект `{truncated: true, size_bytes, limit_bytes, hint}`.
+  Обрубок клиент не разберёт и не поймёт, что произошло.
+- **`bool` — подтип `int`.** В валидаторе `True` намеренно не проходит
+  как `integer`/`number`, иначе `repeats: true` доедет до движка.
+- **Реестр глобальный.** Тест, регистрирующий свой инструмент, обязан
+  убрать его в `finally` (`server._REGISTRY.pop(name, None)`), иначе
+  ломается тест счётчика инструментов в `/api/mcp/info`.
 
 ---
 

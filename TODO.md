@@ -29,9 +29,13 @@
       **План нарезан на рабочие задания** (сессия S0): общий контракт —
       [`docs/mcp/00-contract.md`](docs/mcp/00-contract.md), по файлу на
       сессию `docs/mcp/NN-*.md`, эстафета —
-      [`docs/mcp/HANDOFF.md`](docs/mcp/HANDOFF.md). Следующий шаг — **S1**
-      ([`docs/mcp/01-transport.md`](docs/mcp/01-transport.md)): транспорт,
-      JSON-RPC, авторизация. Сам план целиком агенту не подаётся.
+      [`docs/mcp/HANDOFF.md`](docs/mcp/HANDOFF.md). Сам план целиком агенту
+      не подаётся. **Сделано: S1** — транспорт, JSON-RPC, авторизация
+      (`core/mcp/{schema,server,auth}.py`, `api/mcp.py`, секция `mcp` в
+      настройках, два read-only инструмента-подопытных). Точка выключена
+      по умолчанию: токен пуст, все 11 разрешений `false`. Следующий шаг —
+      **S2** ([`docs/mcp/02-registry.md`](docs/mcp/02-registry.md)): реестр
+      `@tool`, разрешения, редактирование секретов, скил `mcp`.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)
