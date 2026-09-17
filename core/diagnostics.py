@@ -547,8 +547,36 @@ def check_all_services():
     Returns:
         dict: { services: {name: result, ...}, total, ok, down, partial, timestamp }
     """
+    return check_services()
+
+
+def check_services(names=None, deadline_sec=0.0):
+    """
+    Проверить сервисы — все или названные, с бюджетом времени.
+
+    `deadline_sec` > 0 останавливает обход, когда бюджет исчерпан:
+    каждый сервис — это ping + DNS по всем хостам + HTTP, то есть до
+    двух десятков секунд, и полный прогон по каталогу легко уходит за
+    любой таймаут вызывающего. Молча оборвать его нельзя — недостающие
+    сервисы читались бы как «не проверял, потому что и так ясно»,
+    поэтому пропущенные перечисляются в `skipped`.
+
+    Returns:
+        dict: { services, checked, skipped, total, ok, down, partial,
+                timestamp, deadline_hit }
+    """
+    wanted = [n for n in (names or SERVICES) if n in SERVICES]
+    unknown = [n for n in (names or []) if n not in SERVICES]
+    started = time.time()
+
     results = {}
-    for name in SERVICES:
+    skipped = []
+    deadline_hit = False
+    for name in wanted:
+        if deadline_sec and (time.time() - started) >= deadline_sec:
+            deadline_hit = True
+            skipped.append(name)
+            continue
         results[name] = check_service(name)
 
     total = len(results)
@@ -559,10 +587,14 @@ def check_all_services():
 
     return {
         "services": results,
+        "checked": list(results.keys()),
+        "skipped": skipped,
+        "unknown": unknown,
         "total": total,
         "ok": ok,
         "down": down,
         "partial": total - ok - down,
+        "deadline_hit": deadline_hit,
         "timestamp": time.time(),
     }
 

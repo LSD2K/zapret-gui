@@ -8,135 +8,140 @@
 
 ---
 
-## Состояние: после S4 (read-only по nfqws2)
+## Состояние: после S5 (read-only: туннели и диагностика)
 
-**Дата:** 2026-09-17 · **Ветка/PR:** `claude/serene-bell-5zmwds`
+**Дата:** 2026-09-17 · **Ветка/PR:** `claude/happy-curie-ddg2vd`
 
 ### Сделано
 
-- `core/mcp/tools/_paging.py` (≈185) — **общая форма списка** на все
-  инструменты: `items`/`total`/`count`/`offset`/`limit`/`truncated`
-  (+`next_offset`), `empty()`, `unavailable()`. Модуль с `_` реестр
-  пропускает.
-- `core/mcp/tools/strategies.py` (≈480) — `strategy_list`,
-  `strategy_get`, `catalog_search`, `nfqws_command_preview`,
-  `strategy_state_list`.
-- `core/mcp/tools/lists.py` (≈450) — `hostlists_list`, `hostlist_get`,
-  `ipsets_list`, `lists_list`, `blobs_list`, `lua_functions_list`.
-- `core/mcp/tools/firewall.py` (≈110) — `firewall_status`: бэкенд,
-  правила, `queue_numbers`, `conflicts`.
-- `core/mcp/tools/traffic.py` (≈120) — `traffic_recent`.
-- **в менеджеры** (логики в `tools/*` нет): `CatalogEntry.desync_names()`,
-  `CatalogManager.find_entries()`, `blob_registry.list_blobs()`,
-  `FirewallManager.get_conflicts()`/`queue_numbers()`,
-  `nfqws_manager.resolve_binary()`, новый `core/traffic_recent.py` (≈400).
-- тесты: `test_mcp_tools_nfqws.py` (59), правлен
-  `test_mcp_tool_counts.py` (`read: 6 → 19` + список имён). По
-  `test_mcp_*` — **317 зелёных**; весь `tests/` — 3147 passed,
+- `core/tunnels_overview.py` (≈470) — **сводка по шести движкам** в
+  одной форме записи: `overview(engine, logs)`, `engine_record()`,
+  `instance_record()`, `last_error()`, `known_engines()`. Каждый движок
+  опрашивается под своим `try`.
+- `core/mcp/tools/tunnels.py` (≈175) — `tunnels_status`: фильтры
+  `engine`/`running_only`, подрезка `instances`, страница.
+- `core/mcp/tools/diagnostics.py` (≈460) — `diagnostics_run`
+  (пассивная часть всегда, сетевая — по `probes`), `dpi_report`.
+- `core/mcp/tools/updates.py` (≈170) — `updates_check`: кеш по
+  умолчанию, `refresh` по `probes`, сетевой сбой = ответ.
+- **в менеджеры** (логики в `tools/*` нет): `tunnel_monitor
+  .iface_counters()` (и `_read_counters` теперь зовёт её),
+  `diagnostics.check_services(names, deadline_sec)` —
+  `check_all_services()` стал обёрткой, `permissions.granted(name)`.
+- `core/mcp/redact.py`: `TEXT_KEYS` += `error`, `last_error`, `detail`,
+  `diagnostic`; `shorten_url()` отдаёт не-HTTP адрес в `redact_text()`.
+- тесты: `test_mcp_tools_tunnels.py` (30), `test_mcp_tools_diagnostics.py`
+  (27), дополнен `test_mcp_redaction.py` (+6, фикстура `ENGINE_SECRETS`),
+  правлен `test_mcp_tool_counts.py` (`read: 19 → 23` + список имён). По
+  `test_mcp_*` — **380 зелёных**; весь `tests/` — 3207 passed,
   1 skipped; `make lint` чист.
 
 ### Зафиксированные контракты
 
-**Список.** Любой инструмент, отдающий несколько записей, собирает ответ
-через `_paging.page(items, offset, limit, total=None, **extra)`. Имена
-полей не выбираются заново — сторож `test_mcp_tools_nfqws.py::
-TestCommonListShape` перебирает реестр. `total` — сколько подошло под
-фильтр **до** окна; окно режется либо в `page()`, либо в менеджере
-(каталоги, трафик) и тогда `total` передаётся явно.
+**Запись движка.** `engine`, `title`, `installed`, `running`,
+`version`, `binary`, `instances`, `instances_count`, `running_count`,
+`reason`, `error`. Запись инстанса: `name`, `running`, `pid`, `iface`,
+`config`, `traffic`, `traffic_source`, `last_error` + свои поля движка.
+S7 (`tunnel_up`/`tunnel_down`) и S15 (страница MCP) опираются на неё;
+форма живёт в `core/tunnels_overview.py`, а не в `tools/`.
 
-**Окно ужимается под лимит ответа.** `page()` меряет собранный JSON и
-двоичным поиском выкидывает лишние записи, проставляя `shrunk_to_fit` и
-`requested_limit`. Причина: ответ сверх `mcp.limits.response_kb` реестр
-заменяет ЦЕЛИКОМ (`registry._truncated`), и модель получает не страницу,
-а «слишком много». `limit=100` у каталогов — это 40 КБ при лимите 32.
+**Трафик — с источником или никак.** `traffic_source` обязателен рядом
+с числом (`/sys/class/net`, `awg show`, `ndms`); нет честного
+источника — `traffic: null`. Ноль читается как «трафика не было».
 
-**«Нет данных» против «нет такого» — и третье.** К контракту S3
-добавился случай «спросили без аргументов, а на устройстве не выбрано»:
-`strategy_get()`/`nfqws_command_preview()` без id отвечают `ok: true` +
-`available: false` + `reason`. Ошибка (`ok: false`) остаётся за
-**запрошенным** несуществующим id.
+**Граница «читает / пробует».** Инструмент с частично пробующими
+действиями публикуется в read-наборе всегда, а разрешение спрашивает по
+месту — `permissions.granted("probes")`. В ответе обязательны
+`checks_run`, `checks_skipped` (с `permission` и `hint`) и блок
+`probes`. **S8 повторяет этот приём для `healthcheck_*`.**
 
-**Отказ инструмента — тоже ответ.** `_paging.unavailable(what, reason,
-hint)`: `ok` остаётся `true`, `available: false`. Сторож
-`TestNoManagerNoCrash` ломает фабрику менеджера у пяти инструментов и
-требует ответа, а не трассировки.
+**Долгую пробу режет бюджет, а не таймаут.** `check_services(names,
+deadline_sec)`: обход останавливается, пропущенные перечисляются
+поимённо. Поднимать `mcp.limits.tool_timeout_sec` нельзя — оборванный
+по таймауту вызов не отдаёт ничего вообще.
 
-**Счётчик инструментов.** `BY_SCOPE` сейчас `read: 19`, остальные `0`;
-рядом — список имён (`READ_TOOLS`) и сторож, что число и список
-совпадают. **Каждая следующая сессия правит оба.**
+**Счётчик инструментов.** `BY_SCOPE` сейчас `read: 23`, остальные `0`;
+рядом список имён (`READ_TOOLS`) и сторож, что число и список совпадают.
+**Каждая следующая сессия правит оба.**
 
 ### Следующий шаг
 
-S4 закрыт. Ближайшие и на что опереться:
+S5 закрыт. Ближайшие и на что опереться:
 
 **S6** — [`06-config-write.md`](06-config-write.md): `config_set`. Отказ
 обязан звать `permissions.why_not_writable()` **и**
-`resources.describe_path()`. Нового из S4 здесь нужно немногое, зато
-`traffic_recent` уже подсказывает модели `nfqws.debug` как writable-путь
-— проверьте, что `config_set` его действительно пускает.
+`resources.describe_path()`. Из S5 пригодится `permissions.granted()` —
+тем же способом стоит спрашивать `config_write`, если запись когда-нибудь
+станет частью более крупного инструмента.
 
-**S11** — [`11-compose-validate.md`](11-compose-validate.md):
-`strategy_validate` строится на `NFQWSManager.dry_run()`, линтер имён —
-на `lua_functions_list`/`LuaManager.desync_functions()`, линтер blob'ов —
-на `blob_registry.list_blobs()` (`exists: false` = пустой fake).
-`nfqws_command_preview` уже отдаёт ровно тот argv, который надо
-валидировать.
+**S7** — [`07-control-strategies.md`](07-control-strategies.md):
+управление туннелями строится на записи движка из S5. `engine` +
+`instances[].name` — готовый адрес инстанса (`tunnel_up(engine, name)`),
+выдумывать новый не нужно. Менеджеры уже перечислены в
+`core/tunnels_overview.py:_COLLECTORS`.
 
-**S7** (записи по тем же доменам) дописывает в те же менеджеры, куда S4
-добавила чтение, — список в скиле `mcp`, раздел «Что добавлено в
-`core/*.py`».
+**S8** — [`08-probes.md`](08-probes.md): повторяет границу
+«читает/пробует» и берёт `dpi_report` как готовую форму чтения
+результата: `blockcheck_start` пишет туда же, откуда читает он.
 
 ### Что оказалось не так, как написано в задании
 
-1. **`catalog_search` не на чем было построить.** `search_entries()` не
-   умеет ни уровень, ни приём, ни окно, и отдаёт `CatalogEntry` без
-   `total`. Написан `find_entries()`; фильтр по приёму сравнивает с
-   **именами функций** `--lua-desync`, а не с текстом аргументов —
-   подстрока `fake` иначе находится в `blob=fake_default_tls` почти у
-   каждой стратегии, и фильтр не фильтрует.
-2. **`blobs_list` было неоткуда взять**: реестр приватный
-   (`_registry`), публичного перечисления не было. Добавлен
-   `list_blobs()` — и с ним проверка существования файла, ради которой
-   инструмент и нужен.
-3. **`traffic_recent` пришлось писать с нуля** (`core/traffic_recent.py`):
-   готового «что видел движок» в коде нет. Три источника, и каждый
-   объясняет, почему он молчит, — иначе пустой ответ читается как «трафика
-   не было».
-4. **Формат пер-пакетных строк nfqws2 не документирован.** Парсер
-   толерантный: метка (`hostname:`, `sni=`) → домен по виду; вердикт и
-   профиль — по ключевым словам. Строка без домена отбрасывается.
-5. **`conflicts` у `firewall_status` не существовало.** Сделан
-   `get_conflicts()` в `core/firewall.py` (доступен и UI): правила без
-   движка, движок без правил, расхождение номера очереди, два бэкенда
-   сразу, нет бэкенда вовсе.
+1. **Движков шесть, а не семь.** Задание считало семью, видимо,
+   Telegram-прокси за два (tg-ws-proxy-go и tg-mtproxy-client ставятся и
+   запускаются независимо). Сделано так: движок `tgproxy` один, а его
+   два бэкенда — два инстанса. Движок обхода nfqws2 в сводку НЕ входит
+   (он в `nfqws_status`), и подсказка ответа говорит об этом прямо.
+2. **Единой точки «что с туннелями» в коде не было** — ни в `core`, ни в
+   `api`. Написан `core/tunnels_overview.py`; тонкой обёрткой в
+   `tools/` обойтись было нельзя: шесть менеджеров отвечают шестью
+   формами (`active` против `running`, `status(name)` против
+   `get_status()`, `detect()` отдельно от состояния).
+3. **«Последней ошибки» у движков нет как поля.** Есть `read_log()`
+   (sing-box, mihomo, usque, opera) — и то не у всех. Сделан
+   `tunnels_overview.last_error(text)`: последняя строка по маркерам
+   (`error|fatal|panic|failed|refused|timeout|denied|ошибка|не удалось`).
+   Именно последняя: упавший на старте движок пишет причину один раз и
+   дальше повторяет попытки.
+4. **`check_all_services()` нечем было ограничить.** Прогон по каталогу
+   — до двух десятков секунд на сервис, то есть заведомо больше
+   `tool_timeout_sec`. Добавлен `check_services(names, deadline_sec)`,
+   старая функция стала его обёрткой.
+5. **`updates_check` на «холодном» GUI отдаёт пустую таблицу.** Кеша
+   нет — сравнивать не с чем. Ответ говорит об этом словами и называет
+   инструменты, которые знают установленные версии без сети
+   (`tunnels_status`, `nfqws_status`, `system_status`).
 
 ### Грабли
 
-- **Маскировка секретов ест `author` и `by_key`.** `SECRET_KEY_RE`
-  ищет подстроки, а не слова: `auth` есть в `author`, `key` — в
-  `by_key`. Поля переименованы (`made_by`, `group`, `by_group`);
-  **ослаблять регексп нельзя** — на нём держится вся защита от утечки.
-- **Фабрика менеджера падает раньше его метода.** `manager =
-  get_x_manager()` перед `try` — и на устройстве без zapret2 инструмент
-  отдаёт трассировку. Фабрика идёт **внутрь** `try`, а путь для
-  подсказки достаётся через `_safe(lambda: manager.lists_path)`, потому
-  что `manager` в этот момент `None`.
-- **`cfg.get()` не знает дефолтов.** `cfg.get("zapret",
-  "nfqws_binary")` у «холодного» менеджера — `None`, и
-  `compose_command()` собирал argv с `None` в нулевом элементе:
-  `TypeError` в `_dedup_lua_init` вместо честного «бинарника нет». То
-  же было с портами в `traffic_recent`. Дефолты — только в
-  `effective()`.
-- **`--queue-balance 300:303` — это диапазон.** Считать его двумя
-  числами значит объявлять расхождением движок на 301.
-- **Существующий сторож S2 ломается по делу.**
-  `test_mcp_tools.py::test_every_read_tool_answers_ok_and_elapsed`
-  требует `ok: true` от вызова без аргументов — именно он и заставил
-  сделать «стратегия не выбрана» ответом, а не отказом. Это правильное
-  требование, чинился код.
-- **`strategy_list` без окна — это 732 записи с профилями.** В строке
-  списка `profiles` — **число**, а не массив; за содержимым идут в
-  `strategy_get`.
+- **`allowed(scope)` без `perms` — это «запрещено всё».**
+  `normalize(None)` отдаёт карту из одних `False`, и инструмент,
+  спросивший так про `probes`, пассивен навсегда. Отсюда
+  `permissions.granted(name)`.
+- **Обработчик не получает карту разрешений.** `registry.call(name,
+  args, perms)` проверяет scope сам и в `handler(args)` перми не
+  передаёт. Инструмент спрашивает их у конфига — и тест обязан класть
+  разрешение в `mcp.permissions`, а не в третий аргумент `call()`.
+- **`result["hint"] = ...` затирает объяснение `page()`.** Когда окно
+  ужато под лимит ответа, весь смысл — в его `hint`. Подсказку надо
+  ДОПИСЫВАТЬ.
+- **Один движок с двумя сотнями конфигов выкидывает пять остальных.**
+  `page()` ужимает окно ПО ДВИЖКАМ, и при 200 конфигах sing-box в ответ
+  не влезал ни один. Лечится подрезкой внутри записи (`instances`,
+  по умолчанию 10, + `instances_truncated`), а не увеличением лимита.
+- **Секрет приезжает и под несекретным именем ключа.** `last_error`,
+  `error`, `detail` — текст чужих программ; `tg://proxy?…secret=` —
+  адрес не по HTTP, мимо `shorten_url`. Оба случая закрыты в
+  `redact.py`, и оба нашлись только потому, что тест смотрит на
+  СЕРИАЛИЗОВАННЫЙ ответ, а не на dict до маскировки.
+- **`opera.status(probe=True)` открывает соединение.** В сводке зовём
+  с `probe=False`: слушает ли порт — вопрос healthcheck'а (S8), а не
+  инвентаризации.
+- **`get_connect_info()` у Telegram-прокси собирает ссылку с секретом.**
+  Сводка его не зовёт; на это есть сторож, потому что «добавить ссылку
+  для полноты» — очень естественная правка.
+- **Тест с бюджетом времени нельзя писать на нулевом бюджете.** На
+  первой итерации прошло 0 секунд, и первый сервис всегда успевает.
+  Проверять надо «успел один, остальные названы в `skipped`».
 
 ---
 

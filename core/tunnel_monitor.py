@@ -204,16 +204,10 @@ class TunnelMonitor:
         """
         # TUN-интерфейсы: читаем из /sys/class/net
         if not iface.startswith("__"):
-            try:
-                rx_path = "/sys/class/net/%s/statistics/rx_bytes" % iface
-                tx_path = "/sys/class/net/%s/statistics/tx_bytes" % iface
-                with open(rx_path) as f:
-                    rx = int(f.read().strip())
-                with open(tx_path) as f:
-                    tx = int(f.read().strip())
-                return rx, tx
-            except Exception:
+            counters = iface_counters(iface)
+            if not counters:
                 return None, None
+            return counters["rx_bytes"], counters["tx_bytes"]
 
         # Специальные сервисы: эмулируем через_nfqws queue stats
         if iface == "__nfqws2__":
@@ -399,6 +393,33 @@ class TunnelMonitor:
             "interfaces": len(self._history),
             "grace_period": grace,
         }
+
+
+# ─────── счётчики интерфейса (публично) ───────
+
+def iface_counters(iface: str) -> dict | None:
+    """RX/TX байты интерфейса из ``/sys/class/net``.
+
+    Вынесено из монитора наружу, потому что счётчики нужны не только
+    графикам: сводка по туннелям (``core/tunnels_overview``) отвечает
+    ими на «идёт ли через туннель трафик», и делать это чтение второй
+    раз, своими руками, значило бы завести второй формат ответа.
+
+    ``None`` означает «счётчика нет» — интерфейса не существует, он не
+    TUN, либо ядро не отдаёт статистику. Ноль сюда подставлять нельзя:
+    он читается как «трафика не было».
+    """
+    if not iface or iface.startswith("__") or "/" in iface:
+        return None
+    try:
+        base = "/sys/class/net/%s/statistics/" % iface
+        with open(base + "rx_bytes") as f:
+            rx = int(f.read().strip())
+        with open(base + "tx_bytes") as f:
+            tx = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    return {"rx_bytes": rx, "tx_bytes": tx}
 
 
 # ─────── singleton ───────

@@ -24,10 +24,12 @@
   флагов превратилась в ``***``, модель прочитать не может;
 * ключ похож на URL подписки (:data:`URL_KEY_RE`) — от адреса остаётся
   ``https://host/…``: хост нужен для диагностики, путь и query — это и
-  есть подписка;
+  есть подписка. Адрес не по HTTP (``tg://proxy?…secret=``) проходит
+  текстовую чистку: схема другая, а секрет тот же;
 * строки под ключами из :data:`TEXT_KEYS` (``stdout``, ``stderr``,
-  ``message``…) дополнительно прогоняются через :func:`redact_text` —
-  туда секрет попадает из внешнего мира, а не из нашего конфига.
+  ``message``, ``error``…) дополнительно прогоняются через
+  :func:`redact_text` — туда секрет попадает из внешнего мира, а не из
+  нашего конфига.
 
 Чего НЕ режем: домены, hostlist'ы, имена файлов, аргументы nfqws2 — это
 рабочие данные, ради которых модель сюда и пришла.
@@ -53,6 +55,12 @@ URL_KEY_RE = re.compile(r"(?i)subscri|(?:^|_)(?:url|link|endpoint)s?$")
 TEXT_KEYS = frozenset((
     "stdout", "stderr", "output", "command", "cmd", "log", "log_tail",
     "tail", "message", "line", "lines",
+    # Сюда приезжает текст ЧУЖИХ программ: последняя строка лога движка
+    # (`last_error` в tunnels_status), сообщение упавшего вызова,
+    # cmdline постороннего процесса в находке диагностики. Секрет в
+    # такой строке — обычное дело (sing-box пишет URL подписки, usque —
+    # токен), а ни под одно «секретное» имя ключа она не подходит.
+    "error", "last_error", "detail", "diagnostic",
 ))
 
 # Предохранитель от самодельных циклических структур и слишком глубоких
@@ -132,7 +140,10 @@ def shorten_url(value: str) -> str:
     text = value.strip()
     lowered = text.lower()
     if not (lowered.startswith("http://") or lowered.startswith("https://")):
-        return value
+        # Не HTTP — но и не обязательно безобидно: `tg://proxy?…secret=`
+        # это готовый доступ к прокси, а «ключ похож на URL» про схему
+        # ничего не обещает. Отдаём такой адрес через текстовую чистку.
+        return redact_text(value)
     scheme, _, rest = text.partition("://")
     host = rest.split("/", 1)[0].split("?", 1)[0]
     if "@" in host:                       # user:pass@host

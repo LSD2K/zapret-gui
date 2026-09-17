@@ -30,8 +30,14 @@ from core.mcp import registry
 # firewall (1), трафик (1). Все они читают и ничего не меняют, поэтому
 # уезжают в тот же набор «без единого разрешения»; write-операции по
 # тем же доменам заводит S7.
+# S5: + 4 по туннелям и диагностике — tunnels_status, diagnostics_run,
+# dpi_report, updates_check. `diagnostics_run` и `updates_check` живут в
+# read-наборе НАМЕРЕННО: они публикуются всегда, а разрешение `probes`
+# спрашивают за конкретное действие (сетевые пробы, поход в апстрим).
+# Спрятать их целиком значило бы спрятать и пассивную часть — ровно то,
+# что чинит половину жалоб и не выпускает ни одного пакета.
 BY_SCOPE = {
-    "read": 19,
+    "read": 23,
     "control": 0,
     "strategies_write": 0,
     "config_write": 0,
@@ -104,6 +110,8 @@ class TestToolCounts(unittest.TestCase):
         "lists_list", "lua_functions_list",
         # S4 — перехват и трафик
         "firewall_status", "traffic_recent",
+        # S5 — туннели, диагностика, обновления
+        "diagnostics_run", "dpi_report", "tunnels_status", "updates_check",
     ]
 
     def test_read_tools_are_named_in_the_table(self):

@@ -407,6 +407,7 @@ Interface), `commands` (интерфейсы, политики хостов), `w
 | `mihomo_config.py` / `mihomo_routing.py` / `mihomo_watchdog.py` | Генерация clash-YAML, доменный роутинг mihomo, авто-рестарт зависшего инстанса. |
 | `dns_routing.py` | Правила «домен → свой DNS». Каталог публичных резолверов (DoH/DoT) — в `routing/doh_resolver.py`. |
 | `tunnel_monitor.py` / `tunnel_optimizer.py` | Метрики туннелей (rx/tx, latency) / MTU·PMTU, TCP-буферы, BBR по профилям. |
+| `tunnels_overview.py` | Сводка по всем шести движкам в одной форме записи (установлен/запущен/инстансы/трафик с указанием источника). Используется MCP (`tunnels_status`), доступна UI и CLI. |
 | `auto_remediation.py` | Авто-починка: по сигналам мониторинга поднимает упавшее и переключает метод. |
 | `iface_socks.py` | SOCKS-прокси, привязанный к интерфейсу (`SO_BINDTODEVICE`) — регистрация usque/WARP через уже работающий обход. |
 
