@@ -49,12 +49,18 @@
       детектором расхождений) и «дошёл ли трафик до движка»
       (`traffic_recent` — лог nfqws2, DNS-детектор, conntrack); общая
       форма списка и пагинация с ужиманием под лимит ответа
-      (`core/mcp/tools/_paging.py`). Точка выключена по умолчанию: токен
-      пуст, все 11 разрешений `false`. Следующий шаг — **S5**
-      ([`docs/mcp/05-readonly-tunnels.md`](docs/mcp/05-readonly-tunnels.md))
-      или **S6**
-      ([`docs/mcp/06-config-write.md`](docs/mcp/06-config-write.md));
-      S5/S6/S12 друг от друга не зависят и могут идти параллельно.
+      (`core/mcp/tools/_paging.py`). **Сделано: S5** — туннели и
+      диагностика: `tunnels_status` (шесть движков одним ответом,
+      сборка в `core/tunnels_overview.py`, `traffic_source` рядом с
+      каждым числом), `diagnostics_run` (пассивная часть всегда,
+      сетевые пробы — по разрешению `probes`, с бюджетом времени),
+      `dpi_report` (последняя классификация DPI, проб не запускает) и
+      `updates_check` (кеш по умолчанию, `refresh` — по `probes`).
+      Точка выключена по умолчанию: токен пуст, все 11 разрешений
+      `false`. Следующий шаг — **S6**
+      ([`docs/mcp/06-config-write.md`](docs/mcp/06-config-write.md)) или
+      **S12** ([`docs/mcp/12-shell.md`](docs/mcp/12-shell.md)); S6/S12
+      друг от друга не зависят и могут идти параллельно.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)
