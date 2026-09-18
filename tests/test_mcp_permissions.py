@@ -190,5 +190,69 @@ class TestWritableBoundary(unittest.TestCase):
             self.assertTrue(perms.is_writable(item["path"]), item["path"])
 
 
+class TestProbesBoundary(unittest.TestCase):
+    """S8: выпустить трафик — отдельное разрешение, и оно режет ДЕЙСТВИЕ.
+
+    Граница проходит не по инструменту, а по тому, что он делает:
+    `healthcheck_status` и `scan_status` только читают состояние и
+    доступны всегда, `healthcheck_run` и `scan_start` выпускают пробы —
+    и без `probes` их нет ни в списке, ни по имени.
+    """
+
+    PROBING = ("probe_targets", "probe_compare", "scan_start", "scan_stop",
+               "blockcheck_start", "blockcheck2_start", "blockcheck2_stop",
+               "healthcheck_run")
+    READING = ("scan_status", "scan_results", "blockcheck_status",
+               "blockcheck2_status", "blockcheck2_output",
+               "healthcheck_status", "connectivity_matrix",
+               # S5 — тот же приём: публикуется всегда, пробы по
+               # разрешению. Поведение не должно измениться.
+               "diagnostics_run", "dpi_report", "updates_check")
+
+    def setUp(self):
+        registry.load_tools()
+
+    def names(self, perms_map):
+        result = call("tools/list", ctx={"permissions": perms_map})
+        return {t["name"] for t in result["result"]["tools"]}
+
+    def test_probing_tools_are_hidden_without_the_permission(self):
+        listed = self.names({})
+        for name in self.PROBING:
+            with self.subTest(tool=name):
+                self.assertNotIn(name, listed)
+
+    def test_reading_tools_are_listed_anyway(self):
+        listed = self.names({})
+        for name in self.READING:
+            with self.subTest(tool=name):
+                self.assertIn(name, listed)
+
+    def test_probing_tools_appear_with_the_permission(self):
+        listed = self.names({"probes": True})
+        for name in self.PROBING:
+            with self.subTest(tool=name):
+                self.assertIn(name, listed)
+
+    def test_call_by_name_is_refused_and_names_the_switch(self):
+        # Отказ, не называющий переключатель, заставляет модель гадать —
+        # и она гадает, пробуя соседние инструменты.
+        for name in self.PROBING:
+            result = call("tools/call", {"name": name, "arguments": {}},
+                          ctx={"permissions": {}})["result"]
+            with self.subTest(tool=name):
+                self.assertTrue(result["isError"])
+                payload = result["structuredContent"]
+                self.assertEqual(payload["permission"], "probes")
+                self.assertIn("probes", payload["hint"])
+
+    def test_healthcheck_reads_but_does_not_run(self):
+        # Ровно тот случай, ради которого инструмент не прячется
+        # целиком: расписание и история видны, прогон — нет.
+        listed = self.names({})
+        self.assertIn("healthcheck_status", listed)
+        self.assertNotIn("healthcheck_run", listed)
+
+
 if __name__ == "__main__":
     unittest.main()
