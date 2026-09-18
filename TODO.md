@@ -62,12 +62,30 @@
       (`core/mcp/audit.py`: `mcp-audit.jsonl` и `mcp-undo.json` рядом с
       `settings.json`), `audit_list` и `mcp_undo_last` — откат
       переживает перезагрузку роутера.
+      **Сделано: S7** — управление движком и правка обхода:
+      последовательность «firewall → движок → конфиг → автозапуск»
+      вынесена в `core/nfqws_control.py` и стала общей для GUI, CLI и
+      MCP; под `control` — `nfqws_start/stop/restart`, `strategy_apply`,
+      `nfqws_reload_lists` (SIGHUP, не перезапуск),
+      `firewall_apply`/`firewall_remove`; под `strategies_write` —
+      `strategy_save`/`strategy_delete`, `hostlist_edit`/`ipset_edit`
+      (`replace`/`add`/`remove`), `blob_add`, `lua_script_save`. Порты
+      управления (SSH и веб-интерфейс) исключаются из NFQUEUE внутри
+      `core/firewall.py`, то есть при любом применении правил. Откат
+      расширен на семь видов снимков и переехал под «любое разрешение
+      на запись». **Не вошло в S7 и ждёт отдельного PR:**
+      `tunnel_up`/`tunnel_down` и остальные туннельные
+      write-инструменты (`*_config_save`, `subscription_refresh`,
+      `pool_refresh`, `unified_rule_*`) — подробности в
+      [`docs/mcp/HANDOFF.md`](docs/mcp/HANDOFF.md).
       Точка выключена по умолчанию: токен пуст, все 11 разрешений
-      `false`. Следующий шаг — **S7**
-      ([`docs/mcp/07-control-strategies.md`](docs/mcp/07-control-strategies.md))
-      или **S12** ([`docs/mcp/12-shell.md`](docs/mcp/12-shell.md)); S7
-      опирается на S4+S6, S12 от них не зависит и может идти
-      параллельно.
+      `false`. Следующий шаг — **S9**
+      ([`docs/mcp/09-nfqws-session.md`](docs/mcp/09-nfqws-session.md):
+      общий мьютекс на движок вместо временного сторожа
+      `nfqws_control.busy()`), **S8**
+      ([`docs/mcp/08-probes.md`](docs/mcp/08-probes.md)) или **S12**
+      ([`docs/mcp/12-shell.md`](docs/mcp/12-shell.md)); S12 ни от чего
+      из этого не зависит и может идти параллельно.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)

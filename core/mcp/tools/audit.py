@@ -17,6 +17,7 @@
 механизмом будут пользоваться S12 (файлы) и S13 (правки кода).
 """
 
+from core.mcp import permissions as perms_mod
 from core.mcp.registry import tool
 from core.mcp.tools import _paging
 
@@ -121,22 +122,28 @@ def audit_list(args: dict) -> dict:
 
 
 @tool(
+    # Откат публикуется при ЛЮБОМ разрешении на запись, а не под
+    # config_write: снимки бывают видов config, strategy, hostlist,
+    # ipset, blob, lua (дальше — файлы и код). Модель с
+    # `strategies_write` без `config_write` иначе получила бы право
+    # менять стратегии без права их вернуть — §5.4 контракта.
     name="mcp_undo_last",
-    scope="config_write",
+    scope=perms_mod.ANY_WRITE_SCOPE,
     mutating=True,
     title="Undo last change",
     description=("Revert the last change made through MCP using its "
-                 "on-disk snapshot (survives a GUI restart). Optionally "
-                 "limit to one snapshot kind. / Откатить последнее "
-                 "изменение, сделанное через MCP."),
+                 "on-disk snapshot (survives a GUI restart). Kinds: "
+                 "config, strategy, hostlist, ipset, blob, lua. / "
+                 "Откатить последнее изменение, сделанное через MCP."),
     schema={
         "type": "object",
         "properties": {
             "kind": {
                 "type": "string",
-                "description": "Snapshot kind to undo, e.g. config. Empty "
-                               "= the most recent one. / Вид снимка; пусто "
-                               "— самый последний.",
+                "description": "Snapshot kind: config, strategy, "
+                               "strategy_active, hostlist, ipset, blob, "
+                               "lua. Empty = the most recent one. / Вид "
+                               "снимка; пусто — самый последний.",
                 "maxLength": 40,
                 "default": "",
             },

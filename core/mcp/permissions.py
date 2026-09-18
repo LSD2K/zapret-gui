@@ -68,8 +68,27 @@ PERMISSIONS = (
 # Scope инструмента, доступного всегда (чтение).
 READ_SCOPE = "read"
 
+# Псевдо-scope «любое разрешение на запись». Нужен ровно одному
+# инструменту — ``mcp_undo_last``. Снимки бывают любого вида: настройки
+# (S6), стратегии и списки (S7), файлы (S12), код (S13). Прибить откат к
+# одному разрешению значит выдать модели право менять, не выдав права
+# вернуть, — прямое нарушение инварианта §5.4 контракта: с
+# ``strategies_write`` без ``config_write`` стратегия сохранялась бы без
+# пути назад. Обратное — «откат виден, менять нечем» — безвредно, но и
+# оно исключено: без единого write-разрешения инструмент не публикуется.
+ANY_WRITE_SCOPE = "any_write"
+
+# Разрешения, каждое из которых означает «эта модель что-то меняет».
+# ``probes`` сюда не входит: проба выпускает трафик, но снимка не
+# оставляет и откатывать в ней нечего.
+WRITE_PERMISSIONS = (
+    "control", "strategies_write", "config_write", "experiments",
+    "tunnels_write", "dangerous", "shell_full", "self_edit",
+    "self_edit_core",
+)
+
 # Все допустимые значения ``scope`` в объявлении инструмента.
-SCOPES = (READ_SCOPE,) + PERMISSIONS
+SCOPES = (READ_SCOPE, ANY_WRITE_SCOPE) + PERMISSIONS
 
 # Разрешение → что обязано быть включено вместе с ним.
 REQUIRES = {
@@ -187,7 +206,10 @@ def allowed(scope, perms=None) -> bool:
     """
     if not scope or scope == READ_SCOPE:
         return True
-    return bool(effective(perms).get(scope))
+    granted_map = effective(perms)
+    if scope == ANY_WRITE_SCOPE:
+        return any(granted_map.get(name) for name in WRITE_PERMISSIONS)
+    return bool(granted_map.get(scope))
 
 
 def granted(name: str) -> bool:
@@ -210,6 +232,17 @@ def denial(scope, perms=None) -> dict:
     иначе она пробует ещё раз то же самое.
     """
     granted = normalize(perms)
+    if scope == ANY_WRITE_SCOPE:
+        return {
+            "ok": False,
+            "error": "нет ни одного разрешения на запись",
+            "permission": ANY_WRITE_SCOPE,
+            "requires": list(WRITE_PERMISSIONS),
+            "missing": list(WRITE_PERMISSIONS),
+            "hint": "откатывать нечего: включите любое из разрешений на "
+                    "изменение (%s) в настройках MCP"
+                    % ", ".join(WRITE_PERMISSIONS),
+        }
     missing = unmet(scope, granted)
     if granted.get(scope) and missing:
         # Флаг стоит, но зависимость не выполнена — самый непонятный
