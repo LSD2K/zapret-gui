@@ -14,7 +14,18 @@ import unittest
 from unittest import mock
 
 from core import opera_proxy_chain as chain
-from core.clash_yaml import parse_yaml
+from core.clash_yaml import has_pyyaml, parse_yaml
+
+
+# Правка `rules` и `sniffer` — round-trip, а он возможен только с PyYAML
+# (самописный парсер теряет вложенность и скалярные списки, см.
+# `mihomo_proxies.safe_mutate`). На роутере с python3-light PyYAML обычно
+# нет, и код там СОЗНАТЕЛЬНО работает иначе: прокси дописывается текстом,
+# а про правило и сниффер выдаётся предупреждение. Поэтому тесты
+# round-trip'а пропускаются без PyYAML, а деградация проверяется отдельно
+# (`TestAttachMihomoWithoutPyYAML`) — иначе прогон на самом устройстве
+# краснеет там, где всё работает как задумано.
+NEEDS_PYYAML = "нужен PyYAML: без него правка rules/sniffer не round-trip"
 
 
 class FakeSingboxManager:
@@ -221,6 +232,7 @@ class TestAttachMihomo(unittest.TestCase):
             res = chain.attach("mihomo", "meta")
         return res, mgr
 
+    @unittest.skipUnless(has_pyyaml(), NEEDS_PYYAML)
     def test_appends_proxy_and_bypass_rule(self):
         res, mgr = self._attach()
         self.assertTrue(res["ok"])
@@ -237,6 +249,7 @@ class TestAttachMihomo(unittest.TestCase):
         opera = next(p for p in cfg["proxies"] if p["name"] == "opera-proxy")
         self.assertEqual(opera["type"], "socks5")
 
+    @unittest.skipUnless(has_pyyaml(), NEEDS_PYYAML)
     def test_repeat_updates_single_entry(self):
         _res, mgr = self._attach()
         with mock.patch("core.mihomo_manager.get_mihomo_manager",
@@ -266,6 +279,7 @@ class TestAttachMihomo(unittest.TestCase):
                 "rules:\n"
                 "  - MATCH,DIRECT\n")
 
+    @unittest.skipUnless(has_pyyaml(), NEEDS_PYYAML)
     def test_sniffer_enabled_for_tun_config(self):
         """opera-proxy резолвит свои узлы своим DoH — в fake-ip домена нет.
 
@@ -292,6 +306,103 @@ class TestAttachMihomo(unittest.TestCase):
         res, mgr = self._attach(text)
         self.assertFalse(res["sniffer_added"])
         self.assertFalse(parse_yaml(mgr.text)["sniffer"]["enable"])
+
+    def test_same_settings_twice_is_not_a_rewrite(self):
+        """Повтор с теми же host/port — ничего не переписываем.
+
+        Это единственный путь, на котором кнопка «подключить» работает
+        повторно и БЕЗ PyYAML: сравнить запись с той, что мы бы
+        записали, можно и без round-trip'а.
+        """
+        _res, mgr = self._attach()
+        before = mgr.text
+        with mock.patch("core.mihomo_manager.get_mihomo_manager",
+                        return_value=mgr), \
+             mock.patch.object(chain, "_settings", return_value=_settings()):
+            res2 = chain.attach("mihomo", "meta")
+        self.assertTrue(res2["ok"], res2)
+        self.assertTrue(res2["replaced"])
+        self.assertEqual(mgr.text, before)
+        opera = [p for p in parse_yaml(mgr.text)["proxies"]
+                 if p["name"] == "opera-proxy"]
+        self.assertEqual(len(opera), 1)
+
+
+class TestAttachMihomoWithoutPyYAML(unittest.TestCase):
+    """Роутер с python3-light: PyYAML нет, и это штатный режим.
+
+    Здесь проверяется не «работает так же», а честная деградация: прокси
+    всё равно дописывается, конфиг не повреждён, а о том, чего сделать не
+    удалось, сказано словами — иначе пользователь получает молча
+    полурабочую связку (правило обхода не стоит → трафик самой
+    opera-proxy уходит по кругу).
+    """
+
+    def setUp(self):
+        for target in ("core.clash_yaml.has_pyyaml",
+                       "core.mihomo_proxies.has_pyyaml"):
+            patcher = mock.patch(target, return_value=False)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _attach(self, text=None, **kw):
+        mgr = FakeMihomoManager(
+            TestAttachMihomo.BASE if text is None else text)
+        with mock.patch("core.mihomo_manager.get_mihomo_manager",
+                        return_value=mgr), \
+             mock.patch.object(chain, "_settings",
+                               return_value=_settings(**kw)):
+            res = chain.attach("mihomo", "meta")
+        return res, mgr
+
+    def test_proxy_is_still_added_and_config_survives(self):
+        res, mgr = self._attach()
+        self.assertTrue(res["ok"], res)
+        cfg = parse_yaml(mgr.text)
+        self.assertIn("opera-proxy", [p["name"] for p in cfg["proxies"]])
+        self.assertIn("existing", [p["name"] for p in cfg["proxies"]])
+        self.assertEqual(cfg["rules"], ["MATCH,DIRECT"])   # не тронуты
+
+    def test_missing_bypass_rule_is_spelled_out(self):
+        res, _mgr = self._attach()
+        self.assertFalse(res["bypass_added"])
+        text = " ".join(res["warnings"])
+        self.assertIn("DOMAIN-SUFFIX,sec-tunnel.com,DIRECT", text)
+        self.assertIn("PyYAML", text)
+
+    def test_missing_sniffer_is_spelled_out(self):
+        res, _mgr = self._attach(TestAttachMihomo.TUN_TEXT)
+        self.assertFalse(res["sniffer_added"])
+        self.assertTrue(any("sniffer" in w for w in res["warnings"]))
+
+    def test_repeat_with_new_port_explains_what_to_fix_by_hand(self):
+        """Отказ обязан говорить про opera-proxy, а не про «удаление».
+
+        Текст `safe_mutate` общий на всех вызывающих; отданный как есть,
+        он отвечает на нажатие «подключить» словами про удаление прокси
+        из таблицы — пользователь ищет ошибку не там.
+        """
+        _res, mgr = self._attach()
+        with mock.patch("core.mihomo_manager.get_mihomo_manager",
+                        return_value=mgr), \
+             mock.patch.object(chain, "_settings",
+                               return_value=_settings(port=19999)):
+            res2 = chain.attach("mihomo", "meta")
+        self.assertFalse(res2["ok"])
+        self.assertTrue(res2["needs_pyyaml"])
+        self.assertIn("opera-proxy", res2["error"])
+        self.assertIn("19999", res2["error"])
+        self.assertNotIn("даление", res2["error"])
+
+    def test_repeat_with_same_port_succeeds(self):
+        _res, mgr = self._attach()
+        before = mgr.text
+        with mock.patch("core.mihomo_manager.get_mihomo_manager",
+                        return_value=mgr), \
+             mock.patch.object(chain, "_settings", return_value=_settings()):
+            res2 = chain.attach("mihomo", "meta")
+        self.assertTrue(res2["ok"], res2)
+        self.assertEqual(mgr.text, before)
 
 
 if __name__ == "__main__":

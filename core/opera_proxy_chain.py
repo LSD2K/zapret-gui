@@ -241,11 +241,31 @@ def _attach_mihomo(config: str, tag: str, s: dict) -> dict:
     cfg = cfg if isinstance(cfg, dict) else {}
 
     proxy = mihomo_proxy(tag, s["host"], s["port"], s["socks"])
-    if tag in set(mp.proxy_names(cfg)):
+    current = _find_proxy(cfg, tag)
+    if current == proxy:
+        # В конфиге уже ровно то, что мы бы и записали: переписывать
+        # нечего. Важно на роутере без PyYAML — там round-trip
+        # недоступен, и повторное нажатие кнопки иначе выглядело бы
+        # отказом, хотя подключать уже нечего.
+        new_text = text
+        replaced = True
+    elif current is not None:
         # Round-trip нужен, чтобы заменить существующую запись, а он
         # доступен только с pyyaml (иначе конфиг повредится).
         res = mp.safe_mutate(text, lambda c: _replace_proxy(c, tag, proxy))
         if not res.get("ok"):
+            if res.get("needs_pyyaml"):
+                # Текст самого safe_mutate обезличен — он общий на всех
+                # его вызывающих. Здесь важно сказать, ЧТО править
+                # руками: запись уже есть, разошлись в ней ровно адрес
+                # и порт.
+                return {"ok": False, "needs_pyyaml": True, "error":
+                        "Прокси «%s» уже есть в конфиге mihomo, а обновить"
+                        " его запись без PyYAML нельзя (round-trip повредил"
+                        " бы конфиг). Впишите в неё server: %s и port: %s"
+                        " вручную на странице mihomo — или установите"
+                        " PyYAML (python3-yaml)."
+                        % (tag, s["host"], s["port"])}
             return res
         new_text = res["text"]
         replaced = True
@@ -350,6 +370,14 @@ def _add_mihomo_sniffer(cfg: dict) -> dict:
                   "HTTP": {"ports": [80]}},
     }
     return cfg
+
+
+def _find_proxy(cfg: dict, name: str):
+    """Запись прокси с таким именем или ``None``."""
+    for p in (cfg.get("proxies") or []):
+        if isinstance(p, dict) and str(p.get("name")) == name:
+            return p
+    return None
 
 
 def _replace_proxy(cfg: dict, name: str, proxy: dict) -> dict:
