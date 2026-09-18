@@ -21,7 +21,8 @@ import uuid
 
 from bottle import request, response
 
-from core.mcp import auth, permissions, prompts, registry, resources, server
+from core.mcp import (audit, auth, permissions, prompts, registry,
+                      resources, server)
 
 
 # Заголовок, которым клиент сообщает ревизию спеки (обязателен после
@@ -93,6 +94,9 @@ def register(app):
             "permissions": auth.permissions(),
             "session_id": session_id,
             "subject": decision.subject,
+            # Адрес вызывающего нужен журналу (core/mcp/audit.py): без
+            # него в нём не видно, кто именно менял настройки.
+            "remote_addr": request.environ.get("REMOTE_ADDR", ""),
             "protocol_version": version or server.PROTOCOL_VERSION,
         })
 
@@ -165,6 +169,14 @@ def register(app):
             # Справочники и сценарии разрешений не требуют: их число
             # показывает UI, и по нему видно, что клиент подключился к
             # полноценному серверу, а не к пустой заглушке.
+            # Журнал и снимки: страница MCP показывает, ведётся ли
+            # журнал и есть ли что откатывать (`mcp_undo_last`).
+            "audit": {
+                "enabled": audit.is_enabled(),
+                "keep": audit.keep(),
+                "path": audit.journal_path(),
+                "undoable": len(audit.snapshots()),
+            },
             "resources": len(resources.list_resources()),
             "prompts": len(prompts.list_prompts()),
             "endpoint": "/api/mcp",
