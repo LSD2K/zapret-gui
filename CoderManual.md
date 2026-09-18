@@ -295,7 +295,8 @@ make upstream-offline    # только локальные сверки (идё�
 | `zapret_installer.py` | Установка/обновление бинаря nfqws2 (bol-van/zapret2). |
 | `strategy_builder.py` | Менеджер стратегий (единый источник: builtin JSON + пользовательские). |
 | `strategy_generator.py` | Генерация стратегий «на лету» (параметрические сетки приёмов desync). |
-| `strategy_scanner.py` | Автоперебор стратегий против целей, ранжирование от простых к сложным. |
+| `strategy_scanner.py` | Автоперебор стратегий против целей, ранжирование от простых к сложным. Формула ранжирования (`compose_score`) и правило «baseline открыт — кредита нет» (`credit_success`) вынесены на уровень модуля: их же зовёт движок экспериментов. |
+| `strategy_experiment.py` | Эксперименты A/B со стратегиями: варианты (`args`/`strategy_id`/`profiles`), baseline без обхода, пробы с медианой по повторам, дельта к baseline, хвост лога движка по окну варианта, правила-подсказки «почему не сработало» (`HINT_RULES` — данные). Состояние возвращается в `finally`, `keep_best` живёт только до `ttl_sec` (дедмен-свитч), снимок дублируется на диск — `recover_after_restart()` при старте GUI. |
 | `strategy_state.py` | Persist выученных стратегий (state.tsv от z2k-state-persist.lua: закреплённая `nstrategy` на домен). |
 | `healthcheck.py` | Healthcheck-демон (autocircular watchdog): фоном дёргает референс-домены служб и чинит упавшее. |
 | `scan_targets.py` | Профили целей подбора. |

@@ -77,6 +77,52 @@ STATUS_CANCELLED = "cancelled"
 
 
 # ═══════════════════════════════════════════════════════════
+#  Композитный score — одна формула на сканер и эксперименты
+# ═══════════════════════════════════════════════════════════
+
+# Потолки формулы. Вынесены сюда, а не оставлены магическими числами
+# внутри `_deep_probe`: по ним видно, почему гигабитный канал не даёт
+# гигабитного score, а латентность ниже 50 мс не улучшает результат.
+SCORE_KBPS_CAP = 2048.0         # выше этого скорость в score не растёт
+SCORE_LATENCY_FLOOR_MS = 50.0   # ниже этого латентность в score не падает
+
+
+def credit_success(success: bool, baseline_open: bool) -> bool:
+    """Засчитывать ли успех стратегии с поправкой на baseline.
+
+    Цель, открытая и БЕЗ обхода, никакой стратегии кредита не даёт:
+    «сработало» там означает «чинить было нечего». Правило одно на
+    сканер и на движок экспериментов — разойдись они, эксперимент
+    объявлял бы победителя там, где сканер честно пишет
+    ``BASELINE_OPEN``.
+    """
+    return bool(success and not baseline_open)
+
+
+def compose_score(success: bool, success_rate: float, kbps: float,
+                  latency_ms: float) -> float:
+    """Композитный score стратегии: успешность × скорость / латентность.
+
+    Единственное место, где живёт формула ранжирования. Её зовут и
+    сканер (`_deep_probe`), и движок экспериментов
+    (`core/strategy_experiment.py`): разойдись они — «лучший вариант»
+    эксперимента перестал бы совпадать с «лучшей стратегией» в UI, и
+    пользователь видел бы два разных победителя на одних и тех же
+    измерениях.
+
+    Неуспешная стратегия получает голый `success_rate`: он всё ещё
+    отличает «TLS прошёл, тело не докачалось» от «ничего не прошло», но
+    скорость и латентность у неудачи ничего не значат.
+    """
+    rate = max(0.0, float(success_rate or 0.0))
+    if not success:
+        return round(rate, 2)
+    speed = min(max(0.0, float(kbps or 0.0)), SCORE_KBPS_CAP)
+    latency = max(float(latency_ms or 0.0), SCORE_LATENCY_FLOOR_MS)
+    return round(rate * (speed / latency) * 1000.0, 2)
+
+
+# ═══════════════════════════════════════════════════════════
 #  StrategyScanner
 # ═══════════════════════════════════════════════════════════
 
@@ -1236,7 +1282,10 @@ class StrategyScanner:
                 "kbps": kbps,
                 "body_passed": False,
                 "success_rate": 1.0 if ok else 0.0,
-                "score": (1.0 / max(stun.latency_ms, 50.0)) * 1000.0
+                # У STUN нет ни тела, ни скорости — в формулу уходит
+                # единичная «скорость», и score вырождается в
+                # 1000 / латентность, как и было до вынесения формулы.
+                "score": compose_score(ok, 1.0, 1.0, stun.latency_ms)
                          if ok else 0.0,
                 "test_type": stun.test_type,
                 "details": stun.details,
@@ -1407,17 +1456,12 @@ class StrategyScanner:
         # стратегия ничего не починила.
         baseline_open_all = bool(self._baseline_by_af) and \
             all(self._baseline_by_af.values())
-        if success and baseline_open_all:
-            success = False
+        success = credit_success(success, baseline_open_all)
 
         avg_kbps = (sum_kbps / kbps_count) if kbps_count > 0 else 0.0
         avg_latency = (sum_latency / total_subprobes) if per_host else 0.0
 
-        if success:
-            score = success_rate * (min(avg_kbps, 2048.0) /
-                                    max(avg_latency, 50.0)) * 1000.0
-        else:
-            score = success_rate * 1.0
+        score = compose_score(success, success_rate, avg_kbps, avg_latency)
 
         # Гранулярная агрегация ошибки. Приоритет (от наиболее информативного):
         #  ISP_PAGE > TCP_16_20 > TLS_RESET/TCP_RESET > TLS_EOF_EARLY >

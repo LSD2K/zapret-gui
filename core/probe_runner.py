@@ -69,6 +69,10 @@ VERDICTS = {
 WITH = "with_bypass"
 WITHOUT = "without_bypass"
 
+# Как сворачивать латентность повторов.
+MEAN = "mean"
+MEDIAN = "median"
+
 
 # ───────────────────────────── лимиты ───────────────────────────────
 
@@ -180,8 +184,12 @@ def probe_many(domains, timeout=None, repeats=1, port=443,
 
 
 def probe_target(domain: str, timeout: int, repeats: int = 1,
-                 port: int = 443) -> dict:
-    """Одна цель: ``repeats`` проб, свёрнутых в один вердикт."""
+                 port: int = 443, latency: str = MEAN) -> dict:
+    """Одна цель: ``repeats`` проб, свёрнутых в один вердикт.
+
+    ``latency`` — как сворачивать латентность повторов: ``"mean"``
+    (по умолчанию, историческое поведение проб) или ``"median"``.
+    """
     attempts = []
     for _ in range(max(1, repeats)):
         try:
@@ -191,15 +199,22 @@ def probe_target(domain: str, timeout: int, repeats: int = 1,
             # строится вердикт, и «упало» — это тоже ответ.
             log.debug("Проба %s упала: %s" % (domain, e), source="probes")
             attempts.append(None)
-    return fold(domain, attempts)
+    return fold(domain, attempts, latency=latency)
 
 
-def fold(domain: str, attempts) -> dict:
+def fold(domain: str, attempts, latency: str = MEAN) -> dict:
     """Свернуть повторы одной цели в запись результата.
 
     Успехом считаем СТРОГОЕ большинство удачных попыток: домен,
     открывшийся один раз из двух, работает нестабильно, и называть это
     «работает» значит подсунуть модели ложную базу для сравнения.
+
+    ``latency="median"`` — для сравнения вариантов стратегии
+    (``core/strategy_experiment.py``): один выброс по латентности на
+    роутере (ретрансмит, занятый CPU) — это норма, и среднее из трёх
+    замеров он сдвигает так, что варианты меняются местами. Дефолт
+    остаётся средним: на нём построены ответы S8, и менять их задним
+    числом нельзя.
     """
     codes, latencies, details, ok_count = [], [], [], 0
     bytes_read, resolved = 0, []
@@ -221,7 +236,6 @@ def fold(domain: str, attempts) -> dict:
     ok = ok_count * 2 > total
     code = "ok" if ok else _most_common([c for c in codes if c != "ok"]) \
         or "unknown"
-    latency = round(sum(latencies) / len(latencies), 1) if latencies else 0.0
     return {
         "target": domain,
         "ok": ok,
@@ -229,7 +243,8 @@ def fold(domain: str, attempts) -> dict:
         "code_desc": describe_code(code),
         "dpi": _dpi(code),
         "remediation": _remediation(code),
-        "latency_ms": latency,
+        "latency_ms": _fold_latency(latencies, latency),
+        "latency_stat": latency if latencies else "",
         "bytes_read": bytes_read,
         "resolved_ips": resolved[:4],
         "detail": (details[0] if details else "")[:200],
@@ -419,6 +434,24 @@ def _dpi(code: str) -> str:
 def _remediation(code: str) -> str:
     from core.models import remediation_for
     return remediation_for(_dpi(code))
+
+
+def _fold_latency(values, how: str) -> float:
+    """Латентность повторов одним числом: среднее или медиана.
+
+    Медиана нужна там, где сравниваются варианты: единственный выброс
+    (ретрансмит, занятый CPU роутера) сдвигает среднее из трёх замеров
+    сильнее, чем разница между двумя приличными стратегиями.
+    """
+    if not values:
+        return 0.0
+    if how == MEDIAN:
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return round(ordered[middle], 1)
+        return round((ordered[middle - 1] + ordered[middle]) / 2.0, 1)
+    return round(sum(values) / len(values), 1)
 
 
 def _most_common(values):
