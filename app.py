@@ -143,6 +143,20 @@ def _apply_saved_strategy_on_boot():
             from core.config_manager import get_config_manager
             from core.log_buffer import log
 
+            # Эксперимент со стратегиями (MCP) мог оборваться вместе с
+            # GUI — выключением питания, падением, перезапуском. Снимок
+            # «как было» пережил это на диске, а временная стратегия —
+            # нет: без возврата роутер остался бы с вариантом, который
+            # никто не подтверждал. Делаем ДО firewall и автозапуска:
+            # оба смотрят на текущее состояние движка. No-op, если
+            # эксперимент завершился штатно.
+            try:
+                from core.strategy_experiment import recover_after_restart
+                recover_after_restart(source="autostart")
+            except Exception as e:
+                log.debug("Проверка незавершённого эксперимента: %s" % e,
+                          source="autostart")
+
             # nfqws2 переживает рестарт GUI (свой сеанс, setsid), а вот
             # правила firewall из системы могут за это время пропасть —
             # тогда обход «запущен», но трафика не видит. Проверяем ДО всех

@@ -58,13 +58,20 @@ from core.mcp import registry
 # опрашивай») не работает вовсе. `scan_apply` уехал в `control`: он
 # поднимает движок и сверх того требует `strategies_write`, потому что
 # сохраняет найденное как USER-стратегию.
+# S10: + 7 под `experiments` — движок экспериментов целиком
+# (strategy_experiment_start/_status/_result/_commit/_rollback/_stop/
+# _history). Опрос и отчёт НЕ вынесены в чтение, как у сканера: у
+# сканера статус описывает прогон, запущенный кем угодно, а здесь и
+# статус, и отчёт — результат изменений, которые внесла сама модель, и
+# открывать их без права эти изменения делать незачем. Само разрешение
+# не действует без `control` и `probes` (см. test_mcp_permissions).
 BY_SCOPE = {
     "read": 32,
     "control": 8,
     "strategies_write": 6,
     "config_write": 1,
     "probes": 8,
-    "experiments": 0,
+    "experiments": 7,
     "tunnels_write": 0,
     "dangerous": 0,
     "shell_readonly": 0,
@@ -161,6 +168,14 @@ class TestToolCounts(unittest.TestCase):
         "blob_add", "hostlist_edit", "ipset_edit", "lua_script_save",
         "strategy_delete", "strategy_save",
     ]
+    # S10 — движок экспериментов: и мутирующие, и опрос под одним
+    # разрешением.
+    EXPERIMENTS_TOOLS = [
+        "strategy_experiment_commit", "strategy_experiment_history",
+        "strategy_experiment_result", "strategy_experiment_rollback",
+        "strategy_experiment_start", "strategy_experiment_status",
+        "strategy_experiment_stop",
+    ]
     # S8 — всё, что выпускает трафик с роутера.
     PROBES_TOOLS = [
         "blockcheck2_start", "blockcheck2_stop", "blockcheck_start",
@@ -180,12 +195,16 @@ class TestToolCounts(unittest.TestCase):
         self.assertEqual(len(self.STRATEGIES_WRITE_TOOLS),
                          BY_SCOPE["strategies_write"])
         self.assertEqual(len(self.PROBES_TOOLS), BY_SCOPE["probes"])
+        self.assertEqual(len(self.EXPERIMENTS_TOOLS),
+                         BY_SCOPE["experiments"])
 
     def test_write_tools_are_named_in_the_table(self):
         for scope, expected in (("control", self.CONTROL_TOOLS),
                                 ("strategies_write",
                                  self.STRATEGIES_WRITE_TOOLS),
-                                ("probes", self.PROBES_TOOLS)):
+                                ("probes", self.PROBES_TOOLS),
+                                ("experiments",
+                                 self.EXPERIMENTS_TOOLS)):
             names = sorted(spec.name for spec in registry.all_tools()
                            if spec.scope == scope)
             with self.subTest(scope=scope):

@@ -112,6 +112,33 @@ class TestDependencies(unittest.TestCase):
         self.assertEqual(denial["missing"], ["probes"])
         self.assertEqual(denial["requires"], ["control", "probes"])
 
+    def test_experiment_tools_stay_hidden_until_dependencies_are_on(self):
+        # Самая дорогая половина этой зависимости: `experiments` без
+        # `probes` открыл бы движок, который САМ выпускает трафик, а без
+        # `control` — тот, что сам поднимает и роняет nfqws2. Флаг,
+        # включённый в одиночку, не должен давать ни одного инструмента.
+        registry.load_tools()
+        half = {"experiments": True, "control": True}
+        listed = {t["name"] for t in
+                  call("tools/list", ctx={"permissions": half})
+                  ["result"]["tools"]}
+        experiment_tools = {spec.name for spec in registry.all_tools()
+                            if spec.scope == "experiments"}
+        self.assertTrue(experiment_tools)
+        self.assertEqual(experiment_tools & listed, set())
+
+    def test_experiment_tool_called_by_name_names_the_missing_dependency(self):
+        registry.load_tools()
+        result = call("tools/call",
+                      {"name": "strategy_experiment_start",
+                       "arguments": {"variants": [{"args": ["--x"]}]}},
+                      ctx={"permissions": {"experiments": True,
+                                           "control": True}})["result"]
+        self.assertTrue(result["isError"])
+        payload = result["structuredContent"]
+        self.assertEqual(payload["missing"], ["probes"])
+        self.assertIn("probes", payload["hint"])
+
     def test_self_edit_core_needs_self_edit(self):
         self.assertFalse(perms.effective({"self_edit_core": True})
                          ["self_edit_core"])
