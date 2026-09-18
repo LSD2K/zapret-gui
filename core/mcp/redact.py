@@ -44,8 +44,14 @@ import re
 MASK = "***"
 
 # Ключи, значение которых наружу не уезжает никогда.
+#
+# `pass` намеренно с оглядкой назад: без неё под маску уезжали
+# `with_bypass`/`without_bypass` (контракт `probe_compare`, S8) и
+# `proxy_bypass` — то есть рабочие данные, а не секреты. Подчёркивание
+# и начало строки границей считаются, поэтому `password`, `passwd`,
+# `passphrase` и `user_pass` маскируются как маскировались.
 SECRET_KEY_RE = re.compile(
-    r"(?i)pass|secret|token|key|licen|uuid|auth|credential")
+    r"(?i)(?<![a-z])pass|secret|token|key|licen|uuid|auth|credential")
 
 # Ключи, в которых лежит URL подписки: оставляем схему и хост.
 URL_KEY_RE = re.compile(r"(?i)subscri|(?:^|_)(?:url|link|endpoint)s?$")

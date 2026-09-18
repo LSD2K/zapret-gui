@@ -48,12 +48,22 @@ from core.mcp import registry
 # снимки бывают шести видов, и модель с `strategies_write` без
 # `config_write` иначе получила бы право менять стратегии без права их
 # вернуть.
+# S8: + 8 под `probes` (пробы: probe_targets/probe_compare; сканер:
+# scan_start/scan_stop; диагностика: blockcheck_start,
+# blockcheck2_start/blockcheck2_stop, healthcheck_run) и + 7 на чтение
+# (scan_status, scan_results, blockcheck_status, blockcheck2_status,
+# blockcheck2_output, healthcheck_status, connectivity_matrix). Опрос
+# задачи и её результаты — чтение: они не выпускают ни одного пакета, а
+# без них асинхронный контракт («*_start отдаёт job_id, дальше
+# опрашивай») не работает вовсе. `scan_apply` уехал в `control`: он
+# поднимает движок и сверх того требует `strategies_write`, потому что
+# сохраняет найденное как USER-стратегию.
 BY_SCOPE = {
-    "read": 25,
-    "control": 7,
+    "read": 32,
+    "control": 8,
     "strategies_write": 6,
     "config_write": 1,
-    "probes": 0,
+    "probes": 8,
     "experiments": 0,
     "tunnels_write": 0,
     "dangerous": 0,
@@ -134,17 +144,28 @@ class TestToolCounts(unittest.TestCase):
         "diagnostics_run", "dpi_report", "tunnels_status", "updates_check",
         # S6 — что можно менять и что уже менялось
         "audit_list", "config_writable_paths",
+        # S8 — опрос задач и их результаты (пакетов не выпускают)
+        "blockcheck2_output", "blockcheck2_status", "blockcheck_status",
+        "connectivity_matrix", "healthcheck_status", "scan_results",
+        "scan_status",
     ]
 
     # S7 — мутирующие наборы. Список имён рядом с числом: две записи об
     # одном и том же расходятся молча.
     CONTROL_TOOLS = [
         "firewall_apply", "firewall_remove", "nfqws_reload_lists",
-        "nfqws_restart", "nfqws_start", "nfqws_stop", "strategy_apply",
+        "nfqws_restart", "nfqws_start", "nfqws_stop", "scan_apply",
+        "strategy_apply",
     ]
     STRATEGIES_WRITE_TOOLS = [
         "blob_add", "hostlist_edit", "ipset_edit", "lua_script_save",
         "strategy_delete", "strategy_save",
+    ]
+    # S8 — всё, что выпускает трафик с роутера.
+    PROBES_TOOLS = [
+        "blockcheck2_start", "blockcheck2_stop", "blockcheck_start",
+        "healthcheck_run", "probe_compare", "probe_targets",
+        "scan_start", "scan_stop",
     ]
 
     def test_read_tools_are_named_in_the_table(self):
@@ -158,11 +179,13 @@ class TestToolCounts(unittest.TestCase):
         self.assertEqual(len(self.CONTROL_TOOLS), BY_SCOPE["control"])
         self.assertEqual(len(self.STRATEGIES_WRITE_TOOLS),
                          BY_SCOPE["strategies_write"])
+        self.assertEqual(len(self.PROBES_TOOLS), BY_SCOPE["probes"])
 
     def test_write_tools_are_named_in_the_table(self):
         for scope, expected in (("control", self.CONTROL_TOOLS),
                                 ("strategies_write",
-                                 self.STRATEGIES_WRITE_TOOLS)):
+                                 self.STRATEGIES_WRITE_TOOLS),
+                                ("probes", self.PROBES_TOOLS)):
             names = sorted(spec.name for spec in registry.all_tools()
                            if spec.scope == scope)
             with self.subTest(scope=scope):

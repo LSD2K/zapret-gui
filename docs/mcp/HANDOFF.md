@@ -8,165 +8,151 @@
 
 ---
 
-## Состояние: после S7 (управление движком, правка стратегий и списков)
+## Состояние: после S8 (активные пробы, сканер, blockcheck)
 
-**Дата:** 2026-09-18 · **Ветка/PR:** `claude/elegant-allen-7t9dua`
+**Дата:** 2026-09-18 · **Ветка/PR:** `claude/zen-fermi-1188qf`
 
 ### Сделано
 
-- `core/nfqws_control.py` (293) — **не в пакете MCP**: общая для UI,
-  CLI и MCP последовательность управления обходом. `start`, `stop`,
-  `restart`, `apply_strategy`, `clear_strategy`, `reload_lists`,
-  `busy`, `active_strategy_args`. Форма ответа одна: `{ok, error,
-  nfqws, firewall, …}`.
-- `api/control.py` (84, было 195) и роут `POST
-  /api/strategies/<sid>/apply` — переписаны в тонкие обёртки над ним.
-  Форма HTTP-ответов сохранена дословно.
-- `core/firewall.py` — `management_ports(cfg)` и
-  `strip_management_ports(spec, cfg)`; вызов последней **внутри
-  `apply_rules()`**. SSH (22, 23, 233) и порт GUI из конфига в NFQUEUE
-  не уводятся никогда; не осталось портов — правила не применяются
-  вовсе.
-- `core/mcp/tools/nfqws.py` (325) — `nfqws_start`, `nfqws_stop`,
-  `nfqws_restart`, `nfqws_reload_lists`, `strategy_apply` (`control`)
-  + откат вида `strategy_active`.
-- `core/mcp/tools/strategies.py` (+407) — `strategy_save`,
-  `strategy_delete` (`strategies_write`) + откат вида `strategy`.
-- `core/mcp/tools/lists.py` (+632) — `hostlist_edit`, `ipset_edit`,
-  `blob_add`, `lua_script_save` (`strategies_write`) + откаты видов
-  `hostlist`, `ipset`, `blob`, `lua`.
-- `core/mcp/tools/firewall.py` (+163) — `firewall_apply`,
-  `firewall_remove` (`control`) + откат вида `firewall`.
-- `core/mcp/permissions.py` — псевдо-scope `ANY_WRITE_SCOPE`
-  (`any_write`) и список `WRITE_PERMISSIONS`; `mcp_undo_last` переехал
-  под него из `config_write`.
-- `core/mcp/audit.py` — виды снимков `KIND_STRATEGY`,
-  `KIND_STRATEGY_ACTIVE`, `KIND_HOSTLIST`, `KIND_IPSET`, `KIND_BLOB`,
-  `KIND_LUA`, `KIND_FIREWALL`.
-- тесты: `test_mcp_control.py` (18), `test_mcp_strategies_write.py`
-  (23, включая приёмочный цикл), `test_mcp_lists_write.py` (26),
-  `test_mcp_firewall.py` (17); правлены `test_mcp_tool_counts.py`
-  (`control: 7`, `strategies_write: 6`, `config_write: 2 → 1`,
-  `any_write: 1` + поимённые списки) и `test_mcp_audit.py`. По
-  `test_mcp_*` — **518 зелёных**; весь `tests/` — 3346 passed, 1
-  skipped; `make lint` чист.
+- `core/probe_runner.py` (405) — **не в пакете MCP**: `probe_many`,
+  `probe_target`, `fold`, `compare`, `clean_targets`, `limits`,
+  `VERDICTS`. Пробы по списку целей и сравнение «с обходом и без»
+  одним кодом для MCP, CLI и UI.
+- `core/mcp/tools/_jobs.py` (190) — асинхронная задача: `job_id`,
+  `resolve`, `is_current`, `update`, `describe`, `running_id`. Записи
+  переживают конец прогона (`KEEP` на вид).
+- `core/mcp/tools/probes.py` (320) — `probe_targets`, `probe_compare`
+  (`probes`), `connectivity_matrix` (чтение + `refresh` по `probes`).
+- `core/mcp/tools/scan.py` (490) — `scan_start`, `scan_stop`
+  (`probes`), `scan_status`, `scan_results` (чтение), `scan_apply`
+  (`control` + внутренняя проверка `strategies_write`).
+- `core/mcp/tools/blockcheck.py` (520) — `blockcheck_start`,
+  `blockcheck2_start`, `blockcheck2_stop`, `healthcheck_run`
+  (`probes`); `blockcheck_status`, `blockcheck2_status`,
+  `blockcheck2_output`, `healthcheck_status` (чтение).
+- `core/nfqws_control.py` — `running()` (состояние движка без побочных
+  действий) и `_is_running()` (см. «что оказалось не так», п. 3).
+- `core/config_manager.py` — секция `mcp.probes` (`max_targets`,
+  `max_repeats`, `timeout_sec`, `budget_sec`, `parallel`,
+  `settle_sec`).
+- `core/mcp/redact.py` — у `pass` в `SECRET_KEY_RE` появилась оглядка
+  назад: `with_bypass`/`without_bypass` уезжали как `"***"`.
+- тесты: `test_mcp_probes.py` (22), `test_mcp_jobs.py` (20),
+  дополнен `test_mcp_permissions.py` (+5, класс `TestProbesBoundary`),
+  правлен `test_mcp_tool_counts.py` (`read: 32`, `probes: 8`,
+  `control: 8` + поимённые списки). По `test_mcp_*` — **565 зелёных**;
+  весь `tests/` — 3395 passed, 1 skipped; `make lint` чист.
 
 ### Зафиксированные контракты
 
-**Логика управления — в `core/nfqws_control.py`.** Инструменты MCP её
-не повторяют: «запустить обход» — это правила firewall, пересборка
-аргументов активной стратегии, снятие правил при неудаче и запись в
-конфиг. S9 (`core/nfqws_session.py`) и S10 берут её оттуда же, а не
-собирают заново.
+**`probe_compare` — то, на чём S10 строит baseline.** `with_bypass` /
+`without_bypass` / `verdict`; вердикт только из
+`probe_runner.VERDICTS` (`bypass_helps`, `no_difference`,
+`target_down`, `bypass_hurts`, `unknown`), код только из
+`PROBE_CODES`. Неизмеренная сторона — `measured: false` + `reason`, и
+тогда вердикт `unknown`: выдуманная половина хуже отсутствующей.
 
-**`busy()` — единственная точка проверки конкуренции за движок.**
-Отдаёт `{who, reason, hint}` или `{}`. **S9 заменяет её тело**, не
-трогая вызывающих. «Не смог спросить» ≠ «занято» (есть сторож).
+**Переключение движка в `compare` требует `control` вдобавок к
+`probes`** и возвращает исходное состояние в `finally` (`restored`,
+`restore_error` в ответе). Без `control` инструмент не отказывает, а
+отдаёт одну сторону и называет переключатель.
 
-**`apply_strategy` возвращает `previous_id` и `error_code`.** Первый —
-потому что прочитать прежний `current_id` после вызова уже нельзя;
-второй (`not_found`/`no_profiles`/`start_failed`) — потому что по
-тексту ошибки эти случаи не различить, а реакция на них разная.
+**Асинхронный контракт**: `*_start` → `job_id` + `async: true` сразу;
+`*_status` → живой статус либо сохранённый снимок (`live`, `done`,
+`job_note`); `*_output` → инкремент по `offset` → `next_offset`;
+второй старт при занятом движке → `isError` с активным `job_id`.
+Задача переживает конец прогона; ярлык старой задачи живым статусом
+не отвечает (`_jobs.is_current`).
 
-**Семь видов снимков вместо одного.** Таблица «вид → кто кладёт → что
-в `before` → как откатывается» — в скиле. Одному виду соответствует
-**один** обработчик: `register_undo` перезаписывает предыдущий молча,
-поэтому «применить стратегию» (`strategy_active`) и «сохранить
-стратегию» (`strategy`) — разные виды.
+**Своё пояснение — в `job_note`, а не в `note`.** `note` в этих
+ответах занят пометкой «untrusted data».
 
-**`mcp_undo_last` — под `any_write`.** Псевдо-scope: открывается любым
-из `permissions.WRITE_PERMISSIONS`. `probes` туда не входит.
+**Лимиты проб — `mcp.probes`**, схема режет вдобавок на уровне
+протокола. Лишние цели уезжают в `rejected` с причиной, не влезшие в
+бюджет — в `skipped`. Повторы сворачиваются по СТРОГОМУ большинству
+(`fold`).
 
-**Списки заменяются целиком при `mode="replace"`**, и сказано это
-трижды: описание инструмента, `hint` ответа, прежнее содержимое в
-`before` целиком.
-
-**Порты управления исключаются в `core/firewall.py`, а не в обёртке
-MCP.** Иначе связка «`config_set(nfqws.ports_tcp="22,80,443")` →
-`nfqws_start`» обходит защиту стороной.
+**Опрос — чтение, прогон — проба.** `scan_status`/`scan_results`,
+`*_status`, `blockcheck2_output`, `healthcheck_status` и снимок
+`connectivity_matrix` пакетов не выпускают и живут в read-наборе;
+`*_start`/`*_stop`/`healthcheck_run`/`refresh` — под `probes`.
 
 ### Следующий шаг
 
 **S9** — [`09-nfqws-session.md`](09-nfqws-session.md): общий мьютекс на
-движок. Подключаться к `nfqws_control.busy()`: заменить её тело опросом
-сессии, вызывающие (`tools/nfqws.py`) не трогать. Сканер переводится на
-ту же сессию.
-
-**S8** — [`08-probes.md`](08-probes.md): активные пробы и сканер. От S7
-не зависит, но его `probes` — вторая половина связки для S10.
+движок. Подключаться к `nfqws_control.busy()`: заменить её тело
+опросом сессии, вызывающих (`tools/nfqws.py`, `tools/scan.py`,
+`tools/blockcheck.py` — все зовут `_busy_refusal`) не трогать. Сканер
+переводится на ту же сессию. Учесть: `probe_compare` тоже трогает
+движок (`nfqws_control.stop/start`) и обязан брать ту же сессию, иначе
+скан и сравнение подерутся.
 
 **S10** — [`10-experiments.md`](10-experiments.md): движок
-экспериментов. Применение варианта — это `nfqws_control.apply_strategy`
-(или его временный аналог на сессии S9), авто-откат — снимок вида
-`strategy_active` и `audit.undo_last(kind=…)`.
+экспериментов. Baseline — `probe_runner.compare()` и
+`probe_runner.probe_many()` (не писать свои пробы), применение
+варианта — `nfqws_control.apply_strategy`, авто-откат — снимок вида
+`strategy_active`. Лимиты эксперимента уже лежат в `mcp.experiment`,
+лимиты проб — в `mcp.probes`.
 
-**S15** — [`15-ui.md`](15-ui.md): страница MCP показывает число
-инструментов по каждому разрешению; `any_write` — не переключатель, и
-рисовать его в списке разрешений нельзя.
+**S15** — [`15-ui.md`](15-ui.md): на странице MCP у `probes` теперь 8
+инструментов, у чтения 32; `any_write` — не переключатель.
 
 ### Что оказалось не так, как написано в задании
 
-1. **`mcp_undo_last` под `config_write` ломает приёмку S7.** Задание
-   требует цикла «сохранить → применить → откатить всё» на `control` +
-   `strategies_write`, а откат был доступен только при `config_write`.
-   Заведён псевдо-scope `any_write` (см. контракты); это то самое
-   пересмотрение, которое HANDOFF S6 оставил «на когда появятся другие
-   виды снимков».
-2. **`tunnel_up`/`tunnel_down` НЕ сделаны.** Шесть движков отвечают о
-   себе шестью разными способами (см. `core/tunnels_overview.py`), и
-   честный `tunnel_up` — это отдельный `core/tunnels_control.py` с
-   адаптером на каждый плюс свои тесты. Дифф S7 и без них вырос за
-   бюджет контракта (§7), поэтому вынесены целиком — вместе с
-   остальными туннельными write-инструментами (`*_config_save`,
-   `subscription_refresh`, `pool_refresh`, `unified_rule_*`). Чей
-   scope: `tunnels_write`, а `unified_rule_*` — `dangerous`.
-   Подключаться к `overview()`: адрес инстанса — `engine` +
-   `instances[].name`.
-3. **Защита портов управления в `core/firewall.py` не была сделана
-   вовсе.** Задание предполагало «проверить, есть ли»; не было ничего,
-   и дыра оказалась достижимой: `nfqws.ports_tcp` открыт на запись
-   через `config_set`. Добавлено в `apply_rules()`, а не в обёртку MCP.
-4. **Логику применения стратегии пришлось выносить из `api/`.**
-   Контракт §2 требует, чтобы `tools/*` были тонкими обёртками, а вся
-   последовательность жила в `api/strategies.py`. Роуты переписаны;
-   формы HTTP-ответов сохранены (`error_code` наружу не уходит, он
-   превращается в код статуса).
-5. **Откат применения стратегии — это не только запись в конфиг.**
-   Вернуть `current_id`, не тронув движок, значит оставить обход
-   работающим с аргументами откаченной стратегии: `strategy_list`
-   показывает одно, трафик идёт по другому. `_undo_strategy_apply`
-   переподнимает движок, а при пустом `before` зовёт
-   `nfqws_control.clear_strategy()`.
+1. **`connectivity_matrix` — чтение, а не `probes`.** Задание
+   перечисляет его среди инструментов проб, но у матрицы есть
+   сохранённый снимок, и прятать его целиком значило бы повторить
+   ошибку, от которой S5 отказался на `updates_check`. Сделано так же:
+   инструмент в read-наборе, `refresh=true` — по `probes`.
+2. **`scan_apply` — `control`, и этого мало.** Он не только поднимает
+   движок, но и сохраняет найденное как USER-стратегию
+   (`scanner._apply_probe_result`). Scope один, поэтому
+   `strategies_write` спрашивается внутри обработчика; иначе `control`
+   в одиночку открыл бы запись стратегий.
+3. **`busy()` не видела наш blockcheck.** У `Blockcheck2Runner`
+   `is_running` — метод, у `BlockcheckRunner` — `@property`;
+   безусловный вызов бросал `TypeError`, который съедался общим
+   `except`. То есть стратегия применялась прямо поверх идущих проб
+   (наследство S7, найдено при подключении `blockcheck_start`).
+   Починено в `nfqws_control._is_running()`.
+4. **`with_bypass` маскировался как секрет.** `SECRET_KEY_RE` ловил
+   `pass` внутри `bypass`. Имена полей заданы контрактом задания и
+   нужны S10, поэтому переименовать было нельзя — сужен регексп
+   (`(?<![a-z])pass`). Побочно перестал маскироваться
+   `opera_proxy.proxy_bypass` (список доменов, не секрет).
+5. **`blockcheck_status` в задании не назван.** Без него асинхронный
+   контракт для нашего blockcheck неполон: `dpi_report` отдаёт
+   готовый отчёт, но не прогресс идущего прогона.
+6. **Свободный `params` для blockcheck2 не отдан модели.** Вместо
+   произвольного env — фиксированные аргументы (`ipv`, `repeats`,
+   `http`, `tls12`, `tls13`, `http3`), которые `_env_params`
+   раскладывает в `IPVS`/`REPEATS`/`ENABLE_*`. Произвольный env — это
+   `PATH` и `LD_PRELOAD` в руках модели.
 
 ### Грабли
 
-- **`get_script()` отдаёт `""` и для отсутствующего файла, и для
-  пустого.** На различии «был скрипт или нет» держится откат (вернуть
-  текст против удалить созданный файл); существование спрашиваем у
-  `list_names()`.
-- **`BlobManager` создаёт свой каталог прямо в `__init__`** из
-  `zapret.base_path`. Тест-песочница, подменившая `lists_path`,
-  `ipset_path` и `lua_path`, но не `base_path`, заводит
-  `/opt/zapret2/blobs` на машине разработчика.
-- **`get_hostlist()` пустого списка отдаёт ДЕФОЛТЫ, а не `[]`.** Тест
-  «после отказа файл не тронут» обязан сравнивать с тем, что было.
-- **`maxLength` в схеме — это ошибка протокола, а не отказ
-  инструмента.** Тест на «слишком длинный id» ждёт `SchemaError`,
-  вызов до обработчика не доходит.
-- **Правила без движка — чёрная дыра.** Неудачный `start` обязан снять
-  правила, которые сам же поставил; `firewall_apply` при лежащем
-  движке говорит об этом в `hint`.
-- **`apply_rules(ports_tcp="")` НЕ означает «без портов».** Пустая
-  строка ложна, и функция подставляет значение из конфига — то есть
-  порты управления вернулись бы окольным путём. Поэтому пустой
-  результат фильтра = отказ применять правила.
-- **Менеджер стратегий и `nfqws_control` в тесте должны смотреть в
-  один конфиг.** Инструмент, читающий `get_config_manager()` напрямую
-  там, где `nfqws_control` работает с подменённым `_managers()`, в
-  тесте расходится с ядром (и это не видно на живом устройстве, где
-  объект один).
-- **Свой вызов инструмент в журнале не видит** — запись делается после
-  обработчика (наследство S6, всё ещё верно).
+- **Пустой `active_strategy_args()` ≠ «запусти как есть».** Поднять
+  голый nfqws2 и назвать это «с обходом» — прямая ложь в baseline;
+  `compare` в этом случае отдаёт неизмеренную сторону с причиной.
+- **Бюджет времени режет ЗАПУСК проб, а не их длительность.** Задачи,
+  уже отправленные в пул, доработают: `budget_sec` проверяется между
+  порциями.
+- **`limits()` поднимает всё до 1, кроме `settle_sec`.** Иначе
+  `settle_sec=0` превращается в секунду — и восемь тестов сравнения
+  стоят восемь секунд.
+- **Runner помнит один прогон.** `_jobs` помнит несколько ярлыков, и
+  живой статус можно отдавать только под последним. Для
+  `blockcheck2_output` это прямой отказ: чужих строк у нас нет.
+- **`healthcheck.run_now(blocking=True)` — это до ~30 секунд.**
+  Инструмент зовёт `blocking=False` и отправляет модель за
+  результатом в `healthcheck_status`.
+- **Сканер применяет стратегию своим кодом**, не через
+  `nfqws_control`. Оборачивать его новой логикой нельзя (S8 не меняет
+  поведение сканера), поэтому снимок для отката снимается снаружи:
+  `strategy.current_id` читается до и после вызова.
+- **`_paging.unavailable()` отдаёт `ok: true`.** «Сканера на
+  устройстве нет» — это ответ, а не сбой вызова; тест на это
+  опирается.
 
 ---
 

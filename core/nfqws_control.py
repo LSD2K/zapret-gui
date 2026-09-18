@@ -67,7 +67,7 @@ def busy() -> dict:
         try:
             mod = __import__(module, fromlist=[factory])
             manager = getattr(mod, factory)()
-            if manager.is_running():
+            if _is_running(manager):
                 return {
                     "who": BUSY_BLOCKCHECK,
                     "reason": "идёт диагностика blockcheck: она сама "
@@ -78,6 +78,34 @@ def busy() -> dict:
             continue
 
     return {}
+
+
+def _is_running(manager) -> bool:
+    """``is_running`` у двух blockcheck'ов объявлен по-разному.
+
+    У ``Blockcheck2Runner`` это метод, у ``BlockcheckRunner`` —
+    ``@property``. Безусловный вызов ``manager.is_running()`` на втором
+    бросает ``TypeError``, который тут же съедался общим ``except``, —
+    то есть наша Python-реализация blockcheck НИКОГДА не считалась
+    занявшей движок, и стратегия применялась прямо поверх её проб.
+    """
+    flag = getattr(manager, "is_running", False)
+    return bool(flag() if callable(flag) else flag)
+
+
+def running() -> bool:
+    """Поднят ли движок прямо сейчас — без единого побочного действия.
+
+    Нужна тем, кто сравнивает состояние «с обходом и без»
+    (``core/probe_runner.py``): спрашивать менеджер напрямую они не
+    могут — тесты подменяют его здесь, в ``_managers()``.
+    """
+    try:
+        mgr, _fw, _cfg = _managers()
+        return bool(mgr.is_running())
+    except Exception as e:                      # noqa: BLE001 — граница
+        log.debug("Состояние движка не прочитано: %s" % e, source="control")
+        return False
 
 
 def active_strategy_args():
