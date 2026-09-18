@@ -54,6 +54,10 @@ import re
 from core.mcp import redact
 
 
+# Отличаем «ключа нет» от «дефолт равен None».
+_MISSING = object()
+
+
 # Порядок — как в docs/mcp/00-contract.md §4.
 PERMISSIONS = (
     "control", "strategies_write", "config_write", "probes", "experiments",
@@ -270,8 +274,14 @@ def is_writable(path) -> bool:
         if _is_denied_key(segment):
             return False
 
+    # Настройки, которой нет в DEFAULT_CONFIG, не существует: записать
+    # её — значит завести в settings.json ключ, который никто не читает.
+    # Отсюда же закрыт путь «a.b.c» с несуществующим промежуточным
+    # узлом: снаружи он выглядит как лист внутри разрешённой секции.
+    known = _default_at(parts, missing=_MISSING)
+    if known is _MISSING:
+        return False
     # Существующее поддерево — не лист: писать в него нельзя.
-    known = _default_at(parts)
     if isinstance(known, dict):
         return False
     return True
@@ -298,7 +308,11 @@ def why_not_writable(path) -> str:
             return ("«%s» задаёт расположение файла или каталога: неверный "
                     "путь не ломает GUI громко, а тихо выключает часть "
                     "логики" % dotted)
-    if isinstance(_default_at(parts), dict):
+    known = _default_at(parts, missing=_MISSING)
+    if known is _MISSING:
+        return ("такой настройки нет: «%s» не описан в дефолтах GUI — "
+                "проверьте путь по config_writable_paths" % dotted)
+    if isinstance(known, dict):
         return "«%s» — поддерево, а не значение: укажите конкретный ключ" \
             % dotted
     return ""
@@ -374,14 +388,18 @@ def _is_denied_key(segment: str) -> bool:
     return bool(DENY_KEY_RE.search(segment)) or redact.is_secret_key(segment)
 
 
-def _default_at(parts):
-    """Значение по пути в ``DEFAULT_CONFIG`` (или ``None``)."""
+def _default_at(parts, missing=None):
+    """Значение по пути в ``DEFAULT_CONFIG``.
+
+    ``missing`` отличает «дефолт равен None» от «такого ключа нет»:
+    первое — законная настройка, второе — выдуманный путь.
+    """
     from core.config_manager import DEFAULT_CONFIG
 
     node = DEFAULT_CONFIG
     for key in parts:
         if not isinstance(node, dict) or key not in node:
-            return None
+            return missing
         node = node[key]
     return node
 

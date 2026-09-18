@@ -42,6 +42,7 @@ import time
 import traceback
 
 from core.log_buffer import log
+from core.mcp import audit
 from core.mcp import permissions as perms_mod
 from core.mcp import redact as redact_mod
 from core.mcp import schema as schema_mod
@@ -296,13 +297,19 @@ def scope_counts(perms=None) -> dict:
 
 # ─────────────────────────────── вызов ──────────────────────────────
 
-def call(name, args=None, perms=None) -> dict:
+def call(name, args=None, perms=None, ctx=None) -> dict:
     """Вызвать инструмент и вернуть готовый результат ``tools/call``.
 
     Порядок: разрешение → валидация аргументов → вызов → редактирование
     секретов → обрезка. Ошибка исполнения — это **результат** с
     ``isError: true``, а не ошибка JSON-RPC: модель должна её прочитать
     и исправиться.
+
+    Каждый вызов — включая отклонённый и упавший — пишется в журнал
+    (``core/mcp/audit.py``): там же реестр забирает снимки «до»,
+    которые инструмент сделал по дороге, и связывает их с записью.
+    ``ctx`` — то, что знает о вызывающем HTTP-слой (адрес, чем
+    авторизовался); его отсутствие журналу не мешает.
 
     Бросает :class:`UnknownTool` (нет такого имени) и
     ``schema.SchemaError`` (аргументы не по схеме) — оба случая про сам
@@ -311,25 +318,39 @@ def call(name, args=None, perms=None) -> dict:
     spec = get_tool(name)
     if spec is None:
         known = ", ".join(t.name for t in available_tools(perms))
+        audit.begin(str(name))
+        audit.record(name, status=audit.STATUS_UNKNOWN, ok=False,
+                     args=args, ctx=ctx,
+                     error="инструмента нет в реестре")
         raise UnknownTool("инструмент %s не найден; доступны: %s"
                           % (name, known or "нет"))
 
+    audit.begin(spec.name)
     if not scope_allowed(spec, perms):
-        log.warning("MCP: вызов %s отклонён — нет разрешения %s"
-                    % (spec.name, spec.scope), source="mcp")
-        return tool_result(perms_mod.denial(spec.scope, perms),
-                           is_error=True)
+        denial = perms_mod.denial(spec.scope, perms)
+        audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
+                     args=args, ctx=ctx, status=audit.STATUS_DENIED,
+                     ok=False, error=denial.get("error", ""))
+        return tool_result(denial, is_error=True)
 
     args = args if isinstance(args, dict) else {}
-    args = schema_mod.validate(args, spec.schema, "arguments")
+    try:
+        args = schema_mod.validate(args, spec.schema, "arguments")
+    except schema_mod.SchemaError as e:
+        audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
+                     args=args, ctx=ctx, status=audit.STATUS_INVALID,
+                     ok=False, error=e.message)
+        raise
 
     started = time.time()
     try:
         payload = spec.handler(args)
     except Exception as e:                      # noqa: BLE001 — граница
-        log.error("MCP: инструмент %s упал: %s" % (spec.name, e),
-                  source="mcp")
         log.debug(traceback.format_exc(), source="mcp")
+        audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
+                     args=args, ctx=ctx, status=audit.STATUS_ERROR,
+                     ok=False, error="%s: %s" % (type(e).__name__, e),
+                     elapsed_ms=int((time.time() - started) * 1000))
         return tool_result({"ok": False,
                             "error": "%s: %s" % (type(e).__name__, e),
                             "tool": spec.name}, is_error=True)
@@ -338,10 +359,13 @@ def call(name, args=None, perms=None) -> dict:
         payload = {"ok": True, "result": payload}
     payload.setdefault("ok", True)
     payload.setdefault("elapsed_ms", int((time.time() - started) * 1000))
-    log.debug("MCP: %s → ok=%s за %s мс" % (spec.name, payload.get("ok"),
-                                            payload.get("elapsed_ms")),
-              source="mcp")
-    return tool_result(payload, is_error=not payload.get("ok", True))
+    ok = bool(payload.get("ok", True))
+    audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
+                 args=args, ctx=ctx,
+                 status=audit.STATUS_OK if ok else audit.STATUS_ERROR,
+                 ok=ok, error="" if ok else str(payload.get("error", "")),
+                 elapsed_ms=payload.get("elapsed_ms", 0))
+    return tool_result(payload, is_error=not ok)
 
 
 # ───────────────────────── результат инструмента ────────────────────

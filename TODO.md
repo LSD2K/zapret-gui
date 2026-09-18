@@ -56,11 +56,18 @@
       сетевые пробы — по разрешению `probes`, с бюджетом времени),
       `dpi_report` (последняя классификация DPI, проб не запускает) и
       `updates_check` (кеш по умолчанию, `refresh` — по `probes`).
+      **Сделано: S6** — первая запись: `config_set` (дифф «было/стало»,
+      список заменяется целиком, граница — в `permissions.is_writable`),
+      `config_writable_paths`, журнал вызовов и снимки «до»
+      (`core/mcp/audit.py`: `mcp-audit.jsonl` и `mcp-undo.json` рядом с
+      `settings.json`), `audit_list` и `mcp_undo_last` — откат
+      переживает перезагрузку роутера.
       Точка выключена по умолчанию: токен пуст, все 11 разрешений
-      `false`. Следующий шаг — **S6**
-      ([`docs/mcp/06-config-write.md`](docs/mcp/06-config-write.md)) или
-      **S12** ([`docs/mcp/12-shell.md`](docs/mcp/12-shell.md)); S6/S12
-      друг от друга не зависят и могут идти параллельно.
+      `false`. Следующий шаг — **S7**
+      ([`docs/mcp/07-control-strategies.md`](docs/mcp/07-control-strategies.md))
+      или **S12** ([`docs/mcp/12-shell.md`](docs/mcp/12-shell.md)); S7
+      опирается на S4+S6, S12 от них не зависит и может идти
+      параллельно.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)

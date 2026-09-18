@@ -326,7 +326,7 @@ def _m_tools_call(params, ctx):
     # ситуации, которые про сам протокол, а не про инструмент: имени нет
     # в реестре и аргументы не по схеме.
     try:
-        return registry.call(name, arguments, _permissions_from(ctx))
+        return registry.call(name, arguments, _permissions_from(ctx), ctx)
     except registry.UnknownTool as e:
         raise _JsonRpcError(INVALID_PARAMS, str(e.args[0] if e.args else e),
                             {"field": "name"})

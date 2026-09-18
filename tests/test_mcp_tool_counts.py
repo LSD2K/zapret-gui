@@ -36,11 +36,15 @@ from core.mcp import registry
 # спрашивают за конкретное действие (сетевые пробы, поход в апстрим).
 # Спрятать их целиком значило бы спрятать и пассивную часть — ровно то,
 # что чинит половину жалоб и не выпускает ни одного пакета.
+# S6: + 2 на чтение (config_writable_paths, audit_list) и первые два
+# мутирующих — config_set и mcp_undo_last под `config_write`. Запись
+# настроек и откат ходят парой: инструмент, который меняет, но не
+# умеет вернуть, нарушает инвариант §5.4 контракта.
 BY_SCOPE = {
-    "read": 23,
+    "read": 25,
     "control": 0,
     "strategies_write": 0,
-    "config_write": 0,
+    "config_write": 2,
     "probes": 0,
     "experiments": 0,
     "tunnels_write": 0,
@@ -112,6 +116,8 @@ class TestToolCounts(unittest.TestCase):
         "firewall_status", "traffic_recent",
         # S5 — туннели, диагностика, обновления
         "diagnostics_run", "dpi_report", "tunnels_status", "updates_check",
+        # S6 — что можно менять и что уже менялось
+        "audit_list", "config_writable_paths",
     ]
 
     def test_read_tools_are_named_in_the_table(self):
