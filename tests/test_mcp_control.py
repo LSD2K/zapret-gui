@@ -21,9 +21,11 @@
 nfqws2, портит машину, на которой его запустили.
 """
 
+import contextlib
+import threading
 import unittest
 
-from core import nfqws_control
+from core import nfqws_control, nfqws_session
 from core.mcp import registry
 
 
@@ -341,6 +343,61 @@ class TestStrategyApply(ControlCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["busy"], "scanner")
         self.assertEqual(self.cfg.get("strategy", "current_id"), "old-one")
+
+    def test_held_mutex_blocks_apply_and_names_the_owner(self):
+        """Настоящий мьютекс, а не опрос: `busy()` здесь слепа нарочно.
+
+        Между «спросил, свободно ли» и «применил» сканер успевает
+        стартовать. Отказ обязан прийти от самой блокировки — и назвать,
+        кто её держит.
+        """
+        self._patch_strategies()
+        with _held_session(self, owner="scanner"):
+            payload = self.data("strategy_apply", {"id": "mine"})
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["busy"], "scanner")
+        self.assertIn("подбор стратегий", payload["error"])
+        self.assertEqual(self.nfqws.calls, [])
+        self.assertEqual(self.cfg.get("strategy", "current_id"), "old-one")
+
+    def test_scan_and_apply_cannot_run_together(self):
+        """Ровно та драка, ради которой сессия и написана."""
+        self._patch_strategies()
+        session = nfqws_session.get_nfqws_session()
+        with _held_session(self, owner="scanner"):
+            self.assertEqual(session.holder()["owner"], "scanner")
+            self.assertFalse(self.data("strategy_apply",
+                                       {"id": "mine"})["ok"])
+            self.assertFalse(self.data("nfqws_start")["ok"])
+            self.assertFalse(self.data("nfqws_stop")["ok"])
+        # Сканер отпустил — управление снова работает.
+        self.assertTrue(self.data("strategy_apply", {"id": "mine"})["ok"])
+
+
+@contextlib.contextmanager
+def _held_session(case, owner="scanner"):
+    """Занять общий мьютекс на движок ИЗ ДРУГОГО ПОТОКА.
+
+    Из своего нельзя: захват повторный для того же потока — держатель
+    сессии обязан иметь право позвать `core/nfqws_control`.
+    """
+    session = nfqws_session.get_nfqws_session()
+    taken, done = threading.Event(), threading.Event()
+
+    def worker():
+        with session.acquire(owner=owner, timeout=0, reason="подбор"):
+            taken.set()
+            done.wait(5)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    case.assertTrue(taken.wait(5), "поток не успел занять сессию")
+    try:
+        yield session
+    finally:
+        done.set()
+        thread.join(5)
 
 
 class TestBusyProbe(unittest.TestCase):

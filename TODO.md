@@ -78,12 +78,25 @@
       write-инструменты (`*_config_save`, `subscription_refresh`,
       `pool_refresh`, `unified_rule_*`) — подробности в
       [`docs/mcp/HANDOFF.md`](docs/mcp/HANDOFF.md).
+      **Сделано: S8** — активные пробы и тяжёлые прогоны: `probe_targets`
+      и `probe_compare` (вердикты `bypass_helps`/`no_difference`/
+      `target_down`/`bypass_hurts`/`unknown`, `core/probe_runner.py`),
+      подбор стратегий, blockcheck и blockcheck2, healthcheck и матрица
+      связности; асинхронный контракт `job_id` → `*_status` →
+      `*_output` (`core/mcp/tools/_jobs.py`), лимиты `mcp.probes`.
+      **Сделано: S9** — общий мьютекс на движок
+      (`core/nfqws_session.py`): захват с владельцем и временем
+      (`acquire`/`holder`/`SessionBusy`), полный снимок состояния и
+      идемпотентное восстановление, межпроцессный lock рядом с
+      `settings.json` с кражей у мёртвого процесса. Мьютекс берут
+      `core/nfqws_control` (start/stop/restart/apply_strategy),
+      сканер на весь прогон и `probe_runner.compare` — подбор и
+      применение стратегии больше не портят друг друга, а отказ
+      называет держателя.
       Точка выключена по умолчанию: токен пуст, все 11 разрешений
-      `false`. Следующий шаг — **S9**
-      ([`docs/mcp/09-nfqws-session.md`](docs/mcp/09-nfqws-session.md):
-      общий мьютекс на движок вместо временного сторожа
-      `nfqws_control.busy()`), **S8**
-      ([`docs/mcp/08-probes.md`](docs/mcp/08-probes.md)) или **S12**
+      `false`. Следующий шаг — **S10**
+      ([`docs/mcp/10-experiments.md`](docs/mcp/10-experiments.md):
+      движок экспериментов — ядро фичи) или **S12**
       ([`docs/mcp/12-shell.md`](docs/mcp/12-shell.md)); S12 ни от чего
       из этого не зависит и может идти параллельно.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).

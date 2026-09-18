@@ -8,153 +8,137 @@
 
 ---
 
-## Состояние: после S8 (активные пробы, сканер, blockcheck)
+## Состояние: после S9 (общий мьютекс на движок)
 
-**Дата:** 2026-09-18 · **Ветка/PR:** `claude/zen-fermi-1188qf`
+**Дата:** 2026-09-18 · **Ветка/PR:** `claude/friendly-planck-6viq4v`
 
 ### Сделано
 
-- `core/probe_runner.py` (405) — **не в пакете MCP**: `probe_many`,
-  `probe_target`, `fold`, `compare`, `clean_targets`, `limits`,
-  `VERDICTS`. Пробы по списку целей и сравнение «с обходом и без»
-  одним кодом для MCP, CLI и UI.
-- `core/mcp/tools/_jobs.py` (190) — асинхронная задача: `job_id`,
-  `resolve`, `is_current`, `update`, `describe`, `running_id`. Записи
-  переживают конец прогона (`KEEP` на вид).
-- `core/mcp/tools/probes.py` (320) — `probe_targets`, `probe_compare`
-  (`probes`), `connectivity_matrix` (чтение + `refresh` по `probes`).
-- `core/mcp/tools/scan.py` (490) — `scan_start`, `scan_stop`
-  (`probes`), `scan_status`, `scan_results` (чтение), `scan_apply`
-  (`control` + внутренняя проверка `strategies_write`).
-- `core/mcp/tools/blockcheck.py` (520) — `blockcheck_start`,
-  `blockcheck2_start`, `blockcheck2_stop`, `healthcheck_run`
-  (`probes`); `blockcheck_status`, `blockcheck2_status`,
-  `blockcheck2_output`, `healthcheck_status` (чтение).
-- `core/nfqws_control.py` — `running()` (состояние движка без побочных
-  действий) и `_is_running()` (см. «что оказалось не так», п. 3).
-- `core/config_manager.py` — секция `mcp.probes` (`max_targets`,
-  `max_repeats`, `timeout_sec`, `budget_sec`, `parallel`,
-  `settle_sec`).
-- `core/mcp/redact.py` — у `pass` в `SECRET_KEY_RE` появилась оглядка
-  назад: `with_bypass`/`without_bypass` уезжали как `"***"`.
-- тесты: `test_mcp_probes.py` (22), `test_mcp_jobs.py` (20),
-  дополнен `test_mcp_permissions.py` (+5, класс `TestProbesBoundary`),
-  правлен `test_mcp_tool_counts.py` (`read: 32`, `probes: 8`,
-  `control: 8` + поимённые списки). По `test_mcp_*` — **565 зелёных**;
-  весь `tests/` — 3395 passed, 1 skipped; `make lint` чист.
+- `core/nfqws_session.py` (549) — **не в пакете MCP**: синглтон
+  `get_nfqws_session()`, владельцы `OWNER_SCANNER/EXPERIMENT/
+  BLOCKCHECK/PROBE/UI`, исключение `SessionBusy` (в нём `holder`),
+  `describe()`. Методы: `acquire(owner, timeout=0, reason="")`,
+  `claim(...)` → `_Hold` с идемпотентным `release()`, `holder()`,
+  `held_by_me()`, `snapshot(source)`, `restore(snapshot, source)`,
+  `apply_temporary(argv, source)`.
+- `core/nfqws_control.py` — декоратор `_guarded` на `start`/`stop`/
+  `restart`/`apply_strategy`/`clear_strategy` (владелец из `source`
+  через `_owner_for`), `_busy_fail` (`error_code="busy"` + `busy`);
+  тело `busy()` теперь опрашивает сессию (`_from_holder`,
+  `_scanner_reason`), старый опрос сохранён как `_legacy_busy()`.
+- `core/strategy_scanner.py` — `_run_scan` берёт сессию на весь прогон
+  и зовёт `_run_scan_locked` (прежнее тело, без изменений);
+  `_save_current_state` / `_restore_previous_state` делегируют
+  `snapshot()` / `restore()`. Новое поле `_session_snapshot`; три
+  прежних поля `_saved_*` остались — по ним читается «надо ли вообще
+  восстанавливать».
+- `core/probe_runner.py` — `compare()` держит сессию на «переключил →
+  измерил → вернул» целиком; занято → неизмеренная сторона с причиной.
+- `core/mcp/tools/nfqws.py` — `_engine_result` переносит `busy` и
+  подсказку в ответ инструмента, когда отказ пришёл от мьютекса.
+- тесты: `test_nfqws_session.py` (39) — захват/освобождение, отказ с
+  именем владельца и временем, `timeout=0` не ждёт, ожидание по
+  таймауту, исключение и повторный `release`, вложенность, lock-файл
+  (мёртвый pid / протухший / собственный остаток / битый / нет
+  каталога), снимок, идемпотентный `restore`, `apply_temporary`,
+  интеграция с `nfqws_control` и сканером; `test_mcp_control.py` (+2)
+  — `strategy_apply` при ЗАНЯТОМ мьютексе (а не при `busy()`).
+  По `test_mcp_*` — 567 зелёных; весь `tests/` — 3429 passed, 4
+  skipped; `make lint` чист.
 
 ### Зафиксированные контракты
 
-**`probe_compare` — то, на чём S10 строит baseline.** `with_bypass` /
-`without_bypass` / `verdict`; вердикт только из
-`probe_runner.VERDICTS` (`bypass_helps`, `no_difference`,
-`target_down`, `bypass_hurts`, `unknown`), код только из
-`PROBE_CODES`. Неизмеренная сторона — `measured: false` + `reason`, и
-тогда вердикт `unknown`: выдуманная половина хуже отсутствующей.
+**Захват.** `acquire(owner, timeout=0, reason="")` — контекст; занято →
+`SessionBusy`, у него `.holder` = `{owner, reason, since, held_sec,
+pid, text}`. `timeout=0` = «не ждать». Захват **вложенный по потоку**
+(как `RLock`): держатель вправе звать `nfqws_control`.
 
-**Переключение движка в `compare` требует `control` вдобавок к
-`probes`** и возвращает исходное состояние в `finally` (`restored`,
-`restore_error` в ответе). Без `control` инструмент не отказывает, а
-отдаёт одну сторону и называет переключатель.
+**Снимок.** `snapshot()` → `taken_at`, `nfqws_running`, `nfqws_args`,
+`nfqws_pid`, `firewall_applied`, `firewall_type`,
+`firewall_rules_count`, `strategy_id`, `strategy_name`.
 
-**Асинхронный контракт**: `*_start` → `job_id` + `async: true` сразу;
-`*_status` → живой статус либо сохранённый снимок (`live`, `done`,
-`job_note`); `*_output` → инкремент по `offset` → `next_offset`;
-второй старт при занятом движке → `isError` с активным `job_id`.
-Задача переживает конец прогона; ярлык старой задачи живым статусом
-не отвечает (`_jobs.is_current`).
+**Восстановление.** `restore(snapshot)` → `{ok, error, changed[]}`,
+идемпотентно (каждый шаг — только при расхождении со снимком).
+Аргументов в снимке нет → пересобирается активная стратегия
+(автозапуск «последних аргументов» не оставляет). `strategy_id`
+возвращается в конфиг, только если он разошёлся со снимком.
 
-**Своё пояснение — в `job_note`, а не в `note`.** `note` в этих
-ответах занят пометкой «untrusted data».
+**Отказ «занят» — одно поле на два источника.** `busy()` (вопрос ДО
+вызова) и `nfqws_control` (отказ мьютекса) кладут `busy` с именем
+владельца; у второго вдобавок `error_code="busy"`.
 
-**Лимиты проб — `mcp.probes`**, схема режет вдобавок на уровне
-протокола. Лишние цели уезжают в `rejected` с причиной, не влезшие в
-бюджет — в `skipped`. Повторы сворачиваются по СТРОГОМУ большинству
-(`fold`).
+**Lock-файл** — `<config_dir>/.nfqws-session.lock` (рядом с
+`settings.json`), JSON `{owner, reason, since, pid}`. Крадётся при
+мёртвом pid, возрасте > `STALE_SEC` (6 ч) и при собственном остатке.
+Каталога нет / ФС только на чтение → блокировка только внутри
+процесса.
 
-**Опрос — чтение, прогон — проба.** `scan_status`/`scan_results`,
-`*_status`, `blockcheck2_output`, `healthcheck_status` и снимок
-`connectivity_matrix` пакетов не выпускают и живут в read-наборе;
-`*_start`/`*_stop`/`healthcheck_run`/`refresh` — под `probes`.
+**Мьютекс берут только те, кто движок МЕНЯЕТ.** Read-only инструменты
+и `reload_lists` (SIGHUP) его не трогают.
 
 ### Следующий шаг
 
-**S9** — [`09-nfqws-session.md`](09-nfqws-session.md): общий мьютекс на
-движок. Подключаться к `nfqws_control.busy()`: заменить её тело
-опросом сессии, вызывающих (`tools/nfqws.py`, `tools/scan.py`,
-`tools/blockcheck.py` — все зовут `_busy_refusal`) не трогать. Сканер
-переводится на ту же сессию. Учесть: `probe_compare` тоже трогает
-движок (`nfqws_control.stop/start`) и обязан брать ту же сессию, иначе
-скан и сравнение подерутся.
-
 **S10** — [`10-experiments.md`](10-experiments.md): движок
-экспериментов. Baseline — `probe_runner.compare()` и
-`probe_runner.probe_many()` (не писать свои пробы), применение
-варианта — `nfqws_control.apply_strategy`, авто-откат — снимок вида
-`strategy_active`. Лимиты эксперимента уже лежат в `mcp.experiment`,
-лимиты проб — в `mcp.probes`.
+экспериментов. Держать сессию всем прогоном
+(`acquire(owner=OWNER_EXPERIMENT)`), снимок — `session.snapshot()`,
+авто-откат по TTL — `session.restore(snapshot)` (снимок вида
+`strategy_active` в аудите остаётся для `mcp_undo_last`). Baseline —
+`probe_runner.compare()`; она берёт `OWNER_PROBE`, а вложенный захват
+внутри одного потока проходит насквозь, так что звать её из-под
+захвата эксперимента можно.
 
-**S15** — [`15-ui.md`](15-ui.md): на странице MCP у `probes` теперь 8
-инструментов, у чтения 32; `any_write` — не переключатель.
+**S12** — [`12-shell.md`](12-shell.md) ни от чего из этого не зависит.
 
 ### Что оказалось не так, как написано в задании
 
-1. **`connectivity_matrix` — чтение, а не `probes`.** Задание
-   перечисляет его среди инструментов проб, но у матрицы есть
-   сохранённый снимок, и прятать его целиком значило бы повторить
-   ошибку, от которой S5 отказался на `updates_check`. Сделано так же:
-   инструмент в read-наборе, `refresh=true` — по `probes`.
-2. **`scan_apply` — `control`, и этого мало.** Он не только поднимает
-   движок, но и сохраняет найденное как USER-стратегию
-   (`scanner._apply_probe_result`). Scope один, поэтому
-   `strategies_write` спрашивается внутри обработчика; иначе `control`
-   в одиночку открыл бы запись стратегий.
-3. **`busy()` не видела наш blockcheck.** У `Blockcheck2Runner`
-   `is_running` — метод, у `BlockcheckRunner` — `@property`;
-   безусловный вызов бросал `TypeError`, который съедался общим
-   `except`. То есть стратегия применялась прямо поверх идущих проб
-   (наследство S7, найдено при подключении `blockcheck_start`).
-   Починено в `nfqws_control._is_running()`.
-4. **`with_bypass` маскировался как секрет.** `SECRET_KEY_RE` ловил
-   `pass` внутри `bypass`. Имена полей заданы контрактом задания и
-   нужны S10, поэтому переименовать было нельзя — сужен регексп
-   (`(?<![a-z])pass`). Побочно перестал маскироваться
-   `opera_proxy.proxy_bypass` (список доменов, не секрет).
-5. **`blockcheck_status` в задании не назван.** Без него асинхронный
-   контракт для нашего blockcheck неполон: `dpi_report` отдаёт
-   готовый отчёт, но не прогресс идущего прогона.
-6. **Свободный `params` для blockcheck2 не отдан модели.** Вместо
-   произвольного env — фиксированные аргументы (`ipv`, `repeats`,
-   `http`, `tls12`, `tls13`, `http3`), которые `_env_params`
-   раскладывает в `IPVS`/`REPEATS`/`ENABLE_*`. Произвольный env — это
-   `PATH` и `LD_PRELOAD` в руках модели.
+1. **`tests/test_strategy_scanner*.py` не существует.** Задание
+   опирается на них как на сторожа «поведение не изменилось»; сканер
+   покрыт лишь косвенно (`test_dpi_filter`, `test_testers`,
+   `test_mcp_jobs`). Поэтому диффа в сканере ровно два вида:
+   переименование `_run_scan` → `_run_scan_locked` (тело не тронуто) и
+   замена тел двух методов состояния на вызовы сессии; новые сторожа —
+   в `TestScannerIntegration`.
+2. **Тела `busy()` заменить целиком нельзя.** Blockcheck управляет
+   движком из своего скрипта и мьютекс не берёт; замена «целиком»
+   откатила бы находку S8 (п. 3 прошлого HANDOFF). Сессия —
+   приоритетный источник, старый опрос остался запасным путём
+   (`_legacy_busy`).
+3. **Одного `busy()` мало — мьютекс берётся и внутри
+   `nfqws_control`.** Проверка перед вызовом не защищает от гонки
+   «спросил → сканер стартовал → сделал». Поэтому `_guarded`, а
+   `busy()` осталась ради текста отказа. Это меняет поведение REST:
+   `POST /api/control/start` во время скана теперь отвечает
+   `{ok: false, error: "движок занят: …"}` вместо того, чтобы
+   испортить скан.
+4. **`apply_temporary` сканеру не понадобился.** Сканер применяет
+   каждую стратегию своим кодом (`_probe_one_strategy`), и трогать это
+   в сессии-рефакторинге нельзя. Метод написан и покрыт тестами для
+   S10.
 
 ### Грабли
 
-- **Пустой `active_strategy_args()` ≠ «запусти как есть».** Поднять
-  голый nfqws2 и назвать это «с обходом» — прямая ложь в baseline;
-  `compare` в этом случае отдаёт неизмеренную сторону с причиной.
-- **Бюджет времени режет ЗАПУСК проб, а не их длительность.** Задачи,
-  уже отправленные в пул, доработают: `budget_sec` проверяется между
-  порциями.
-- **`limits()` поднимает всё до 1, кроме `settle_sec`.** Иначе
-  `settle_sec=0` превращается в секунду — и восемь тестов сравнения
-  стоят восемь секунд.
-- **Runner помнит один прогон.** `_jobs` помнит несколько ярлыков, и
-  живой статус можно отдавать только под последним. Для
-  `blockcheck2_output` это прямой отказ: чужих строк у нас нет.
-- **`healthcheck.run_now(blocking=True)` — это до ~30 секунд.**
-  Инструмент зовёт `blocking=False` и отправляет модель за
-  результатом в `healthcheck_status`.
-- **Сканер применяет стратегию своим кодом**, не через
-  `nfqws_control`. Оборачивать его новой логикой нельзя (S8 не меняет
-  поведение сканера), поэтому снимок для отката снимается снаружи:
-  `strategy.current_id` читается до и после вызова.
-- **`_paging.unavailable()` отдаёт `ok: true`.** «Сканера на
-  устройстве нет» — это ответ, а не сбой вызова; тест на это
-  опирается.
-
----
+- **`_ensure_cleanup` сканера — второй уровень восстановления.** Он
+  безусловно гасит движок и снимает правила ДО `_restore_previous_state`.
+  Поэтому у `restore()` каждый шаг идемпотентен, а условие «движок до
+  скана не работал — не трогаем» осталось в сканере: перенести его в
+  общий примитив значило бы поменять поведение сканера в состоянии
+  «правила стоят, движка нет».
+- **CLI движок поднимает мимо `nfqws_control`** (`core/cli.py` зовёт
+  `get_nfqws_manager().start()` напрямую) — мьютекс он не берёт.
+  Межпроцессный lock-файл написан ради него и ради stdio-моста S14;
+  перевод CLI на `nfqws_control` — отдельная задача (он и правила
+  firewall сейчас не ставит).
+- **`scanner.apply_strategy(index)` тоже мимо мьютекса**: применение
+  найденного идёт своим кодом уже ПОСЛЕ прогона. Инструмент
+  `scan_apply` прикрыт проверкой `busy()`, но не захватом.
+- **Владелец и `BUSY_*` — одна строка, не две.** `OWNER_SCANNER ==
+  nfqws_control.BUSY_SCANNER`; разойдутся — `busy()` перестанет
+  узнавать сканер и потеряет и текст, и подсказку. Есть тест-сторож.
+- **`os.kill(pid, 0)` под другим пользователем даёт `PermissionError`**
+  — это «жив», а не «мёртв». Иначе непривилегированный процесс крал бы
+  лок у root.
+- **Три теста `test_opera_proxy_chain.py::TestAttachMihomo` падают и
+  ДО этой ветки** (проверено на стэше) — к S9 отношения не имеют.
 
 ## Шаблон записи (перезаписывать, не дописывать)
 
