@@ -30,6 +30,7 @@ import unittest
 
 from core.log_buffer import get_log_buffer
 from core.mcp import audit
+from core.mcp import permissions as perms_mod
 from core.mcp import registry
 
 
@@ -277,7 +278,17 @@ class TestSnapshots(unittest.TestCase):
         answer = call("mcp_undo_last", perms={})
         self.assertTrue(answer["isError"])
         self.assertEqual(answer["structuredContent"]["permission"],
-                         "config_write")
+                         perms_mod.ANY_WRITE_SCOPE)
+
+    def test_undo_comes_with_any_write_permission(self):
+        # S7: снимки бывают шести видов, и откат обязан быть доступен
+        # тому, кто эти изменения делает. Модель с `strategies_write`
+        # без `config_write` иначе могла бы сохранить стратегию и не
+        # могла бы её вернуть — §5.4 контракта.
+        for name in ("control", "strategies_write", "config_write"):
+            with self.subTest(permission=name):
+                answer = call("mcp_undo_last", perms={name: True})
+                self.assertFalse(answer["isError"])
 
     def test_undo_of_an_unknown_kind_says_so(self):
         audit.snapshot("zz_unknown", "whatever", 1, 2, tool="test")

@@ -221,94 +221,30 @@ def register(app):
 
         Собирает аргументы из стратегии, перезапускает nfqws2
         с этими аргументами, сохраняет id/name в конфиг.
+
+        Сама последовательность живёт в ``core/nfqws_control``
+        (``apply_strategy``) — тем же кодом стратегию применяет MCP,
+        иначе «применил моделью» и «применил кнопкой» разошлись бы.
         """
         response.content_type = "application/json; charset=utf-8"
 
-        from core.strategy_builder import get_strategy_manager
-        from core.config_manager import get_config_manager
-        from core.nfqws_manager import get_nfqws_manager
-        from core.firewall import get_firewall_manager
-        from core.log_buffer import log
+        from core import nfqws_control
 
-        sm = get_strategy_manager()
-        cfg = get_config_manager()
-        mgr = get_nfqws_manager()
-        fw = get_firewall_manager()
-
-        strategy = sm.get_strategy(sid)
-        if not strategy:
-            response.status = 404
-            return {"ok": False, "error": "Стратегия не найдена: %s" % sid}
-
-        # Собираем аргументы
-        args = sm.build_nfqws_args(strategy)
-
-        if not args:
-            response.status = 400
-            return {
-                "ok": False,
-                "error": "Нет включённых профилей в стратегии"
-            }
-
-        log.info(
-            "Применяем стратегию: %s (%s)" % (strategy["name"], sid),
-            source="strategies"
-        )
-
-        # Применяем FW правила
-        apply_fw = cfg.get("firewall", "apply_on_start", default=True)
-        if apply_fw:
-            fw.remove_rules()
-            fw.apply_rules()
-
-        # Перезапускаем nfqws2 с новыми аргументами
-        if mgr.is_running():
-            ok = mgr.restart(args)
-        else:
-            ok = mgr.start(args)
-
-        if not ok:
-            response.status = 500
-            return {
-                "ok": False,
-                "error": "Не удалось запустить nfqws2 со стратегией",
-                "nfqws": mgr.get_status(),
-            }
-
-        # Сохраняем активную стратегию в конфиг
-        cfg.set("strategy", "current_id", sid)
-        cfg.set("strategy", "current_name", strategy["name"])
-        cfg.save()
-
-        # Если автозапуск включён — пересобираем скрипт автозапуска,
-        # чтобы после перезагрузки системы стартовала именно эта
-        # стратегия, а не та, что была активной на момент включения
-        # автозапуска. На systemd regenerate() — no-op (стратегия
-        # подхватывается из конфига при старте GUI).
-        if cfg.get("autostart", "enabled", default=False):
-            try:
-                from core.autostart_manager import get_autostart_manager
-                am = get_autostart_manager()
-                am.regenerate()
-            except Exception as e:
-                log.warning(
-                    "Не удалось обновить автозапуск: %s" % e,
-                    source="strategies",
-                )
-
-        log.success(
-            "Стратегия применена: %s" % strategy["name"],
-            source="strategies"
-        )
+        result = nfqws_control.apply_strategy(sid)
+        if not result.get("ok"):
+            code = result.get("error_code")
+            response.status = {"not_found": 404,
+                               "no_profiles": 400}.get(code, 500)
+            out = {"ok": False, "error": result.get("error", "")}
+            if code == "start_failed":
+                out["nfqws"] = result.get("nfqws") or {}
+            return out
 
         return {
             "ok": True,
-            "strategy": {
-                "id": sid,
-                "name": strategy["name"],
-            },
-            "nfqws": mgr.get_status(),
-            "firewall": fw.get_status(),
+            "strategy": result.get("strategy") or {},
+            "nfqws": result.get("nfqws") or {},
+            "firewall": result.get("firewall") or {},
         }
 
     @app.post("/api/strategies/<sid>/favorite")

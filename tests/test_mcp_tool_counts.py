@@ -37,14 +37,22 @@ from core.mcp import registry
 # Спрятать их целиком значило бы спрятать и пассивную часть — ровно то,
 # что чинит половину жалоб и не выпускает ни одного пакета.
 # S6: + 2 на чтение (config_writable_paths, audit_list) и первые два
-# мутирующих — config_set и mcp_undo_last под `config_write`. Запись
-# настроек и откат ходят парой: инструмент, который меняет, но не
-# умеет вернуть, нарушает инвариант §5.4 контракта.
+# мутирующих — config_set и mcp_undo_last. Запись настроек и откат ходят
+# парой: инструмент, который меняет, но не умеет вернуть, нарушает
+# инвариант §5.4 контракта.
+# S7: + 7 под `control` (движок: start/stop/restart/reload_lists,
+# strategy_apply; правила перехвата: firewall_apply/firewall_remove) и
+# + 6 под `strategies_write` (strategy_save/strategy_delete,
+# hostlist_edit, ipset_edit, blob_add, lua_script_save). Тогда же
+# `mcp_undo_last` уехал из `config_write` в псевдо-scope `any_write`:
+# снимки бывают шести видов, и модель с `strategies_write` без
+# `config_write` иначе получила бы право менять стратегии без права их
+# вернуть.
 BY_SCOPE = {
     "read": 25,
-    "control": 0,
-    "strategies_write": 0,
-    "config_write": 2,
+    "control": 7,
+    "strategies_write": 6,
+    "config_write": 1,
     "probes": 0,
     "experiments": 0,
     "tunnels_write": 0,
@@ -53,6 +61,10 @@ BY_SCOPE = {
     "shell_full": 0,
     "self_edit": 0,
     "self_edit_core": 0,
+    # Псевдо-scope: открывается ЛЮБЫМ разрешением на запись, поэтому в
+    # арифметике «каждое разрешение добавляет ровно свои» он считается
+    # отдельно (см. test_every_scope_adds_exactly_its_tools).
+    perms.ANY_WRITE_SCOPE: 1,
 }
 
 ALL_ON = {name: True for name in perms.PERMISSIONS}
@@ -66,7 +78,8 @@ class TestToolCounts(unittest.TestCase):
     def test_table_covers_every_permission(self):
         # Новое разрешение без строки в таблице означает набор
         # инструментов, за которым никто не следит.
-        self.assertEqual(set(BY_SCOPE) - {"read"}, set(perms.PERMISSIONS))
+        self.assertEqual(set(BY_SCOPE) - {"read", perms.ANY_WRITE_SCOPE},
+                         set(perms.PERMISSIONS))
 
     def test_read_only_set(self):
         self.assertEqual(len(registry.available_tools({})), BY_SCOPE["read"])
@@ -81,6 +94,9 @@ class TestToolCounts(unittest.TestCase):
             for dependency in perms.REQUIRES.get(name, ()):
                 granted[dependency] = True
             expected = base + sum(BY_SCOPE[key] for key in granted)
+            if any(key in perms.WRITE_PERMISSIONS for key in granted):
+                # Откат публикуется при любом разрешении на запись.
+                expected += BY_SCOPE[perms.ANY_WRITE_SCOPE]
             with self.subTest(permission=name):
                 self.assertEqual(len(registry.available_tools(granted)),
                                  expected)
@@ -120,6 +136,17 @@ class TestToolCounts(unittest.TestCase):
         "audit_list", "config_writable_paths",
     ]
 
+    # S7 — мутирующие наборы. Список имён рядом с числом: две записи об
+    # одном и том же расходятся молча.
+    CONTROL_TOOLS = [
+        "firewall_apply", "firewall_remove", "nfqws_reload_lists",
+        "nfqws_restart", "nfqws_start", "nfqws_stop", "strategy_apply",
+    ]
+    STRATEGIES_WRITE_TOOLS = [
+        "blob_add", "hostlist_edit", "ipset_edit", "lua_script_save",
+        "strategy_delete", "strategy_save",
+    ]
+
     def test_read_tools_are_named_in_the_table(self):
         names = sorted(spec.name for spec in registry.available_tools({}))
         self.assertEqual(names, sorted(self.READ_TOOLS))
@@ -128,6 +155,28 @@ class TestToolCounts(unittest.TestCase):
         # Две записи об одном и том же расходятся молча: список имён
         # правят, число — забывают (или наоборот).
         self.assertEqual(len(self.READ_TOOLS), BY_SCOPE["read"])
+        self.assertEqual(len(self.CONTROL_TOOLS), BY_SCOPE["control"])
+        self.assertEqual(len(self.STRATEGIES_WRITE_TOOLS),
+                         BY_SCOPE["strategies_write"])
+
+    def test_write_tools_are_named_in_the_table(self):
+        for scope, expected in (("control", self.CONTROL_TOOLS),
+                                ("strategies_write",
+                                 self.STRATEGIES_WRITE_TOOLS)):
+            names = sorted(spec.name for spec in registry.all_tools()
+                           if spec.scope == scope)
+            with self.subTest(scope=scope):
+                self.assertEqual(names, sorted(expected))
+
+    def test_mutating_tools_declare_it(self):
+        # Инструмент, меняющий устройство под видом чтения, уехал бы
+        # клиенту с пометкой readOnlyHint — и модель применила бы его
+        # «чтобы посмотреть».
+        for spec in registry.all_tools():
+            if spec.scope in ("control", "strategies_write",
+                              perms.ANY_WRITE_SCOPE):
+                with self.subTest(tool=spec.name):
+                    self.assertTrue(spec.mutating)
 
 
 class TestAutoload(unittest.TestCase):

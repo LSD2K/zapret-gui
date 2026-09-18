@@ -45,6 +45,79 @@ _QUEUE_NUM_RE = re.compile(
 _QUEUE_RANGE_MAX = 64
 
 
+# Порты управления роутером: перехватывать их нельзя НИКОГДА. Пакет,
+# уведённый в NFQUEUE, которую никто не читает (движок упал, ещё не
+# поднялся или стоит на другом номере очереди), просто исчезает — и
+# вместе с ним исчезает единственный способ отменить изменение. SSH
+# (22) и веб-интерфейс GUI — ровно те два канала, по которым роутер
+# чинят. Плюс 23 (telnet Keenetic) и 233 (SSH Entware на Keenetic).
+MANAGEMENT_PORTS = (22, 23, 233)
+
+
+def management_ports(cfg=None) -> list:
+    """Порты, которые нельзя уводить в NFQUEUE: SSH и порт GUI.
+
+    Порт GUI берётся из конфига живьём: его меняют, и захардкоженные
+    8080 защитили бы не тот канал.
+    """
+    ports = set(MANAGEMENT_PORTS)
+    try:
+        if cfg is None:
+            from core.config_manager import get_config_manager
+            cfg = get_config_manager()
+        gui = (cfg.effective().get("gui") or {})
+        port = int(gui.get("port") or 0)
+        if 0 < port < 65536:
+            ports.add(port)
+    except Exception:                   # noqa: BLE001 — граница
+        # Конфиг не прочитался — SSH всё равно защищаем. Отказаться от
+        # защиты целиком здесь было бы худшим из решений.
+        pass
+    return sorted(ports)
+
+
+def strip_management_ports(spec, cfg=None):
+    """Убрать порты управления из списка портов вида ``80,443,3478:3481``.
+
+    Возвращает ``(spec, removed)``: очищенную спецификацию и список
+    убранных портов. Диапазон, задевающий порт управления, режется по
+    этому порту, а не выбрасывается целиком: ``1:65535`` превращается в
+    набор интервалов без 22, 23, 233 и порта GUI.
+
+    Пустой результат означает «перехватывать нечего» — вызывающий обязан
+    отказаться, а не подставлять значение по умолчанию.
+    """
+    blocked = set(management_ports(cfg))
+    kept, removed = [], []
+    for token in str(spec or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        bounds = token.split(":")
+        try:
+            low = int(bounds[0])
+            high = int(bounds[-1]) if len(bounds) > 1 else low
+        except (TypeError, ValueError):
+            # Не число — пропускаем как есть: имена служб из /etc/services
+            # iptables понимает, а мы их не переписываем.
+            kept.append(token)
+            continue
+        if high < low:
+            low, high = high, low
+        hits = sorted(p for p in blocked if low <= p <= high)
+        if not hits:
+            kept.append(token)
+            continue
+        removed.extend(hits)
+        cursor = low
+        for port in hits + [high + 1]:
+            if port > cursor:
+                kept.append(str(cursor) if port - 1 == cursor
+                            else "%d:%d" % (cursor, port - 1))
+            cursor = max(cursor, port + 1)
+    return ",".join(kept), sorted(set(removed))
+
+
 def _nft_port_set(spec: str) -> str:
     """
     Преобразовать iptables/multiport-список портов в nftables-синтаксис.
@@ -251,6 +324,27 @@ class FirewallManager:
             qnum = queue_num or int(cfg.get("nfqws", "queue_num", default=300))
             tcp = ports_tcp or cfg.get("nfqws", "ports_tcp", default="80,443")
             udp = ports_udp or cfg.get("nfqws", "ports_udp", default="443")
+
+            # Порты управления не уводим в NFQUEUE НИКОГДА — ни из UI, ни
+            # из MCP, ни из автозапуска. Очередь без читателя (движок не
+            # поднялся, упал или стоит на другом номере) молча съедает
+            # пакеты, и вместе с SSH/веб-интерфейсом пропадает способ
+            # отменить изменение. Только TCP: SSH и GUI живут там.
+            tcp, dropped = strip_management_ports(tcp, cfg)
+            if dropped:
+                log.warning(
+                    "Из перехвата исключены порты управления: %s "
+                    "(SSH и веб-интерфейс через NFQUEUE не уводим)"
+                    % ", ".join(str(p) for p in dropped),
+                    source="firewall")
+            if not tcp:
+                log.error(
+                    "Перехватывать нечего: в ports_tcp остались только "
+                    "порты управления (%s). Правила не применяем."
+                    % ", ".join(str(p) for p in dropped),
+                    source="firewall")
+                return False
+
             fwmark = mark or cfg.get("nfqws", "desync_mark",
                                      default="0x40000000")
             tcp_pkt = int(cfg.get("nfqws", "tcp_pkt_out", default=20))

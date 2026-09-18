@@ -73,9 +73,18 @@ from core.safe_io import atomic_write_text
 JOURNAL_NAME = "mcp-audit.jsonl"
 SNAPSHOT_NAME = "mcp-undo.json"
 
-# Виды снимков. S6 умеет только настройки; следующие сессии добавляют
-# свои константы сюда же, чтобы имена не расходились по модулям.
+# Виды снимков. S6 завёл настройки, S7 — стратегии и списки; следующие
+# сессии добавляют свои константы сюда же, чтобы имена не расходились по
+# модулям. Обработчик отката объявляет тот, кто снимок делает
+# (``register_undo``), — журналу про виды знать незачем.
 KIND_CONFIG = "config"
+KIND_STRATEGY = "strategy"
+KIND_STRATEGY_ACTIVE = "strategy_active"
+KIND_HOSTLIST = "hostlist"
+KIND_IPSET = "ipset"
+KIND_BLOB = "blob"
+KIND_LUA = "lua"
+KIND_FIREWALL = "firewall"
 
 # Ротация журнала: сколько записей хранить, если mcp.audit.keep не
 # прочитался или задан бессмысленно.
