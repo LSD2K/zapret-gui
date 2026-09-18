@@ -254,6 +254,8 @@ def compare(target: str, timeout=None, repeats=1, toggle: bool = True,
             только текущая сторона, вердикт будет ``unknown``.
     """
     from core import nfqws_control
+    from core.nfqws_session import (OWNER_PROBE, SessionBusy,
+                                    get_nfqws_session)
 
     cfg = limits()
     timeout = _bounded(timeout, cfg["timeout_sec"], 1, 30)
@@ -288,23 +290,39 @@ def compare(target: str, timeout=None, repeats=1, toggle: bool = True,
             "выберите стратегию (strategy_apply) — без неё запускать "
             "нечего, и сравнивать не с чем")
     else:
-        switch = (nfqws_control.stop(source=source) if running
-                  else nfqws_control.start(source=source))
-        if not switch.get("ok"):
+        # Переключение и обратный ход идут под ОДНИМ захватом общего
+        # мьютекса: между «выключил» и «вернул» сканер успел бы
+        # стартовать и получить движок в чужом состоянии — а вернули
+        # бы мы оба, каждый по-своему.
+        try:
+            with get_nfqws_session().acquire(
+                    owner=OWNER_PROBE, timeout=0,
+                    reason="сравнение с обходом и без (%s)" % domain):
+                switch = (nfqws_control.stop(source=source) if running
+                          else nfqws_control.start(source=source))
+                if not switch.get("ok"):
+                    sides[there] = _unmeasured(
+                        "движок не поддался: %s"
+                        % (switch.get("error") or "—"),
+                        "состояние устройства не изменилось; подробности "
+                        "— logs_tail(source=\"nfqws\")")
+                else:
+                    toggled = True
+                    try:
+                        if settle:
+                            time.sleep(settle)
+                        sides[there] = probe_target(domain, timeout,
+                                                    repeats)
+                    finally:
+                        # Восстанавливаем ВСЕГДА: оставить роутер без
+                        # обхода (или с чужим обходом) из-за упавшей
+                        # пробы нельзя.
+                        restore = _restore(running, source)
+        except SessionBusy as busy:
             sides[there] = _unmeasured(
-                "движок не поддался: %s" % (switch.get("error") or "—"),
-                "состояние устройства не изменилось; подробности — "
-                "logs_tail(source=\"nfqws\")")
-        else:
-            toggled = True
-            try:
-                if settle:
-                    time.sleep(settle)
-                sides[there] = probe_target(domain, timeout, repeats)
-            finally:
-                # Восстанавливаем ВСЕГДА: оставить роутер без обхода
-                # (или с чужим обходом) из-за упавшей пробы нельзя.
-                restore = _restore(running, source)
+                "движок занят: %s" % busy,
+                "дождитесь окончания операции и повторите — вторая "
+                "сторона измеряется только на свободном движке")
 
     verdict = _verdict(sides[WITH], sides[WITHOUT])
     out = {

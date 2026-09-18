@@ -120,6 +120,10 @@ class StrategyScanner:
         self._tmp_hostlist: Optional[str] = None
 
         # Saved state (for restoring nfqws after scan)
+        # Снимок целиком — из core/nfqws_session; три поля рядом
+        # оставлены как есть: по ним читается «а надо ли вообще
+        # восстанавливать».
+        self._session_snapshot: dict[str, Any] = {}
         self._saved_nfqws_running = False
         self._saved_nfqws_args: list[str] = []
         self._saved_firewall_applied = False
@@ -338,7 +342,28 @@ class StrategyScanner:
     # ─────────────────── Main scan loop ───────────────────
 
     def _run_scan(self) -> None:
-        """Главный цикл сканирования (выполняется в фоновом потоке)."""
+        """Главный цикл сканирования под общим мьютексом на движок.
+
+        Сканер поднимает и роняет nfqws2 сам, поэтому весь прогон идёт
+        под захватом ``core/nfqws_session``: пока он держится, ни
+        применение стратегии, ни сравнение проб в движок не полезут.
+        Занято — скан не начинается вовсе (``timeout=0``): иначе
+        ``finally`` внутри цикла «восстановил бы как было» чужое
+        состояние.
+        """
+        from core.nfqws_session import (OWNER_SCANNER, SessionBusy,
+                                        get_nfqws_session)
+
+        try:
+            with get_nfqws_session().acquire(
+                    owner=OWNER_SCANNER, timeout=0,
+                    reason="подбор стратегий для %s" % self._target):
+                self._run_scan_locked()
+        except SessionBusy as busy:
+            self._set_error("движок занят: %s" % busy)
+
+    def _run_scan_locked(self) -> None:
+        """Тело сканирования; мьютекс на движок уже наш."""
         started_at = time.time()
 
         try:
@@ -1659,23 +1684,20 @@ class StrategyScanner:
         """
         Сохранить текущее состояние nfqws2 и firewall
         для восстановления после сканирования.
+
+        Снимок снимает ``core/nfqws_session`` — тот же, которым
+        пользуется движок экспериментов: два своих механизма отката
+        независимо «вернули бы как было», и победил бы закончивший
+        вторым.
         """
-        from core.nfqws_manager import get_nfqws_manager
-        from core.firewall import get_firewall_manager
+        from core.nfqws_session import get_nfqws_session
 
-        nfqws = get_nfqws_manager()
-        fw = get_firewall_manager()
+        snapshot = get_nfqws_session().snapshot(source="scanner")
 
-        self._saved_nfqws_running = nfqws.is_running()
-        self._saved_nfqws_args = nfqws.get_last_args()
-        self._saved_firewall_applied = fw.is_applied()
-
-        if self._saved_nfqws_running:
-            log.info(
-                "Сохранено состояние: nfqws2 запущен (PID %s)"
-                % nfqws.get_pid(),
-                source="scanner",
-            )
+        self._session_snapshot = snapshot
+        self._saved_nfqws_running = snapshot["nfqws_running"]
+        self._saved_nfqws_args = snapshot["nfqws_args"]
+        self._saved_firewall_applied = snapshot["firewall_applied"]
 
     def _stop_current_nfqws(self) -> None:
         """Остановить текущий nfqws2 перед сканированием."""
@@ -1701,50 +1723,25 @@ class StrategyScanner:
         """
         Восстановить предыдущее состояние nfqws2 и firewall
         после завершения сканирования.
+
+        Возвращает состояние ``core/nfqws_session.restore()`` — там же,
+        где оно снималось. Условие «движок до скана НЕ работал — не
+        трогаем» остаётся здесь: в этом случае состояние «как было» уже
+        обеспечил ``_ensure_cleanup``.
         """
         if not self._saved_nfqws_running:
             return
 
-        from core.nfqws_manager import get_nfqws_manager
-        from core.firewall import get_firewall_manager
+        from core.nfqws_session import get_nfqws_session
 
-        log.info(
-            "Восстанавливаем предыдущее состояние nfqws2",
+        get_nfqws_session().restore(
+            getattr(self, "_session_snapshot", None) or {
+                "nfqws_running": self._saved_nfqws_running,
+                "nfqws_args": self._saved_nfqws_args,
+                "firewall_applied": self._saved_firewall_applied,
+            },
             source="scanner",
         )
-
-        try:
-            fw = get_firewall_manager()
-            nfqws = get_nfqws_manager()
-
-            if self._saved_firewall_applied:
-                fw.apply_rules()
-
-            # Аргументов может не быть вовсе: до скана nfqws2 работал не с
-            # нашего запуска, а с автозапуска (после перезагрузки роутера это
-            # обычное дело), и «последних аргументов» менеджер не помнит.
-            # Голый nfqws2 без десинка тогда бесполезен — пересобираем
-            # активную стратегию, как это делает кнопка «Старт».
-            restore_args = self._saved_nfqws_args
-            if not restore_args:
-                from core.strategy_builder import active_strategy_args
-                restore_args = active_strategy_args(source="scanner")
-
-            if restore_args:
-                nfqws.start(restore_args)
-            else:
-                nfqws.start()
-
-            log.success(
-                "Предыдущее состояние восстановлено",
-                source="scanner",
-            )
-
-        except Exception as e:
-            log.error(
-                "Ошибка восстановления состояния: %s" % e,
-                source="scanner",
-            )
 
     def _ensure_cleanup(self) -> None:
         """

@@ -19,11 +19,17 @@
 
 **Конкуренция за движок.** Сканер стратегий и blockcheck поднимают и
 роняют nfqws2 сами: применить стратегию поверх работающего скана значит
-испортить и скан, и стратегию. Общего мьютекса на движок пока нет — он
-появится в S9 (``core/nfqws_session.py``); до тех пор здесь работает
-``busy()``: одна функция-сторож, которую S9 заменит своей проверкой, не
-трогая вызывающих.
+испортить и скан, и стратегию. Общий мьютекс на движок живёт в
+``core/nfqws_session.py``; здесь он берётся на время каждой мутирующей
+функции (декоратор ``_guarded``), а ``busy()`` отвечает на вопрос «кто
+держит движок прямо сейчас» для тех, кто спрашивает ДО вызова.
+
+Захват вложенный: держатель сессии (эксперимент, сравнение проб) вправе
+звать эти функции — второй захват тем же потоком проходит насквозь.
+Занято — это обычный отказ той же формы, а не исключение.
 """
+
+import functools
 
 from core.log_buffer import log
 
@@ -33,16 +39,79 @@ BUSY_SCANNER = "scanner"
 BUSY_BLOCKCHECK = "blockcheck"
 
 
+def _owner_for(source: str) -> str:
+    """Источник вызова → владелец общего мьютекса.
+
+    Всё, что здесь не названо, — короткое управляющее действие
+    человека: кнопка в веб-интерфейсе, CLI, инструмент MCP.
+    """
+    from core.nfqws_session import (OWNER_EXPERIMENT, OWNER_PROBE,
+                                    OWNER_UI)
+    return {"probes": OWNER_PROBE,
+            "experiment": OWNER_EXPERIMENT}.get(source, OWNER_UI)
+
+
 def busy() -> dict:
     """Кто сейчас занимает движок; пустой словарь — свободен.
 
-    Единственная точка проверки конкуренции за nfqws2 на время до S9.
-    Когда появится общий мьютекс (``core/nfqws_session.py``), тело этой
-    функции заменяется его опросом — вызывающие не меняются.
+    Источник истины — общий мьютекс ``core/nfqws_session``: его берут
+    сканер, сравнение проб, эксперименты и сами функции этого модуля.
+    Своя же блокировка «занятостью» не считается: иначе держатель
+    сессии не смог бы позвать ни одну функцию отсюда.
+
+    Запасной путь — опрос держателей, которые мьютекс пока не берут:
+    blockcheck поднимает и роняет nfqws2 из собственного скрипта.
 
     Returns:
-        dict: ``who`` (``scanner``/``blockcheck``), ``reason`` и ``hint``
-        человеческим языком, либо ``{}``.
+        dict: ``who`` (``scanner``/``blockcheck``/…), ``reason`` и
+        ``hint`` человеческим языком, либо ``{}``.
+    """
+    from core.nfqws_session import get_nfqws_session
+
+    session = get_nfqws_session()
+    if session.held_by_me():
+        return {}
+    holder = session.holder()
+    if holder:
+        return _from_holder(holder)
+    return _legacy_busy()
+
+
+def _from_holder(holder: dict) -> dict:
+    """Ответ ``busy()`` по записи держателя мьютекса."""
+    who = holder.get("owner", "")
+    if who == BUSY_SCANNER:
+        return {
+            "who": who,
+            "reason": _scanner_reason(holder),
+            "hint": "дождитесь окончания или остановите подбор "
+                    "(POST /api/scan/stop)",
+        }
+    return {
+        "who": who,
+        "reason": holder.get("text", "движок держит другая операция"),
+        "hint": "дождитесь окончания и повторите",
+    }
+
+
+def _scanner_reason(holder: dict) -> str:
+    """Текст про сканер — с прогрессом, если он читается."""
+    try:
+        from core.strategy_scanner import get_strategy_scanner
+        status = get_strategy_scanner().get_status()
+        return ("идёт подбор стратегий (%s из %s): сканер сам поднимает "
+                "и роняет nfqws2"
+                % (status.get("progress", 0), status.get("total", 0)))
+    except Exception:                           # noqa: BLE001 — граница
+        return holder.get("text", "идёт подбор стратегий")
+
+
+def _legacy_busy() -> dict:
+    """Держатели, которые общий мьютекс пока не берут.
+
+    Мьютекс появился в S9 и его берут не все: blockcheck управляет
+    движком из своего скрипта. Убрать этот опрос — значит вернуть
+    применение стратегии прямо поверх идущих проб.
     """
     try:
         from core.strategy_scanner import STATUS_RUNNING, get_strategy_scanner
@@ -114,6 +183,44 @@ def active_strategy_args():
     return rebuild(source="control")
 
 
+def _guarded(fn):
+    """Взять общий мьютекс на движок на время вызова.
+
+    Проверка ``busy()`` перед вызовом — вежливость (у неё текст лучше),
+    а не защита: между «спросил» и «сделал» сканер успевает стартовать.
+    Защита — вот она: сама последовательность идёт под мьютексом.
+
+    Занято — не исключение, а отказ обычной формы (``ok``/``error``/
+    ``nfqws``/``firewall``) плюс ``busy`` и ``error_code="busy"``:
+    вызывающему нужен разбираемый ответ, а не трассировка. Таймаут
+    захвата нулевой — никто не ждёт освобождения молча.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from core.nfqws_session import SessionBusy, get_nfqws_session
+
+        source = kwargs.get("source") or "control"
+        try:
+            with get_nfqws_session().acquire(
+                    owner=_owner_for(source), timeout=0,
+                    reason="%s (%s)" % (fn.__name__, source)):
+                return fn(*args, **kwargs)
+        except SessionBusy as busy_error:
+            return _busy_fail(busy_error)
+    return wrapper
+
+
+def _busy_fail(busy_error) -> dict:
+    """Отказ «движок занят» в той же форме, что и остальные ответы."""
+    mgr, fw, _cfg = _managers()
+    out = _fail("движок занят: %s" % busy_error, mgr, fw)
+    out["error_code"] = "busy"
+    out["busy"] = busy_error.holder.get("owner", "")
+    out["hint"] = "дождитесь окончания операции и повторите"
+    return out
+
+
+@_guarded
 def start(strategy_args=None, source: str = "control") -> dict:
     """Применить правила firewall и поднять nfqws2.
 
@@ -148,6 +255,7 @@ def start(strategy_args=None, source: str = "control") -> dict:
     return _done(mgr, fw, strategy_args=args or [])
 
 
+@_guarded
 def stop(source: str = "control") -> dict:
     """Остановить nfqws2 и снять правила firewall."""
     mgr, fw, _ = _managers()
@@ -162,6 +270,7 @@ def stop(source: str = "control") -> dict:
     return _done(mgr, fw)
 
 
+@_guarded
 def restart(strategy_args=None, source: str = "control") -> dict:
     """Перезапустить nfqws2 и переприменить правила firewall."""
     mgr, fw, cfg = _managers()
@@ -181,6 +290,7 @@ def restart(strategy_args=None, source: str = "control") -> dict:
     return _done(mgr, fw, strategy_args=args or [])
 
 
+@_guarded
 def apply_strategy(strategy_id: str, source: str = "strategies") -> dict:
     """Собрать стратегию, переприменить firewall и поднять с ней движок.
 
@@ -245,6 +355,7 @@ def apply_strategy(strategy_id: str, source: str = "strategies") -> dict:
                  strategy_args=args)
 
 
+@_guarded
 def clear_strategy(source: str = "control") -> dict:
     """Забыть применённую стратегию и остановить движок.
 

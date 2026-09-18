@@ -290,6 +290,8 @@ make upstream-offline    # только локальные сверки (идё�
 |--------|-----------|
 | `nfqws_manager.py` | Менеджер процесса nfqws2: compose_command, start/stop/restart, PID-мониторинг. Подхватывает и чужой процесс — поднятый автозапуском (его PID-файл `/var/run/zapret-nfqws.pid`, затем скан `/proc` по демонам); такой помечен `external` в статусе. |
 | `nfqws_reload.py` | Горячая перезагрузка списков в живом nfqws2 (SIGHUP): движок читает `--hostlist`/`--ipset` один раз при старте, поэтому правка файла без сигнала ничего не меняет. |
+| `nfqws_control.py` | Последовательность «firewall → движок → конфиг → автозапуск» одним кодом для UI, CLI и MCP: `start`/`stop`/`restart`/`apply_strategy`/`clear_strategy`/`reload_lists`, `busy()` — кто держит движок. |
+| `nfqws_session.py` | Общий мьютекс на nfqws2/firewall + снимок состояния и возврат «как было». Берут все, кто движок МЕНЯЕТ (сканер на весь прогон, `nfqws_control`, сравнение проб); читающие — нет. Межпроцессная часть — lock-файл рядом с `settings.json`. |
 | `zapret_installer.py` | Установка/обновление бинаря nfqws2 (bol-van/zapret2). |
 | `strategy_builder.py` | Менеджер стратегий (единый источник: builtin JSON + пользовательские). |
 | `strategy_generator.py` | Генерация стратегий «на лету» (параметрические сетки приёмов desync). |
