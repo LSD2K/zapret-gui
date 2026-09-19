@@ -169,6 +169,20 @@ def _apply_saved_strategy_on_boot():
                 log.debug("Проверка дедмен-свитчей shell: %s" % e,
                           source="autostart")
 
+            # И с правками кода (MCP, S13): применённая правка ждёт
+            # code_commit, а сторож ждёт вместе с ней. Выключение
+            # питания посреди применения убивает обоих, и правка
+            # осталась бы на диске неподтверждённой навсегда. Манифест
+            # пережил это: просроченные возвращаем, живым перезаряжаем
+            # сторожа (тот же приём, что у дедменов shell выше).
+            try:
+                from core.code_editor import recover_after_restart as \
+                    recover_code
+                recover_code(source="autostart")
+            except Exception as e:
+                log.debug("Проверка незавершённых правок кода: %s" % e,
+                          source="autostart")
+
             # nfqws2 переживает рестарт GUI (свой сеанс, setsid), а вот
             # правила firewall из системы могут за это время пропасть —
             # тогда обход «запущен», но трафика не видит. Проверяем ДО всех

@@ -99,6 +99,9 @@ def updates_check(args: dict) -> dict:
     })
 
     result["daemon"] = _daemon(update_checker)
+    # S13: обновление GUI затирает локальные правки кода. Сказать об
+    # этом надо ДО обновления — после говорить уже не о чем.
+    result["local_code_changes"] = _local_code_changes()
 
     if not checked_at:
         result["reason"] = ("апстрим ни разу не опрашивался: сравнивать "
@@ -121,6 +124,15 @@ def _load(update_checker, do_refresh) -> tuple:
             error = "%s: %s" % (type(e).__name__, e)
             return update_checker.get_cached_results(), error
     return update_checker.get_cached_results(), ""
+
+
+def _local_code_changes() -> dict:
+    """Правки кода, которые переживут всё, кроме обновления GUI."""
+    try:
+        from core.code_editor import local_changes_warning
+        return local_changes_warning()
+    except Exception:                           # noqa: BLE001 — граница
+        return {"count": 0, "files": []}
 
 
 def _daemon(update_checker) -> dict:

@@ -81,6 +81,14 @@ from core.mcp import registry
 # команды, status против start/stop) — как `scan_apply` спрашивает
 # `strategies_write`. Сам `shell_full` включает `shell_readonly`
 # (`permissions.IMPLIES`): кому отдали root, тому `df -h` уже отдали.
+# S13: + 13 под `self_edit` — самоправка кода GUI целиком (чтение:
+# code_tree/code_read/code_search/code_history/code_diff/
+# code_export_patch/code_check/code_test; правка: code_patch/
+# code_write/code_apply/code_commit/code_rollback). `self_edit_core`
+# своих инструментов НЕ добавляет: он не открывает новые действия, а
+# расширяет те же тринадцать на защищённое ядро — и спрашивается по
+# месту, как `shell_full` у `shell_exec`. Ноль в таблице напротив него
+# — это его смысл, а не забытая строка.
 BY_SCOPE = {
     "read": 32,
     "control": 8,
@@ -92,7 +100,7 @@ BY_SCOPE = {
     "dangerous": 1,
     "shell_readonly": 11,
     "shell_full": 3,
-    "self_edit": 0,
+    "self_edit": 13,
     "self_edit_core": 0,
     # Псевдо-scope: открывается ЛЮБЫМ разрешением на запись, поэтому в
     # арифметике «каждое разрешение добавляет ровно свои» он считается
@@ -211,6 +219,15 @@ class TestToolCounts(unittest.TestCase):
     SHELL_FULL_TOOLS = ["file_write", "package_install", "package_remove"]
     DANGEROUS_TOOLS = ["system_reboot"]
 
+    # S13 — самоправка кода GUI. Все тринадцать под `self_edit`;
+    # защищённое ядро (`self_edit_core`) спрашивается по месту.
+    SELF_EDIT_TOOLS = [
+        "code_apply", "code_check", "code_commit", "code_diff",
+        "code_export_patch", "code_history", "code_patch", "code_read",
+        "code_rollback", "code_search", "code_test", "code_tree",
+        "code_write",
+    ]
+
     # S8 — всё, что выпускает трафик с роутера.
     PROBES_TOOLS = [
         "blockcheck2_start", "blockcheck2_stop", "blockcheck_start",
@@ -236,6 +253,7 @@ class TestToolCounts(unittest.TestCase):
                          BY_SCOPE["shell_readonly"])
         self.assertEqual(len(self.SHELL_FULL_TOOLS), BY_SCOPE["shell_full"])
         self.assertEqual(len(self.DANGEROUS_TOOLS), BY_SCOPE["dangerous"])
+        self.assertEqual(len(self.SELF_EDIT_TOOLS), BY_SCOPE["self_edit"])
 
     def test_write_tools_are_named_in_the_table(self):
         for scope, expected in (("control", self.CONTROL_TOOLS),
@@ -247,7 +265,8 @@ class TestToolCounts(unittest.TestCase):
                                 ("shell_readonly",
                                  self.SHELL_READONLY_TOOLS),
                                 ("shell_full", self.SHELL_FULL_TOOLS),
-                                ("dangerous", self.DANGEROUS_TOOLS)):
+                                ("dangerous", self.DANGEROUS_TOOLS),
+                                ("self_edit", self.SELF_EDIT_TOOLS)):
             names = sorted(spec.name for spec in registry.all_tools()
                            if spec.scope == scope)
             with self.subTest(scope=scope):
@@ -267,6 +286,13 @@ class TestToolCounts(unittest.TestCase):
     MUTATING_UNDER_READONLY_SHELL = {"shell_exec", "shell_exec_async",
                                      "shell_job_stop", "shell_confirm",
                                      "service_control"}
+
+    # S13: под `self_edit` мутирующих пять, остальные восемь читают.
+    # `code_patch`/`code_write` объявлены мутирующими, хотя пишут
+    # только в staging: состояние сервера они меняют, и приезжать
+    # клиенту с пометкой readOnlyHint им нельзя.
+    SELF_EDIT_MUTATING = {"code_patch", "code_write", "code_apply",
+                          "code_commit", "code_rollback"}
 
     def test_mutating_tools_declare_it(self):
         # Инструмент, меняющий устройство под видом чтения, уехал бы
@@ -290,6 +316,16 @@ class TestToolCounts(unittest.TestCase):
             with self.subTest(tool=name):
                 self.assertIn(name, by_name)
                 self.assertTrue(by_name[name].mutating)
+
+    def test_self_edit_tools_declare_mutating_correctly(self):
+        # Инструмент самоправки, помеченный readOnlyHint по ошибке,
+        # модель вызовет «чтобы посмотреть» — и перезапишет файл.
+        for name in self.SELF_EDIT_TOOLS:
+            spec = registry.get_tool(name)
+            with self.subTest(tool=name):
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec.mutating,
+                                 name in self.SELF_EDIT_MUTATING)
 
     def test_shell_read_tools_are_not_mutating(self):
         for name in ("file_read", "file_list", "package_list",
