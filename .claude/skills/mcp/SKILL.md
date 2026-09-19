@@ -43,6 +43,14 @@ description: >-
   окну варианта, правила-подсказки `HINT_RULES` данными, дедмен-свитч
   `ttl_sec` и снимок `.mcp-experiment.json` на диске,
   `strategy_experiment_*` под разрешением `experiments`),
+  сборке и проверке стратегий (`strategy_compose` — декларативные
+  профили `filter`/`payload`/`desync` → argv тем же `build_nfqws_args`,
+  что и UI; `strategy_validate` — `nfqws2 --intercept=0` по
+  `strategy_id`/`args`/`profiles`; линтер `core/strategy_lint.py` —
+  чистые функции, коды `unknown_lua_function`/`blob_unknown`/
+  `blob_file_missing`/`blob_declared_after_new`/`lua_init_order`/
+  `bare_trick_no_filter`/`l7_filter_without_ports`/`no_desync_action`,
+  ошибка линтера делает ответ `isError`),
   транспорте и авторизации (Bearer-токен, Origin, bind, рейт-лимит,
   `/api/mcp/info`), мини-валидаторе JSON Schema (`core/mcp/schema.py`),
   диспетчере JSON-RPC (`core/mcp/server.py`, ревизия спеки 2025-06-18,
@@ -234,6 +242,8 @@ UI), и `tools_by_scope`.
 | `strategy_experiment_rollback` | experiments | **да** | `tools/experiments.py` | вернуть состояние к снимку немедленно |
 | `strategy_experiment_stop` | experiments | **да** | `tools/experiments.py` | остановить прогон; измеренное остаётся в отчёте |
 | `strategy_experiment_history` | experiments | нет | `tools/experiments.py` | прошлые прогоны этого процесса GUI, новые первыми |
+| `strategy_compose` | strategies_write | нет | `tools/compose.py` | описание (фильтр/payload/инстансы) → argv + команда + линтер; ничего не сохраняет |
+| `strategy_validate` | strategies_write | нет | `tools/compose.py` | `nfqws2 --intercept=0` по `strategy_id`/`args`/`profiles`: опции, файлы и **исполнение lua-init** |
 
 Эталон формы — первые четыре: одинаковые имена полей, одинаковая
 обработка «нет данных», одинаковые лимиты. Новый инструмент делается по ним.
@@ -967,6 +977,123 @@ TTL отсчитывается от старта прогона и покрыв�
 приём, что у `scan_apply`: иначе `experiments` открыл бы запись
 стратегий в обход. `make_active` без `save_as` — отказ: активной
 делается сохранённая стратегия, а не временный argv.
+
+## Сборка и проверка стратегий (S11)
+
+Два инструмента в `tools/compose.py` и один чистый модуль
+`core/strategy_lint.py`. Замыкают цикл §8.4 плана: **собрал →
+проверил → сохранил → применил → измерил → откатил**.
+
+### Почему проверок две, а не одна
+
+| Что ловит | `nfqws2 --intercept=0` | линтер |
+|---|---|---|
+| разбор опций CLI | да | нет |
+| отсутствующие файлы (`--blob`/`--hostlist`/`--lua-init`) | да | частично |
+| ошибку ВНУТРИ lua (синтаксис, порядок `--lua-init`) | **да** | нет |
+| вызов несуществующей `--lua-desync` | **нет** | **да** |
+| незаявленный blob | **нет** | **да** |
+| приём без фильтра профиля | нет | да |
+
+Правая колонка — это ровно «тихий 0%»: вызов функции происходит
+по-пакетно, а незаявленный blob с zapret2 1.0.4 сносится в C-коде ещё
+до входа в Lua. Движок стартует, код выхода 0, обхода нет и в логе ни
+строки. Поэтому в ответе обоих инструментов **всегда оба поля**:
+`lint` и (у `strategy_validate`) `validation`.
+
+### `strategy_compose` — описание вместо строки
+
+Вход — декларативные профили; формат один и тот же у обоих
+инструментов (два разных формата под именем `profiles` модель путала бы
+гарантированно):
+
+```json
+{"profiles": [{"filter": {"proto": "tcp", "ports": "443", "l7": "tls",
+                           "hostlist": "youtube"},
+                "payload": "tls_client_hello", "out_range": "-d10",
+                "desync": [{"fn": "fake",
+                             "params": {"blob": "tls_google",
+                                        "tcp_md5": true, "repeats": 11}}],
+                "blobs": ["tls_google"]}]}
+```
+
+- порядок сборки — по §15 скила nfqws2: **фильтр профиля →
+  внутрипрофильные фильтры (`out_range`/`in_range`/`payload`) →
+  инстансы**. Он значим: `--payload` действует на СЛЕДУЮЩИЕ
+  `--lua-desync` (§3.4);
+- `params`: `true` — ключ без значения (`:tcp_md5`), `false` — не
+  ставить вовсе, число — как есть. Двоеточие в значении экранируется,
+  значение с пробелом заворачивается в одинарные кавычки (идиом
+  inline-Lua `code='desync.x = 1'`);
+- `filter.hostlist`/`ipset` — **имя списка, а не путь**: превращается в
+  `lists/<имя>.txt`, который резолвится в путь устройства
+  `CatalogManager.resolve_paths_in_args`. `../../etc/passwd` — отказ, а
+  не санитизация;
+- `blobs` — только для имён, которых движок по ссылке не найдёт
+  (`pattern=`, `seqovl_pattern=`, `%NAME`). Ссылки `blob=NAME`
+  дозаявляет сам `build_nfqws_args`. Декларации кладутся в НАЧАЛО
+  первого профиля: они глобальны и читаются до первого `--new`;
+- ответ содержит `profiles` в том виде, в каком их принимает
+  `strategy_save` — перекладывать руками нечего.
+
+**Сборка не дублируется ни строкой.** Декларативное описание
+превращается в строку аргументов
+(`strategy_builder.compose_profile_args`), а дальше идёт через тот же
+`build_nfqws_args`, что и стратегия из веб-интерфейса: автообёртка
+голого приёма, дозаявка блобов, резолв путей. Сторож —
+`test_argv_matches_a_handwritten_strategy`.
+
+### Ошибка линтера делает ответ `isError`
+
+Пункт приёмки S11: стратегия с несуществующей lua-функцией **не
+доходит** до эксперимента. Движок экспериментов проверяет варианты
+через `dry_run`, а тот такую функцию пропускает — значит, отбить её
+может только здесь. Поэтому при `lint.blocking` **или** провале
+`dry_run` ответ — `ok: false`, но `strategy_args`, `command` и
+`profiles` **остаются в нём**: модель должна видеть, что чинить.
+Предупреждение (`severity: warning`) ответ не роняет никогда, и поле
+`valid` называет вердикт одним булевым.
+
+### Линтер — `core/strategy_lint.py`, а не внутри MCP
+
+Чистые функции без I/O: окружение (`known_functions`, `known_blobs`)
+приходит **аргументами**. Поэтому им пользуется и страница стратегий, и
+обычный юнит-тест, которому не нужен ни роутер, ни поднятый сервер.
+Окружение собирает вызывающий (`tools/compose._known_functions` /
+`_known_blobs`); `None` означает «правило не проверяем» — объявить
+неизвестной каждую функцию хуже, чем не проверить ни одной
+(`lint.checked` в ответе говорит, что удалось сверить).
+
+| `code` | Уровень | О чём |
+|---|---|---|
+| `bare_trick_no_filter` | warning | `--lua-desync` без `--filter-tcp/udp/l7`: уедет на весь трафик очереди |
+| `unknown_lua_function` | **error** | имени нет в карте этого устройства |
+| `blob_unknown` | **error** | `blob=NAME` не объявлен и не известен реестру |
+| `blob_file_missing` | **error** | объявлен, но файла нет — ПУСТОЙ fake |
+| `blob_declared_after_new` | **error** | `--blob=` после `--new` (декларации глобальны, §2 инв. 6) |
+| `lua_init_order` | **error** | `zapret-lib.lua` грузится не первым (§2 инв. 1) |
+| `l7_filter_without_ports` | warning | `--filter-l7=tls/http/quic` без портов |
+| `no_desync_action` | warning | в argv нет ни одного `--lua-desync` |
+
+**Линтуется собранный argv**, а не строка из редактора: иначе линтер
+ругался бы на то, что сборщик чинит сам (`autowrap_bare_trick`).
+
+**Сторож против шума — `test_builtin_strategies_have_no_lint_errors`:**
+линтер прогоняется по ВСЕМ 730+ встроенным стратегиям, и ошибок там
+быть не должно ни одной. Он же поймал два ложных правила на этапе
+написания: `blob=0x0000…` — это инлайновый hex, а не имя (53 ложные
+ошибки), а `tls_rnd`/`tls_youtube` объявляет `init_vars.lua`, а не
+реестр блобов (`nfqws_manager.lua_named_patterns()`).
+
+### Правила-подсказки: S11 дополнил список
+
+Три новых `log`-правила из чеклиста §16 скила nfqws2:
+`lua_compat_mismatch` (compat 5≠6 после обновления движка),
+`reasm_queue_overflow` (`rawpacket_queue failed !` — §8.10),
+`lua_bad_argument` (`bad argument #2 to 'tls_mod'` — порядок
+`--lua-init`, §12.1). Список **один на проект** —
+`strategy_experiment.HINT_RULES`; `strategy_validate` зовёт тот же
+`hints_for()`.
 
 ## Секреты
 

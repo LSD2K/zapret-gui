@@ -65,10 +65,16 @@ from core.mcp import registry
 # статус, и отчёт — результат изменений, которые внесла сама модель, и
 # открывать их без права эти изменения делать незачем. Само разрешение
 # не действует без `control` и `probes` (см. test_mcp_permissions).
+# S11: + 2 под `strategies_write` — strategy_compose и strategy_validate.
+# Оба НЕ мутирующие: собрать стратегию и прогнать её через
+# `nfqws2 --intercept=0` — это чтение, ничего на устройстве не меняется.
+# Разрешение здесь не про «мы что-то пишем», а про то, что собранное
+# предназначено для записи: модель, которой не дали править стратегии,
+# собирать их вслепую тоже незачем.
 BY_SCOPE = {
     "read": 32,
     "control": 8,
-    "strategies_write": 6,
+    "strategies_write": 8,
     "config_write": 1,
     "probes": 8,
     "experiments": 7,
@@ -167,6 +173,9 @@ class TestToolCounts(unittest.TestCase):
     STRATEGIES_WRITE_TOOLS = [
         "blob_add", "hostlist_edit", "ipset_edit", "lua_script_save",
         "strategy_delete", "strategy_save",
+        # S11 — сборка и проверка; записи не делают, но открываются тем
+        # же разрешением.
+        "strategy_compose", "strategy_validate",
     ]
     # S10 — движок экспериментов: и мутирующие, и опрос под одним
     # разрешением.
@@ -210,15 +219,33 @@ class TestToolCounts(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assertEqual(names, sorted(expected))
 
+    # Инструменты под разрешением на запись, которые НИЧЕГО не меняют
+    # (S11). Разрешение у них не про «мы пишем», а про то, что собранное
+    # предназначено для записи: модель, которой не дали править
+    # стратегии, собирать их вслепую тоже незачем. Список поимённый —
+    # чтобы следующий мутирующий инструмент не проехал сюда молча.
+    READ_ONLY_UNDER_WRITE = {"strategy_compose", "strategy_validate"}
+
     def test_mutating_tools_declare_it(self):
         # Инструмент, меняющий устройство под видом чтения, уехал бы
         # клиенту с пометкой readOnlyHint — и модель применила бы его
         # «чтобы посмотреть».
         for spec in registry.all_tools():
+            if spec.name in self.READ_ONLY_UNDER_WRITE:
+                continue
             if spec.scope in ("control", "strategies_write",
                               perms.ANY_WRITE_SCOPE):
                 with self.subTest(tool=spec.name):
                     self.assertTrue(spec.mutating)
+
+    def test_the_read_only_exceptions_really_are_read_only(self):
+        # Обратная сторона списка исключений: запись, попавшая в него по
+        # ошибке, иначе осталась бы без единой проверки.
+        by_name = {spec.name: spec for spec in registry.all_tools()}
+        for name in self.READ_ONLY_UNDER_WRITE:
+            with self.subTest(tool=name):
+                self.assertIn(name, by_name)
+                self.assertFalse(by_name[name].mutating)
 
 
 class TestAutoload(unittest.TestCase):

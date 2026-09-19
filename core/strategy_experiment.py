@@ -164,6 +164,43 @@ HINT_RULES = (
                  "queue_numbers и расхождения"),
         "ref": "скил nfqws2-strategies, раздел про NFQUEUE",
     },
+    # ── дополнено S11 по чеклисту §16 скила nfqws2-strategies ──
+    {
+        "id": "lua_compat_mismatch",
+        "when": "log",
+        # «Incompatible NFQWS2_COMPAT_VER»: zapret2 1.0 сменил compat 5→6,
+        # и lua из другого релиза падает ровно этой строкой.
+        "patterns": ("incompatible", "nfqws2_compat_ver"),
+        "hint": ("lua-скрипты и бинарник nfqws2 из разных релизов: "
+                 "переустановите движок или верните bundled-lua — "
+                 "updates_check() покажет, что именно стоит"),
+        "ref": "скил nfqws2-strategies §0.2 и §16 п.17",
+    },
+    {
+        "id": "reasm_queue_overflow",
+        "when": "log",
+        # «rawpacket_queue failed !» — переполнена 64-пакетная очередь
+        # реасма: стратегия на tls_client_hello перестаёт применяться.
+        "patterns": ("rawpacket_queue", "failed"),
+        "hint": ("переполнена очередь реасма: движок отменил сборку "
+                 "многопакетного ClientHello и сбросил тип пейлоада в "
+                 "unknown — стратегия на tls_client_hello/quic_initial на "
+                 "этом соединении просто не применилась"),
+        "ref": "скил nfqws2-strategies §8.10 и §16 п.18",
+    },
+    {
+        "id": "lua_bad_argument",
+        "when": "log",
+        # «bad argument #2 to 'tls_mod' (string expected, got nil)» —
+        # классика неверного порядка --lua-init: инлайн зовёт функцию,
+        # которую ещё не загрузили.
+        "patterns": ("bad argument",),
+        "hint": ("lua-функции передан не тот аргумент: чаще всего это "
+                 "порядок --lua-init (инлайновый вызов идёт раньше "
+                 "скрипта, который его определяет) или опечатка в "
+                 "значении параметра — сверьтесь с strategy_validate()"),
+        "ref": "скил nfqws2-strategies §12.1 (валидация --intercept=0)",
+    },
     {
         "id": "zero_everywhere",
         "when": "metric",
