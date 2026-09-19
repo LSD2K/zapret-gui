@@ -12,6 +12,8 @@ SSH-терминале. У нас GUI-first, но иногда нужно быс
     zapret-gui strategy apply <id>
     zapret-gui singbox list
     zapret-gui singbox {up|down|restart} <name>
+    zapret-gui mcp {status|tools|call|token|audit|code}
+    zapret-gui mcp --stdio            (MCP-клиент через ssh)
 
 Тонкий слой: только парсинг + вызов синглтон-менеджеров + печать.
 Никакого Bottle — инициализируем только ядро (init_config) и работаем
@@ -27,7 +29,8 @@ import sys
 
 # Подкоманды верхнего уровня, по которым app.py решает «это CLI, не web».
 COMMANDS = ("status", "nfqws", "strategy", "singbox", "mihomo",
-            "usque", "tgproxy", "opera", "monitor", "updates", "dns-routing")
+            "usque", "tgproxy", "opera", "monitor", "updates", "dns-routing",
+            "mcp")
 
 
 def _p(msg=""):
@@ -402,6 +405,316 @@ def _cmd_dns_routing(args) -> int:
     return 2
 
 
+# ─────────────────────── mcp (MCP-сервер) ────────────────────────────
+#
+# Отладка MCP по SSH: посмотреть, включён ли, что разрешено, какие
+# инструменты видит модель, позвать инструмент руками — и, главное,
+# поднять stdio-мост, чтобы клиент на ноутбуке ходил в роутер через
+# `ssh router zapret-gui mcp --stdio`.
+
+def _cmd_mcp(args) -> int:
+    action = "stdio" if getattr(args, "stdio", False) else (args.action
+                                                            or "status")
+    rest = list(getattr(args, "rest", None) or [])
+    handler = {
+        "status": _mcp_status,
+        "token": _mcp_token,
+        "tools": _mcp_tools,
+        "call": _mcp_call,
+        "stdio": _mcp_stdio,
+        "audit": _mcp_audit,
+        "code": _mcp_code,
+    }.get(action)
+    if handler is None:
+        _p("Неизвестное действие: %s" % action)
+        return 2
+    return handler(args, rest)
+
+
+def _mcp_status(args, rest) -> int:
+    from core.mcp import auth, permissions, registry, session
+
+    cfg = auth.settings()
+    perms = auth.permissions()
+    effective = permissions.effective(perms)
+
+    _p("=== MCP-сервер ===")
+    _p("состояние:   %s" % ("включён" if cfg.get("enabled")
+                            else "выключен (mcp.enabled=false)"))
+    if cfg.get("enabled") and not auth.is_enabled():
+        _p("             ВНИМАНИЕ: токен не задан и allow_gui_auth "
+           "выключен — пускать некого")
+    _p("токен:       %s" % ("задан" if cfg.get("token")
+                            else "не задан (zapret-gui mcp token rotate)"))
+    _p("адрес:       %s" % _mcp_endpoint())
+    _p("bind:        %s%s" % (cfg.get("bind", "inherit"),
+                              "  (только с самого роутера)"
+                              if cfg.get("bind") == "local" else ""))
+    transports = cfg.get("transports") or {}
+    _p("транспорты:  http=%s  sse=%s%s"
+       % ("вкл" if transports.get("http", True) else "выкл",
+          "вкл" if transports.get("sse") else "выкл",
+          ", открыто потоков: %d" % session.count()
+          if transports.get("sse") else ""))
+    _p("GUI-авторизация вместо токена: %s"
+       % ("да" if cfg.get("allow_gui_auth") else "нет"))
+
+    registry.load_tools()
+    _p("")
+    _p("инструментов: %d из %d доступны сейчас"
+       % (len(registry.available_tools(perms)), len(registry.all_tools())))
+    counts = registry.scope_counts(perms)
+    for scope in sorted(counts):
+        _p("  %-18s %d" % (scope, counts[scope]))
+
+    _p("")
+    _p("разрешения:")
+    for name in permissions.PERMISSIONS:
+        on = bool(perms.get(name))
+        live = bool(effective.get(name))
+        mark = "✓" if live else ("!" if on else "·")
+        note = ""
+        if on and not live:
+            note = "  (не действует: нужно ещё %s)" % ", ".join(
+                permissions.REQUIRES.get(name, ()))
+        _p("  %s %-18s %s%s" % (mark, name, "вкл" if on else "выкл", note))
+    if not any(perms.values()):
+        _p("  — только чтение: ни одно разрешение на запись не включено")
+    return 0
+
+
+def _mcp_token(args, rest) -> int:
+    from core.config_manager import get_config_manager
+    from core.mcp import auth
+
+    action = (rest[0] if rest else "show").lower()
+    cfg = get_config_manager()
+
+    if action == "show":
+        token = auth.settings().get("token") or ""
+        if not token:
+            _p("Токен не задан. Создать: zapret-gui mcp token rotate")
+            return 1
+        # Печать токена в терминал — осознанное решение: иначе его не
+        # скопировать по SSH. Цена — история shell и буфер терминала.
+        _p("ВНИМАНИЕ: токен даёт клиенту всё, что открыто разрешениями "
+           "MCP, и остаётся в истории shell и в буфере терминала.")
+        _p("")
+        _p(token)
+        return 0
+
+    if action == "rotate":
+        token = auth.generate_token()
+        cfg.set("mcp", "token", token)
+        cfg.save()
+        _p("ВНИМАНИЕ: старый токен больше не действует — подключённые "
+           "клиенты оборвутся и их придётся перенастроить.")
+        _p("")
+        _p(token)
+        return 0
+
+    _p("Неизвестное действие: %s (show|rotate)" % action)
+    return 2
+
+
+def _mcp_tools(args, rest) -> int:
+    import json as _json
+    from core.mcp import auth, registry
+
+    perms = auth.permissions()
+    registry.load_tools()
+    tools = registry.available_tools(perms)
+
+    if getattr(args, "json", False):
+        _p(_json.dumps([t.to_wire() for t in tools], ensure_ascii=False,
+                       indent=2))
+        return 0
+    if not tools:
+        _p("Доступных инструментов нет (проверьте mcp.permissions)")
+        return 1
+    for spec in tools:
+        _p("  %-28s [%s] %s" % (spec.name, spec.scope or "read",
+                                spec.description))
+    _p("")
+    _p("Итого: %d из %d (остальные закрыты разрешениями)"
+       % (len(tools), len(registry.all_tools())))
+    return 0
+
+
+def _mcp_call(args, rest) -> int:
+    import json as _json
+    from core.mcp import auth, registry, schema
+
+    if not rest:
+        _p("Укажите инструмент: zapret-gui mcp call <tool> '<json>'")
+        return 2
+    name = rest[0]
+    raw = rest[1] if len(rest) > 1 else "{}"
+    try:
+        arguments = _json.loads(raw or "{}")
+    except ValueError as e:
+        # Самая частая ошибка вызова из shell — кавычки: без одинарных
+        # оболочка съедает двойные, и до нас доезжает {a:1}.
+        _p("✗ Аргументы не разобраны как JSON: %s" % e)
+        _p("  Получено: %s" % raw)
+        _p("  Ожидается объект в одинарных кавычках, например:")
+        _p("    zapret-gui mcp call %s '{\"limit\": 5}'" % name)
+        return 2
+    if not isinstance(arguments, dict):
+        _p("✗ Аргументы должны быть объектом JSON, а не %s"
+           % type(arguments).__name__)
+        return 2
+
+    registry.load_tools()
+    try:
+        result = registry.call(name, arguments, auth.permissions(),
+                               {"subject": "cli", "transport": "cli"})
+    except registry.UnknownTool as e:
+        _p("✗ %s" % (e.args[0] if e.args else e))
+        return 1
+    except schema.SchemaError as e:
+        _p("✗ %s" % e.message)
+        return 2
+
+    payload = result.get("structuredContent") or {}
+    _p(_json.dumps(payload, ensure_ascii=False, indent=2))
+    return 1 if result.get("isError") else 0
+
+
+def _mcp_stdio(args, rest) -> int:
+    from core.mcp import stdio
+    return stdio.serve(url=getattr(args, "url", "") or "",
+                       token=getattr(args, "token", "") or "",
+                       timeout=getattr(args, "timeout", 0) or 0)
+
+
+def _mcp_audit(args, rest) -> int:
+    from core.mcp import audit
+
+    limit = max(1, int(getattr(args, "limit", 50) or 50))
+    records, stats = audit.read_records(limit=limit)
+    if not records:
+        _p("Журнал пуст%s"
+           % ("" if audit.is_enabled() else " (mcp.audit.enabled=false)"))
+        _p("файл: %s" % stats.get("path", audit.journal_path()))
+        return 0
+    _p("%-20s %-26s %-9s %s" % ("Время", "Инструмент", "Статус", "Детали"))
+    _p("-" * 78)
+    for rec in records:
+        detail = rec.get("error") or ""
+        if not detail and rec.get("result"):
+            # Итог вызова (код возврата, первые строки вывода) — его
+            # пишет audit.note(): для shell-команд это самое нужное.
+            detail = ", ".join("%s=%s" % (k, v) for k, v in
+                               sorted(rec["result"].items()))
+        _p("%-20s %-26s %-9s %s" % (
+            str(rec.get("time") or rec.get("ts", ""))[:19],
+            str(rec.get("tool", "?"))[:26],
+            str(rec.get("status", "?")),
+            _cut(detail, 30)))
+    _p("")
+    _p("Показано записей: %d (%s)" % (len(records), stats.get(
+        "path", audit.journal_path())))
+    if stats.get("skipped_lines"):
+        _p("Пропущено битых строк: %d" % stats["skipped_lines"])
+    return 0
+
+
+def _mcp_code(args, rest) -> int:
+    """Снимки самоправки (S13). Нет модуля — говорим честно."""
+    import importlib
+    try:
+        # import_module, а не `from core import …`: имя модуля,
+        # которого в сборке нет, должно давать ImportError, а не
+        # атрибут пакета, оставшийся от чужого импорта.
+        code_editor = importlib.import_module("core.code_editor")
+    except ImportError:
+        _p("Самоправка кода в этой сборке недоступна: модуля "
+           "core/code_editor.py нет.")
+        return 1
+
+    action = (rest[0] if rest else "list").lower()
+    if action == "list":
+        items = code_editor.history(limit=max(1, int(
+            getattr(args, "limit", 20) or 20)))
+        if not items:
+            _p("Снимков нет: правок через code_apply ещё не было")
+            return 0
+        _p("%-22s %-20s %-10s %s" % ("Снимок", "Создан", "Состояние",
+                                     "Файлы"))
+        _p("-" * 78)
+        for item in items:
+            _p("%-22s %-20s %-10s %s" % (
+                item.get("snapshot_id", "?"),
+                str(item.get("created", ""))[:19],
+                item.get("state", "?"),
+                _cut(", ".join(item.get("files") or []), 28)))
+        pending = code_editor.last_open_snapshot()
+        if pending:
+            _p("")
+            _p("Не подтверждён: %s — подтвердить code_commit, вернуть "
+               "code_rollback" % pending.get("id", "?"))
+        return 0
+
+    if action == "diff":
+        snapshot_id = rest[1] if len(rest) > 1 else ""
+        if snapshot_id:
+            manifest = code_editor.read_manifest(snapshot_id)
+            if manifest is None:
+                _p("✗ Снимка «%s» нет" % snapshot_id)
+                return 1
+            text = code_editor.snapshot_diff(snapshot_id, manifest)
+        else:
+            text = code_editor.staging_diff()
+            if not text:
+                text = code_editor.export_patch()["patch"]
+        _p(text or "(различий нет)")
+        return 0
+
+    if action in ("export-patch", "export_patch"):
+        export = code_editor.export_patch()
+        # Патч идёт в stdout как есть: `… > /tmp/local.patch` должен
+        # давать файл, который применяется git apply, а не отчёт.
+        sys.stdout.write(export.get("patch") or "")
+        if not export.get("files"):
+            sys.stderr.write("zapret-gui: локальных правок нет\n")
+        return 0
+
+    if action == "rollback":
+        snapshot_id = rest[1] if len(rest) > 1 else ""
+        result = code_editor.rollback(snapshot_id, reason="cli rollback")
+        if not result.get("ok"):
+            _p("✗ %s" % (result.get("error") or "откат не удался"))
+            return 1
+        _p("✓ Откат к снимку %s: возвращено %d, удалено %d"
+           % (result.get("snapshot_id", snapshot_id or "?"),
+              len(result.get("restored") or []),
+              len(result.get("removed") or [])))
+        if result.get("hint"):
+            _p("  %s" % result["hint"])
+        return 0
+
+    _p("Неизвестное действие: %s (list|diff|rollback|export-patch)"
+       % action)
+    return 2
+
+
+def _mcp_endpoint() -> str:
+    """Адрес точки MCP, как его набирать в клиенте."""
+    from core.config_manager import get_config_manager
+    cfg = get_config_manager()
+    host = cfg.get("gui", "host", default="127.0.0.1") or "127.0.0.1"
+    port = cfg.get("gui", "port", default=8080) or 8080
+    if host in ("0.0.0.0", "::"):
+        host = "<адрес роутера>"
+    return "http://%s:%s/api/mcp" % (host, port)
+
+
+def _cut(text, limit: int) -> str:
+    text = str(text or "").replace("\n", " ").replace("\r", " ")
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 # ─────────────────────── entry ───────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -445,6 +758,36 @@ def build_parser() -> argparse.ArgumentParser:
     pdr = sub.add_parser("dns-routing", help="Per-domain DNS routing")
     pdr.add_argument("action", choices=["list", "apply"])
 
+    # mcp: действие необязательно (по умолчанию status), хвост свободный
+    # — у разных действий разные аргументы (`token show`, `call <tool>
+    # '<json>'`, `code rollback <id>`), и расписывать их отдельными
+    # под-парсерами значило бы завести argparse-дерево ради одной ветки.
+    pmc = sub.add_parser("mcp", help="MCP-сервер (управление через ИИ)")
+    pmc.add_argument("action", nargs="?", default="status",
+                     choices=["status", "token", "tools", "call", "stdio",
+                              "audit", "code"],
+                     help="status | token show|rotate | tools | call | "
+                          "stdio | audit | code list|diff|rollback|"
+                          "export-patch")
+    pmc.add_argument("rest", nargs="*",
+                     help="Аргументы действия (имя инструмента и JSON, "
+                          "под-действие code/token, id снимка)")
+    # Форма из README MCP-клиентов: `zapret-gui mcp --stdio` без слова
+    # stdio. Поддерживаем обе — клиент уже настроен как настроен.
+    pmc.add_argument("--stdio", action="store_true",
+                     help="Поднять stdio-мост (то же, что действие stdio)")
+    pmc.add_argument("--json", action="store_true",
+                     help="tools: выдать список машинно-читаемо")
+    pmc.add_argument("--limit", type=int, default=50,
+                     help="audit/code list: сколько записей показать")
+    pmc.add_argument("--url", default="",
+                     help="stdio: проксировать в HTTP-точку другого "
+                          "экземпляра")
+    pmc.add_argument("--token", default="",
+                     help="stdio: MCP-токен для --url")
+    pmc.add_argument("--timeout", type=int, default=0,
+                     help="stdio: таймаут запроса в режиме прокси, сек")
+
     return p
 
 
@@ -460,6 +803,7 @@ _DISPATCH = {
     "monitor":     _cmd_monitor,
     "updates":     _cmd_updates,
     "dns-routing": _cmd_dns_routing,
+    "mcp":         _cmd_mcp,
 }
 
 

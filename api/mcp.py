@@ -2,33 +2,53 @@
 """
 HTTP-транспорт MCP-сервера.
 
-    POST   /api/mcp        — JSON-RPC (один запрос или батч)
-    GET    /api/mcp        — 405 + Allow: POST (SSE появится в S14)
-    DELETE /api/mcp        — 405 + Allow: POST
-    GET    /api/mcp/info   — метаданные для UI, локально и без токена
+    POST   /api/mcp            — JSON-RPC (один запрос или батч)
+    GET    /api/mcp            — 405 + Allow: POST (SSE живёт отдельно)
+    DELETE /api/mcp            — 405 + Allow: POST
+    GET    /api/mcp/info       — метаданные для UI, локально и без токена
+    GET    /api/mcp/sse        — legacy-SSE: поток ответов (S14)
+    POST   /api/mcp/messages   — legacy-SSE: запросы, ответ уходит в поток
 
 Точка живёт в том же веб-сервере, что и GUI: адрес, порт и TLS — это
 ``gui.host``/``gui.port``. При ``gui.host=127.0.0.1`` MCP доступен только
 с самого роутера — самый безопасный режим, и он же по умолчанию.
 
-Транспорт без состояния. ``Mcp-Session-Id`` выдаётся на ``initialize`` и
-принимается обратно, но сервер на нём ничего не держит: роутер
-перезагружается чаще, чем живёт сессия модели.
+**Основной транспорт — без состояния.** ``Mcp-Session-Id`` выдаётся на
+``initialize`` и принимается обратно, но сервер на нём ничего не держит:
+роутер перезагружается чаще, чем живёт сессия модели.
+
+**Legacy-SSE (``mcp.transports.sse``, по умолчанию выключен)** — это
+старая схема «два канала» из ревизии ``2024-11-05``: поток отдаёт первым
+событием ``event: endpoint`` с адресом, куда слать запросы, запросы
+уходят POST-ом на него и получают ``202``, а ответы приезжают обратно в
+поток. Нужен ровно потому, что часть живых клиентов (сборки LM Studio,
+старые Cline) ничего другого не умеют. Состояние (очередь ответов) —
+в ``core/mcp/session.py``, и оно существует только ради доставки:
+диспетчер тот же самый.
+
+Флаг транспорта читается на каждом запросе — включение и выключение SSE
+не требует перезапуска GUI.
 """
 
 import json
+import queue
 import uuid
 
 from bottle import request, response
 
 from core.mcp import (audit, auth, permissions, prompts, registry,
                       resources, server)
+from core.mcp import session as mcp_session
 
 
 # Заголовок, которым клиент сообщает ревизию спеки (обязателен после
 # initialize — см. спеку MCP, раздел про HTTP-транспорт).
 PROTOCOL_HEADER = "MCP-Protocol-Version"
 SESSION_HEADER = "Mcp-Session-Id"
+
+# Куда legacy-SSE просит слать запросы (это значение уезжает клиенту
+# первым событием потока).
+MESSAGES_PATH = "/api/mcp/messages"
 
 _JSON_CT = "application/json; charset=utf-8"
 
@@ -55,23 +75,14 @@ def register(app):
         #    старые клиенты) — это не ошибка; ошибка — заголовок с
         #    версией, которой мы не знаем.
         version = (headers.get(PROTOCOL_HEADER, "") or "").strip()
-        if version and version not in server.SUPPORTED_PROTOCOL_VERSIONS:
-            response.status = 400
-            return _body({
-                "ok": False,
-                "error": "неподдерживаемая ревизия MCP: %s" % _safe(version),
-                "supported": list(server.SUPPORTED_PROTOCOL_VERSIONS),
-            })
+        refusal = _version_refusal(version)
+        if refusal is not None:
+            return refusal
 
         # 3. Тело.
-        ctype = (request.content_type or "").split(";")[0].strip().lower()
-        if ctype and ctype != "application/json":
-            response.status = 415
-            return _body({
-                "ok": False,
-                "error": "ожидается Content-Type: application/json "
-                         "(получено %s)" % _safe(ctype),
-            })
+        refusal = _content_type_refusal()
+        if refusal is not None:
+            return refusal
 
         raw = request.body.read() if request.body else b""
         try:
@@ -108,11 +119,13 @@ def register(app):
 
     @app.route("/api/mcp", method="GET")
     def api_mcp_get():
-        """SSE-канала нет — и это не поломка, а свойство транспорта."""
+        """SSE-канала здесь нет — и это не поломка, а свойство точки."""
         return _method_not_allowed(
-            "GET /api/mcp не поддерживается: транспорт работает без SSE, "
-            "все вызовы идут через POST /api/mcp. Это не ошибка сервера — "
-            "клиенту достаточно POST."
+            "GET /api/mcp не поддерживается: основной транспорт работает "
+            "без SSE, все вызовы идут через POST /api/mcp. Это не ошибка "
+            "сервера — клиенту достаточно POST. Клиентам, умеющим только "
+            "старую схему, — GET /api/mcp/sse (включается "
+            "mcp.transports.sse)."
         )
 
     @app.route("/api/mcp", method="DELETE")
@@ -123,6 +136,115 @@ def register(app):
             "закрывать нечего. Mcp-Session-Id выдаётся для совместимости "
             "и ни на что не влияет."
         )
+
+    # ───────────────────────── legacy-SSE (S14) ─────────────────────
+    #
+    # Схема ревизии 2024-11-05: поток отдаёт адрес, запросы идут на него
+    # POST-ом, ответы приезжают в поток. Два канала вместо одного — не
+    # наш выбор, а условие совместимости с клиентами, которые умеют
+    # только так.
+
+    @app.route("/api/mcp/sse", method="GET")
+    def api_mcp_sse():
+        """Поток ответов legacy-SSE: ``event: endpoint``, затем сообщения."""
+        if not mcp_session.sse_enabled():
+            return _sse_disabled()
+
+        headers = _Headers(request.environ)
+        decision = auth.check(
+            method="GET",
+            remote_addr=request.environ.get("REMOTE_ADDR", ""),
+            headers=headers,
+            auth_pair=_basic_auth(),
+        )
+        if not decision.ok:
+            return _refuse(decision)
+
+        # Сессию заводим ДО генератора: после первого yield заголовки
+        # уже ушли клиенту, и честного отказа не выйдет.
+        try:
+            sess = mcp_session.open_session(
+                subject=decision.subject,
+                remote_addr=request.environ.get("REMOTE_ADDR", ""))
+        except mcp_session.TooManySessions as e:
+            limit = e.args[0] if e.args else mcp_session.max_sessions()
+            response.status = 429
+            response.set_header("Retry-After", "30")
+            response.content_type = _JSON_CT
+            return _body({
+                "ok": False,
+                "error": "открыто уже %s SSE-сессий (mcp.limits."
+                         "max_sessions); закройте лишний клиент или "
+                         "поднимите лимит" % limit,
+                "max_sessions": limit,
+            })
+
+        # Заголовки — до входа в генератор (как в api/logs.py).
+        response.content_type = "text/event-stream"
+        response.set_header("Cache-Control", "no-cache")
+        response.set_header("Connection", "keep-alive")
+        response.set_header("X-Accel-Buffering", "no")
+        response.set_header(SESSION_HEADER, sess.id)
+        return _sse_stream(sess)
+
+    @app.route(MESSAGES_PATH, method="POST")
+    def api_mcp_messages():
+        """Запрос legacy-SSE: ``202`` сразу, ответ — в поток сессии."""
+        response.content_type = _JSON_CT
+        if not mcp_session.sse_enabled():
+            return _sse_disabled()
+
+        headers = _Headers(request.environ)
+        decision = auth.check(
+            method="POST",
+            remote_addr=request.environ.get("REMOTE_ADDR", ""),
+            headers=headers,
+            auth_pair=_basic_auth(),
+        )
+        if not decision.ok:
+            return _refuse(decision)
+
+        session_id = _session_param(headers)
+        sess = mcp_session.get(session_id)
+        if sess is None:
+            # 404, а не 400: для клиента это «поток закрылся, открой
+            # заново», и именно так он себя и ведёт.
+            response.status = 404
+            return _body({
+                "ok": False,
+                "error": "сессия %s не найдена: поток SSE закрыт или "
+                         "истёк — откройте GET /api/mcp/sse заново"
+                         % (_safe(session_id) or "<не указана>"),
+                "sessions": mcp_session.count(),
+            })
+
+        version = (headers.get(PROTOCOL_HEADER, "") or "").strip()
+        refusal = _version_refusal(version)
+        if refusal is not None:
+            return refusal
+        refusal = _content_type_refusal()
+        if refusal is not None:
+            return refusal
+
+        raw = request.body.read() if request.body else b""
+        try:
+            payload = json.loads(raw.decode("utf-8") or "null")
+        except (ValueError, UnicodeDecodeError) as e:
+            # Ошибка разбора тоже уезжает в поток: клиент этой схемы
+            # читает ответы только оттуда, а не из тела POST.
+            return _deliver(sess, server.parse_error(str(e)))
+        if payload is None:
+            return _deliver(sess, server.parse_error("тело пустое"))
+
+        answer = server.dispatch(payload, {
+            "permissions": auth.permissions(),
+            "session_id": sess.id,
+            "subject": decision.subject,
+            "remote_addr": request.environ.get("REMOTE_ADDR", ""),
+            "protocol_version": version or server.PROTOCOL_VERSION,
+            "transport": "sse",
+        })
+        return _deliver(sess, answer)
 
     @app.route("/api/mcp/info")
     def api_mcp_info():
@@ -180,7 +302,138 @@ def register(app):
             "resources": len(resources.list_resources()),
             "prompts": len(prompts.list_prompts()),
             "endpoint": "/api/mcp",
+            # Legacy-SSE: включён ли и сколько потоков открыто прямо
+            # сейчас. Мёртвая сессия на роутере со 128 МБ — это утечка,
+            # и число на странице MCP делает её видимой.
+            "sse": {
+                "enabled": mcp_session.sse_enabled(),
+                "endpoint": "/api/mcp/sse",
+                "messages": MESSAGES_PATH,
+                "sessions": mcp_session.count(),
+                "max_sessions": mcp_session.max_sessions(),
+                "keepalive_sec": mcp_session.KEEPALIVE_SEC,
+                "idle_timeout_sec": mcp_session.IDLE_TIMEOUT_SEC,
+            },
         })
+
+
+# ─────────────────────── legacy-SSE: помощники ──────────────────────
+
+def _sse_stream(sess):
+    """Генератор потока: адрес для запросов, затем ответы и keep-alive.
+
+    Любое исключение подавляется: вылетев из WSGI-callable, оно пишет в
+    stderr «Critical error while processing request» и не закрывает
+    сессию — а незакрытая сессия на роутере со 128 МБ это утечка. Выход
+    из генератора по любой причине проходит через ``finally``.
+    """
+    try:
+        # Первым событием — адрес, куда слать запросы. Это и есть весь
+        # смысл первой половины схемы: клиент узнаёт его отсюда.
+        yield _sse_event("%s?session=%s" % (MESSAGES_PATH, sess.id),
+                         event="endpoint", raw=True)
+        while True:
+            sess.touch()
+            # Смена разрешений = смена набора инструментов. Опрос на
+            # круге keep-alive ловит и config_set, и правку в UI, и
+            # ручную правку settings.json.
+            mcp_session.poll_permissions()
+            try:
+                message = sess.get(timeout=mcp_session.KEEPALIVE_SEC)
+            except queue.Empty:
+                yield ": keep-alive\n\n"
+                continue
+            sess.sent += 1
+            yield _sse_event(message, event="message")
+    except (GeneratorExit, BrokenPipeError, ConnectionResetError, OSError):
+        # Клиент отключился — штатный конец потока.
+        pass
+    except Exception:                           # noqa: BLE001 — граница
+        try:
+            from core.log_buffer import log
+            log.error("MCP: SSE-поток оборван ошибкой", source="mcp")
+        except Exception:
+            pass
+    finally:
+        mcp_session.close(sess)
+
+
+def _sse_event(data, event=None, raw=False):
+    """Собрать SSE-событие.
+
+    ``raw=True`` — ``data`` уже строка (адрес в ``event: endpoint``
+    передаётся текстом, а не JSON: так сказано в спеке ревизии
+    2024-11-05).
+    """
+    lines = []
+    if event:
+        lines.append("event: %s" % event)
+    if raw:
+        payload = str(data)
+    else:
+        try:
+            payload = json.dumps(data, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            payload = "{}"
+    # Перевод строки внутри data разорвал бы событие надвое.
+    payload = payload.replace("\r", " ").replace("\n", " ")
+    lines.append("data: %s" % payload)
+    lines.append("")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _deliver(sess, answer):
+    """Положить ответ в поток сессии и отдать ``202``.
+
+    Ответа в теле POST нет и быть не может: клиент этой схемы читает
+    только поток. Переполненная очередь — это клиент, который поток не
+    читает: честнее сказать 503, чем молча потерять ответ.
+    """
+    if answer is None:
+        # Тело состояло только из уведомлений — отвечать нечем.
+        response.status = 202
+        return b""
+    if not sess.put(answer):
+        response.status = 503
+        return _body({
+            "ok": False,
+            "error": "очередь сессии переполнена: SSE-поток не читают; "
+                     "переоткройте GET /api/mcp/sse",
+            "pending": sess.pending(),
+        })
+    response.status = 202
+    return b""
+
+
+def _session_param(headers) -> str:
+    """Идентификатор сессии из query или заголовка.
+
+    Сами мы отдаём ``?session=``, но клиенты, собранные по старым SDK,
+    шлют ``sessionId``; заголовок принимаем за компанию — он ничего не
+    стоит, а разбирательство «почему 404» стоит вечера.
+    """
+    for name in ("session", "sessionId", "session_id"):
+        try:
+            value = request.query.get(name)
+        except Exception:                       # noqa: BLE001 — граница
+            value = None
+        if value:
+            return str(value).strip()
+    return (headers.get(SESSION_HEADER, "") or "").strip()
+
+
+def _sse_disabled():
+    """Отказ, когда ``mcp.transports.sse`` выключен."""
+    response.status = 404
+    response.content_type = _JSON_CT
+    return _body({
+        "ok": False,
+        "error": "legacy-SSE выключен: включите mcp.transports.sse в "
+                 "настройках MCP. Основной транспорт — POST /api/mcp — "
+                 "работает всегда.",
+        "endpoint": "/api/mcp",
+    })
 
 
 # ───────────────────────────── помощники ────────────────────────────
@@ -228,6 +481,37 @@ def _basic_auth():
     except Exception:
         return None
 
+
+
+def _version_refusal(version):
+    """Отказ по неизвестной ревизии спеки или ``None``.
+
+    Заголовка может не быть (первый initialize, старые клиенты) — это
+    не ошибка; ошибка — версия, которой мы не знаем.
+    """
+    if not version or version in server.SUPPORTED_PROTOCOL_VERSIONS:
+        return None
+    response.status = 400
+    response.content_type = _JSON_CT
+    return _body({
+        "ok": False,
+        "error": "неподдерживаемая ревизия MCP: %s" % _safe(version),
+        "supported": list(server.SUPPORTED_PROTOCOL_VERSIONS),
+    })
+
+
+def _content_type_refusal():
+    """Отказ по чужому Content-Type или ``None``."""
+    ctype = (request.content_type or "").split(";")[0].strip().lower()
+    if not ctype or ctype == "application/json":
+        return None
+    response.status = 415
+    response.content_type = _JSON_CT
+    return _body({
+        "ok": False,
+        "error": "ожидается Content-Type: application/json (получено %s)"
+                 % _safe(ctype),
+    })
 
 
 def _refuse(decision):
