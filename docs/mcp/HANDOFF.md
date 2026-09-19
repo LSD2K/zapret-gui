@@ -8,135 +8,144 @@
 
 ---
 
-## Состояние: после S11 (сборка и валидация стратегий)
+## Состояние: после S12 (shell, файлы, пакеты, службы)
 
-**Дата:** 2026-09-19 · **Ветка/PR:** `claude/relaxed-hopper-gr45pq`
+**Дата:** 2026-09-19 · **Ветка/PR:** `claude/jolly-davinci-yfnl68`
 
 ### Сделано
 
-- `core/strategy_lint.py` (нов., ~390) — **не в пакете MCP**: чистые
-  функции без I/O. `lint(argv, known_functions=None, known_blobs=None)`
-  → список `{code, severity, message, section, where?, profile?}`,
-  `summary(findings)` → `{errors, warnings, codes, blocking}`,
-  `known_codes()`, `rule(code)`, `split_profiles(argv)`. Восемь правил
-  таблицей `RULES` — данные, не цепочка `if`.
-- `core/strategy_builder.py` — **module-level** `compose_profile_args
-  (spec)` (декларативный профиль → строка аргументов, порядок по §15
-  скила) и `compose_profiles(specs)` → `[{id, name, args, enabled}]` —
-  ровно тот формат, что принимают `save_user_strategy` и
-  `build_nfqws_args`. Явные `blobs` дозаявляются в НАЧАЛО первого
-  профиля.
-- `core/nfqws_manager.py` — `lua_named_patterns()`: публичная обёртка
-  над `_INIT_VARS_NAMES`. Без неё линтер объявлял бы ошибкой
-  `blob=tls_rnd` и ещё 14 имён, которые объявляет `init_vars.lua`, а не
-  реестр блобов.
-- `core/mcp/tools/compose.py` (нов., ~470) — `strategy_compose` и
-  `strategy_validate` под `strategies_write`, **оба `mutating=False`**.
-- `core/strategy_experiment.py` — `HINT_RULES` дополнены тремя
-  `log`-правилами из §16 скила: `lua_compat_mismatch`,
-  `reasm_queue_overflow`, `lua_bad_argument`. Код `hints_for` не
-  тронут.
-- тесты: `test_strategy_lint.py` (39) — каждое правило на минимальном
-  примере, «молчит там, где не должно», сторож по всем 730+ встроенным
-  стратегиям; `test_mcp_compose.py` (21) — порядок сборки, совпадение
-  argv с рукописной стратегией, профили уезжают в `strategy_save` как
-  есть, отказы на входе; `test_mcp_validate.py` (16) — три источника,
-  успех/ошибка разбора/ошибка lua/нет бинарника, подсказки привязаны к
-  выводу; дополнены `test_mcp_hints.py` (+4) и `test_mcp_tool_counts.py`
-  (`strategies_write: 8` + список исключений `READ_ONLY_UNDER_WRITE`).
-  По `test_mcp_*` — 655 зелёных; весь `tests/` — 3569 passed, 2 skipped;
-  `node --test tests/*.js` — 11 passed; `make lint` чист.
+- `core/shell_exec.py` (нов., ~1590) — **не в пакете MCP**: два режима
+  (argv без оболочки / `sh -c`), safe-список `SAFE_COMMANDS`
+  **данными**, `DENY_RULES` с нормализацией команды, `CONFIRM_RULES` и
+  одноразовый `confirm_token`, дедмен-свитч (`guard` → `run_id`,
+  файл `mcp-shell-guards.json`, `recover_guards()`), фоновые задачи со
+  своим реестром, правила исполнения (stdin, env, таймаут, обрезка с
+  хвоста, `redact_text`).
+- `core/mcp/tools/shell.py` (~340) — `shell_exec`, `shell_exec_async`,
+  `shell_job_status/_output/_stop`, `shell_confirm`.
+- `core/mcp/tools/files.py` (~465) — `file_read`, `file_list`,
+  `file_write` (граница `allow_write_paths` по резолвнутому пути,
+  атомарно, права сохраняются, снимок `KIND_FILE` и откат).
+- `core/mcp/tools/packages.py` (~350) — `package_list/install/remove`
+  (`opkg`/`apk`, argv-списком, снимок `KIND_PACKAGE`).
+- `core/mcp/tools/services.py` (~255) — `service_list`,
+  `service_control` (имя сверяется со списком скриптов на диске,
+  снимок `KIND_SERVICE`).
+- `core/mcp/tools/system.py` (~90) — `system_reboot` под `dangerous`,
+  через `shell_confirm` и `core/system_control.py`.
+- `core/mcp/permissions.py` — `IMPLIES` (`shell_full` открывает
+  `shell_readonly`), `implied_by()`, `opens`/`implied_by` в
+  `describe()`.
+- `core/mcp/audit.py` — `note()`/`take_notes()`: итог вызова
+  (`result` в записи журнала) + виды снимков `KIND_FILE`,
+  `KIND_PACKAGE`, `KIND_SERVICE`.
+- `core/mcp/redact.py` — `PUBLIC_KEYS = {"confirm_token"}`.
+- `core/mcp/server.py` — врезка про двухшаговость и `guard` в
+  `instructions` (только когда shell разрешён).
+- `app.py` — `recover_guards()` при старте, рядом с
+  `recover_after_restart()` экспериментов.
+- тесты (6 файлов, +109): `test_mcp_shell.py` (26),
+  `test_mcp_shell_guards.py` (25), `test_mcp_shell_redaction.py` (9),
+  `test_mcp_files.py` (19), `test_mcp_system_tools.py` (19),
+  `test_mcp_no_dangerous.py` (11), общая песочница
+  `tests/_shell_sandbox.py`. По `test_mcp_*` — 766 зелёных; весь
+  `tests/` — 3680 passed, 2 skipped; `node --test` — 11 passed;
+  `make lint` чист.
 
 ### Зафиксированные контракты
 
-**Формат профиля** (один и тот же у `strategy_compose` и
-`strategy_validate`):
-`{id?, name?, filter: {proto, ports, l7, hostlist, hostlist_exclude,
-ipset}, payload?, out_range?, in_range?, desync: [{fn, params}],
-blobs?}`. `params`: `true` — ключ без значения, `false` — не ставить,
-число — как есть. `hostlist`/`ipset` — **имя списка, а не путь**.
+**Ответ команды:** `{ok, returncode, output, output_bytes, truncated,
+timed_out, duration_ms, command, mode, safe_list, workdir,
+timeout_sec}`. `ok` — «команда выполнилась сама», ненулевой
+`returncode` ошибкой ВЫЗОВА не считается; таймаут — `ok: false`.
+Пояснение про обрезку — в `output_note` (`note` занят пометкой
+«untrusted data»).
 
-**Порядок сборки профиля** — по §15 скила nfqws2: фильтр профиля →
-`out_range`/`in_range`/`payload` → инстансы. Он значим и проверяется
-тестом дословно.
+**Двухшаговое подтверждение:** отказ несёт `need_confirm: true`,
+`confirm_token` (одноразовый, 60 с), `matched_rules`, `consequences`.
+Исполняет `shell_confirm(confirm_token=…)`; разрешение проверяется
+**на обоих шагах** (токен помнит свой scope). Токен переживает только
+процесс — на диск не ложится.
 
-**Коды линтера** (стабильные символы; переименование = поломка
-контракта): `bare_trick_no_filter`, `unknown_lua_function`,
-`blob_unknown`, `blob_file_missing`, `blob_declared_after_new`,
-`lua_init_order`, `l7_filter_without_ports`, `no_desync_action`.
-Уровни — `error` (argv заведомо не сработает) и `warning`
-(подозрительно, но бывает осознанно).
+**Guard:** `{revert_cmd, ttl_sec}` обязателен для правил с
+`network: true`. Ответ несёт `run_id`, `guard_expires_in`,
+`revert_cmd`; снять — `shell_confirm(run_id=…)`. Состояния записи:
+`armed` → `firing` → `fired` | `confirmed` | `failed`.
 
-**Вердикт.** `valid: bool` в ответе обоих инструментов. При
-`lint.blocking` **или** провале `dry_run` — `ok: false` (то есть
-`isError`), но `strategy_args`, `command` и `profiles` остаются в
-ответе. Предупреждение ответ не роняет. Отсутствие бинарника
-(`validation.available: false`) — не провал, а «не проверяли».
+**Порядок проверок:** запрет → guard → подтверждение. Менять нельзя:
+иначе модель подтверждает и только потом узнаёт про дедмен.
 
-**Окружение линтера приходит аргументами.** `None` = правило не
-проверяется; что удалось сверить, говорит `lint.checked`.
+**Фоновые задачи:** `shell_exec_async` → `job_id` сразу;
+`shell_job_output(offset)` → `next_offset`; буфер хранит **начало**
+(в отличие от синхронной обрезки с хвоста).
 
 ### Следующий шаг
 
-**S12** — [`12-shell.md`](12-shell.md): shell, файлы, пакеты, службы,
-`system_reboot`. Ни от чего из S3–S11 не зависит.
+**S13** — [`13-self-edit.md`](13-self-edit.md): самоправка кода GUI на
+устройстве. Подключается к тому же аудиту (`audit.snapshot` +
+`register_undo`) и к дедмену из S12: перезапуск под сторожем — это тот
+же `guard`, только откатывает не сеть, а код. `core/shell_exec.py`
+даёт ему исполнение (`plan_command` + `execute`), повторять его не
+надо.
 
-Цикл §8.4 плана (**собрал → проверил → сохранил → применил → измерил →
-откатил**) после этой сессии **замкнут полностью**: `strategy_compose`
-→ `strategy_validate` → `strategy_save` → `strategy_apply` →
-`strategy_experiment_*` → `mcp_undo_last`.
+**Долг S12 перед S15/S16:** предупреждение «`shell_full` — это root
+для всякого, у кого есть токен» должно появиться на странице MCP
+(S15) и в README (S16, раздела про MCP там пока нет вовсе). Сейчас
+оно есть только в описаниях инструментов и в `permissions.TITLES`.
+S15 заодно показывает список последних команд и кнопку «запретить
+shell немедленно»: данные для неё — `shell_exec.jobs()` и
+`shell_exec.armed_guards()`.
 
 ### Что оказалось не так, как написано в задании
 
-1. **«Голый приём без фильтра» нельзя сделать ошибкой — и он не
-   аномалия.** Правило срабатывает на 608 из 732 встроенных стратегий:
-   каталожные приёмы (`basic/`/`advanced/`/`direct/`) НАМЕРЕННО идут
-   без фильтра, его подставляет сканер (`_wrap_trick_args`). Поэтому
-   уровень — `warning`, а в тексте прямо сказано, что для каталожных
-   приёмов это норма и переписывать их не надо (есть тест на эту
-   фразу): иначе модель «чинила» бы работающий каталог.
-2. **`--filter-l7` без портов ругается не на всякий L7.** §15.5
-   (`--filter-l7=wireguard,stun,discord`) — документированный шаблон
-   вообще без портов. Правило фильтрует только `tls`/`http`/`quic` —
-   те, что в наших шаблонах всегда идут с портом.
-3. **Два правила пришлось чинить по факту прогона по каталогу.**
-   `blob=0x0000…` — это инлайновый hex, а не имя (53 ложные ошибки), а
-   `tls_rnd`/`tls_youtube`/ещё 13 имён объявляет `init_vars.lua`.
-   Сторож `test_builtin_strategies_have_no_lint_errors` оставлен
-   специально — следующее правило проверяется им же.
-4. **`strategy_compose`/`strategy_validate` — первые НЕ мутирующие
-   инструменты под разрешением на запись.** Сторож
-   `test_mutating_tools_declare_it` считал, что таких не бывает;
-   исключения теперь поимённые (`READ_ONLY_UNDER_WRITE`) и сами
-   проверяются на `mutating=False`.
-5. **Подсказки считаются только по НЕУДАЧНОЙ валидации.** У правила
-   `blob_missing` из S10 подстрока одна и короткая («blob»), и на
-   успешном выводе оно советовало бы чинить исправное.
-6. **`strategy_validate` не принимает два источника сразу.** Ответ
-   «проверил одно, рассказал про другое» хуже отказа.
+1. **«Только argv-режим» ≠ «только параметр argv».** Под
+   `shell_readonly` строка принимается, если в ней нет метасимволов:
+   она разбирается `shlex` и исполняется без оболочки. Модель пишет
+   `command="df -h"`, и отказ на каждой первой команде сделал бы
+   разрешение бесполезным. Сам запрет («без `sh -c`, пайпов,
+   редиректов, подстановок») соблюдён буквально.
+2. **`shell_full` пришлось сделать надмножеством `shell_readonly`.**
+   Иначе включённый `shell_full` без `shell_readonly` прятал половину
+   инструментов. Появился `permissions.IMPLIES` — обратная сторона
+   `REQUIRES`.
+3. **`confirm_token` маскировался как секрет** (`token` в
+   `SECRET_KEY_RE`), и подтверждение не работало в принципе. Пришлось
+   завести точечное исключение `redact.PUBLIC_KEYS` — переименовать
+   поле было нельзя, оно задано Приложением C плана.
+4. **Журналу понадобился итог, а не только аргументы.** Приёмка
+   требует «код возврата и первые строки вывода в журнале» — добавлена
+   `audit.note()`.
+5. **Фоновым задачам не подошёл `_jobs.py`.** Он устроен вокруг
+   singleton-runner'ов («один прогон на вид»), а shell-задач бывает
+   несколько сразу, и каждая держит свой процесс. Реестр свой, в
+   `core/shell_exec.py`; контракт снаружи — тот же.
+6. **`find`, `awk`, `sed` в safe-список не вошли.** У каждой одна
+   пропущенная опция (`-exec`, `system()`, `-i`) превращает «чтение» в
+   root-доступ. Список расширяется в скиле, осознанно.
+7. **`package_remove` и `system_reboot` подтверждаются тем же
+   механизмом, что команды.** `pending_confirm(action=…)` принимает
+   callable — иначе у каждого инструмента завёлся бы свой токен со
+   своим сроком годности.
 
 ### Грабли
 
-- **Линтовать надо СОБРАННЫЙ argv, а не строку из редактора.**
-  `build_nfqws_args` сам обёртывает голый приём фильтром
-  (`autowrap_bare_trick`), дозаявляет блобы и резолвит пути; линтер на
-  сырой строке ругался бы на то, что сборщик чинит сам.
-- **`--blob=NAME:…` содержит подстроку `blob=`.** Регулярка ссылок
-  без оглядки назад (`(?<!-)blob=`) читала бы каждое объявление как
-  ссылку на само себя.
-- **`pattern=`/`seqovl_pattern=` — НЕ blob'ы.** Там бывает переменная
-  lua, заведённая соседним `luaexec` (§15.7). Проверяем только `blob=`,
-  как и `blob_registry.referenced_blob_names`.
-- **Значение параметра с пробелом заворачивается в одинарные
-  кавычки.** `tokenize_args` кавычки не вырезает, и для inline-Lua это
-  обязательно (`code='desync.x = 1'` — строковый литерал). Значение,
-  где есть и пробел, и апостроф, — честный отказ.
-- **`--intercept=0` не обязан завершаться сразу.** Стратегия, чей
-  `lua-init` заводит периодический таймер, не выйдет никогда; спасает
-  `dry_run(..., timeout=8.0)`.
-- **Из S9/S10 осталось в силе:** CLI поднимает движок мимо
-  `nfqws_control` и мьютекс не берёт; `restore()` не сверяет argv;
-  синглтон движка экспериментов общий на процесс.
+- **`stream.read(n)` у буферизованного потока ЖДЁТ `n` байт.** Вывод
+  фоновой задачи появлялся только после её конца. Нужен `read1()`.
+- **`from core import X` берёт атрибут пакета, а не `sys.modules`.**
+  Тест, подменявший `core.system_control` через `patch.dict`, в
+  одиночку проходил, а в общем прогоне звал настоящий `reboot`.
+  Подменять — функции модуля (`mock.patch.object`).
+- **Без нормализации запреты декоративны.** `env  rm -rf /`,
+  `"rm" -rf /`, `/bin/rm -rf /`, `r\m -rf /` — все в тесте.
+- **`env` как команда нормализуется в пустоту** (это префиксное
+  слово): пустой argv откатывается к исходному.
+- **Дедмен в памяти не откатывает ничего** — таймер умирает вместе с
+  процессом, который и уронил связь.
+- **Атомарная запись создаёт НОВЫЙ файл**: без `chmod` init-скрипт
+  теряет `+x` и перестаёт запускаться.
+- **Из S9/S10/S11 осталось в силе:** CLI поднимает движок мимо
+  `nfqws_control`; `restore()` не сверяет argv; синглтон движка
+  экспериментов общий на процесс; линтовать надо СОБРАННЫЙ argv.
 
 ## Шаблон записи (перезаписывать, не дописывать)
 

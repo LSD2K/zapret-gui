@@ -85,6 +85,10 @@ KIND_IPSET = "ipset"
 KIND_BLOB = "blob"
 KIND_LUA = "lua"
 KIND_FIREWALL = "firewall"
+# S12 — shell и система.
+KIND_FILE = "file"
+KIND_PACKAGE = "package"
+KIND_SERVICE = "service"
 
 # Ротация журнала: сколько записей хранить, если mcp.audit.keep не
 # прочитался или задан бессмысленно.
@@ -185,6 +189,7 @@ def begin(tool: str = ""):
     упавшего до записи в журнал, прицепился бы к следующему.
     """
     _local.pending = []
+    _local.notes = {}
     _local.tool = tool
 
 
@@ -221,6 +226,27 @@ def snapshot(kind, target, before, after, detail: str = "",
         pending = _local.pending = []
     pending.append(ref)
     return dict(ref)
+
+
+def note(**fields):
+    """Прицепить к записи журнала ИТОГ вызова, а не только его аргументы.
+
+    Аргументы говорят, что модель просила; для shell (S12) этого мало:
+    журнал обязан отвечать «что получилось» — код возврата и первые
+    строки вывода. Поля кладутся в ``result`` записи и проходят ту же
+    маскировку, что аргументы.
+    """
+    current = getattr(_local, "notes", None)
+    if current is None:
+        current = _local.notes = {}
+    current.update(fields)
+
+
+def take_notes() -> dict:
+    """Забрать пометки текущего вызова (и очистить их)."""
+    notes = getattr(_local, "notes", None) or {}
+    _local.notes = {}
+    return dict(notes)
 
 
 def take_pending() -> list:
@@ -387,6 +413,9 @@ def record(tool, *, scope="", mutating=False, args=None, status=STATUS_OK,
     undo = take_pending()
     if undo:
         entry["undo"] = undo
+    notes = _safe_args(take_notes())
+    if notes:
+        entry["result"] = notes
 
     _log_entry(entry)
     if is_enabled():

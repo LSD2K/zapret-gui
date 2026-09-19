@@ -71,6 +71,16 @@ from core.mcp import registry
 # Разрешение здесь не про «мы что-то пишем», а про то, что собранное
 # предназначено для записи: модель, которой не дали править стратегии,
 # собирать их вслепую тоже незачем.
+# S12: + 11 под `shell_readonly` (команды: shell_exec, shell_exec_async,
+# shell_job_status/_output/_stop, shell_confirm; файлы: file_read,
+# file_list; система: package_list, service_list, service_control),
+# + 3 под `shell_full` (file_write, package_install, package_remove) и
+# + 1 под `dangerous` (system_reboot). `shell_exec` и `service_control`
+# объявлены под `shell_readonly`, а `shell_full` спрашивают ПО МЕСТУ:
+# один инструмент, два действия (safe-список против произвольной
+# команды, status против start/stop) — как `scan_apply` спрашивает
+# `strategies_write`. Сам `shell_full` включает `shell_readonly`
+# (`permissions.IMPLIES`): кому отдали root, тому `df -h` уже отдали.
 BY_SCOPE = {
     "read": 32,
     "control": 8,
@@ -79,9 +89,9 @@ BY_SCOPE = {
     "probes": 8,
     "experiments": 7,
     "tunnels_write": 0,
-    "dangerous": 0,
-    "shell_readonly": 0,
-    "shell_full": 0,
+    "dangerous": 1,
+    "shell_readonly": 11,
+    "shell_full": 3,
     "self_edit": 0,
     "self_edit_core": 0,
     # Псевдо-scope: открывается ЛЮБЫМ разрешением на запись, поэтому в
@@ -116,7 +126,12 @@ class TestToolCounts(unittest.TestCase):
             # test_mcp_permissions).
             for dependency in perms.REQUIRES.get(name, ()):
                 granted[dependency] = True
-            expected = base + sum(BY_SCOPE[key] for key in granted)
+            # А вложенные разрешения (`shell_full` → `shell_readonly`)
+            # включаются сами: их инструменты тоже становятся видны.
+            counted = dict(granted)
+            for opened in perms.IMPLIES.get(name, ()):
+                counted[opened] = True
+            expected = base + sum(BY_SCOPE[key] for key in counted)
             if any(key in perms.WRITE_PERMISSIONS for key in granted):
                 # Откат публикуется при любом разрешении на запись.
                 expected += BY_SCOPE[perms.ANY_WRITE_SCOPE]
@@ -185,6 +200,17 @@ class TestToolCounts(unittest.TestCase):
         "strategy_experiment_start", "strategy_experiment_status",
         "strategy_experiment_stop",
     ]
+    # S12 — shell и система. `shell_exec`/`service_control` объявлены
+    # под `shell_readonly`, потому что под ним они и работают (safe-
+    # список, status); `shell_full` они спрашивают по месту.
+    SHELL_READONLY_TOOLS = [
+        "file_list", "file_read", "package_list", "service_control",
+        "service_list", "shell_confirm", "shell_exec", "shell_exec_async",
+        "shell_job_output", "shell_job_status", "shell_job_stop",
+    ]
+    SHELL_FULL_TOOLS = ["file_write", "package_install", "package_remove"]
+    DANGEROUS_TOOLS = ["system_reboot"]
+
     # S8 — всё, что выпускает трафик с роутера.
     PROBES_TOOLS = [
         "blockcheck2_start", "blockcheck2_stop", "blockcheck_start",
@@ -206,6 +232,10 @@ class TestToolCounts(unittest.TestCase):
         self.assertEqual(len(self.PROBES_TOOLS), BY_SCOPE["probes"])
         self.assertEqual(len(self.EXPERIMENTS_TOOLS),
                          BY_SCOPE["experiments"])
+        self.assertEqual(len(self.SHELL_READONLY_TOOLS),
+                         BY_SCOPE["shell_readonly"])
+        self.assertEqual(len(self.SHELL_FULL_TOOLS), BY_SCOPE["shell_full"])
+        self.assertEqual(len(self.DANGEROUS_TOOLS), BY_SCOPE["dangerous"])
 
     def test_write_tools_are_named_in_the_table(self):
         for scope, expected in (("control", self.CONTROL_TOOLS),
@@ -213,7 +243,11 @@ class TestToolCounts(unittest.TestCase):
                                  self.STRATEGIES_WRITE_TOOLS),
                                 ("probes", self.PROBES_TOOLS),
                                 ("experiments",
-                                 self.EXPERIMENTS_TOOLS)):
+                                 self.EXPERIMENTS_TOOLS),
+                                ("shell_readonly",
+                                 self.SHELL_READONLY_TOOLS),
+                                ("shell_full", self.SHELL_FULL_TOOLS),
+                                ("dangerous", self.DANGEROUS_TOOLS)):
             names = sorted(spec.name for spec in registry.all_tools()
                            if spec.scope == scope)
             with self.subTest(scope=scope):
@@ -226,6 +260,14 @@ class TestToolCounts(unittest.TestCase):
     # чтобы следующий мутирующий инструмент не проехал сюда молча.
     READ_ONLY_UNDER_WRITE = {"strategy_compose", "strategy_validate"}
 
+    # Обратный случай (S12): инструмент объявлен мутирующим под
+    # `shell_readonly`, хотя под этим разрешением он только читает.
+    # Так честнее: тот же вызов с `shell_full` меняет устройство, и
+    # уехать клиенту с пометкой readOnlyHint он не должен.
+    MUTATING_UNDER_READONLY_SHELL = {"shell_exec", "shell_exec_async",
+                                     "shell_job_stop", "shell_confirm",
+                                     "service_control"}
+
     def test_mutating_tools_declare_it(self):
         # Инструмент, меняющий устройство под видом чтения, уехал бы
         # клиенту с пометкой readOnlyHint — и модель применила бы его
@@ -237,6 +279,26 @@ class TestToolCounts(unittest.TestCase):
                               perms.ANY_WRITE_SCOPE):
                 with self.subTest(tool=spec.name):
                     self.assertTrue(spec.mutating)
+
+    def test_shell_write_tools_declare_mutating(self):
+        # Инструмент, который под `shell_full` меняет устройство, обязан
+        # быть объявлен мутирующим — независимо от того, что под
+        # `shell_readonly` он только читает.
+        by_name = {spec.name: spec for spec in registry.all_tools()}
+        for name in (self.SHELL_FULL_TOOLS + self.DANGEROUS_TOOLS
+                     + sorted(self.MUTATING_UNDER_READONLY_SHELL)):
+            with self.subTest(tool=name):
+                self.assertIn(name, by_name)
+                self.assertTrue(by_name[name].mutating)
+
+    def test_shell_read_tools_are_not_mutating(self):
+        for name in ("file_read", "file_list", "package_list",
+                     "service_list", "shell_job_status",
+                     "shell_job_output"):
+            with self.subTest(tool=name):
+                spec = registry.get_tool(name)
+                self.assertIsNotNone(spec)
+                self.assertFalse(spec.mutating)
 
     def test_the_read_only_exceptions_really_are_read_only(self):
         # Обратная сторона списка исключений: запись, попавшая в него по

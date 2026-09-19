@@ -96,6 +96,16 @@ REQUIRES = {
     "self_edit_core": ("self_edit",),
 }
 
+# Разрешение → что оно открывает ЗАОДНО (S12). Обратная сторона
+# ``REQUIRES``: кому отдали произвольную команду от root, тому
+# безопасные команды уже отданы. Без этого ``shell_full`` без
+# ``shell_readonly`` выглядел бы включённым, а половина shell-
+# инструментов (чтение файлов, список пакетов, статус служб) оставалась
+# бы невидимой — и это читалось бы как поломка, а не как настройка.
+IMPLIES = {
+    "shell_full": ("shell_readonly",),
+}
+
 # Короткое описание для UI и для текста отказа.
 TITLES = {
     "control": "управление движками (старт/стоп/перезапуск, применение "
@@ -179,17 +189,33 @@ def normalize(perms=None) -> dict:
 
 
 def effective(perms=None) -> dict:
-    """Разрешения с учётом зависимостей.
+    """Разрешения с учётом зависимостей и того, что они открывают заодно.
 
     ``experiments`` без ``control``/``probes`` выключен, как бы ни
-    стоял его собственный флаг.
+    стоял его собственный флаг; ``shell_full``, наоборот, включает
+    ``shell_readonly`` — он его надмножество.
+
+    Порядок важен: сначала гасим невыполненные зависимости, потом
+    раздаём вложенные разрешения. Иначе снятое зависимостью
+    разрешение успело бы открыть своё вложенное.
     """
     granted = normalize(perms)
     out = dict(granted)
     for name, needed in REQUIRES.items():
         if out.get(name) and not all(granted.get(dep) for dep in needed):
             out[name] = False
+    for name, opened in IMPLIES.items():
+        if out.get(name):
+            for dep in opened:
+                out[dep] = True
     return out
+
+
+def implied_by(name: str, perms=None) -> list:
+    """Какие включённые разрешения открывают ``name`` сами по себе."""
+    granted = normalize(perms)
+    return [owner for owner, opened in IMPLIES.items()
+            if name in opened and granted.get(owner) and not granted.get(name)]
 
 
 def unmet(name: str, perms=None) -> list:
@@ -272,14 +298,23 @@ def describe(perms=None) -> list:
     active = effective(granted)
     out = []
     for name in PERMISSIONS:
-        out.append({
+        item = {
             "key": name,
             "title": TITLES.get(name, ""),
             "granted": granted[name],
             "effective": active[name],
             "requires": list(REQUIRES.get(name, ())),
             "missing": unmet(name, granted) if granted[name] else [],
-        })
+        }
+        opens = IMPLIES.get(name)
+        if opens:
+            item["opens"] = list(opens)
+        owners = implied_by(name, granted)
+        if owners:
+            # Галочка снята, а инструменты доступны — UI обязан это
+            # объяснить, иначе выглядит как ошибка интерфейса.
+            item["implied_by"] = owners
+        out.append(item)
     return out
 
 
