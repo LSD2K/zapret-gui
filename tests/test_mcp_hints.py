@@ -85,6 +85,51 @@ class TestLogRules(unittest.TestCase):
         self.assertEqual(ids(["INFO nfqws2 started"], HEALTHY), [])
 
 
+class TestRulesFromTheChecklist(unittest.TestCase):
+    """Правила, дописанные S11 по чеклисту §16 справочника.
+
+    Каждое — на эталонной строке, которую печатает движок: правило,
+    выведенное «по смыслу», не срабатывает ровно тогда, когда нужно.
+    """
+
+    def test_lua_and_binary_from_different_releases(self):
+        # §0.2 и §16 п.17: zapret2 1.0 сменил lua_compat_ver 5→6.
+        log = ["FATAL Incompatible NFQWS2_COMPAT_VER: need 6, got 5"]
+        hints = hints_for(log, HEALTHY)
+        self.assertIn("lua_compat_mismatch", [h["id"] for h in hints])
+        self.assertIn("updates_check",
+                      next(h["hint"] for h in hints
+                           if h["id"] == "lua_compat_mismatch"))
+
+    def test_reassembly_queue_overflow(self):
+        # §8.10 и §16 п.18: очередь реасма ограничена 64 пакетами, при
+        # переполнении l7payload сбрасывается в unknown.
+        hints = hints_for(["rawpacket_queue failed !"], HEALTHY)
+        self.assertIn("reasm_queue_overflow", [h["id"] for h in hints])
+        self.assertIn("tls_client_hello",
+                      next(h["hint"] for h in hints
+                           if h["id"] == "reasm_queue_overflow"))
+
+    def test_bad_lua_argument_points_at_lua_init_order(self):
+        # §12.1: init_vars зовёт tls_mod до загрузки zapret-antidpi.
+        log = ["lua: bad argument #2 to 'tls_mod' "
+               "(string expected, got nil)"]
+        hints = hints_for(log, HEALTHY)
+        self.assertIn("lua_bad_argument", [h["id"] for h in hints])
+        self.assertIn("--lua-init",
+                      next(h["hint"] for h in hints
+                           if h["id"] == "lua_bad_argument"))
+
+    def test_the_new_rules_stay_silent_on_a_clean_log(self):
+        quiet = ["INFO nfqws2 started", "INFO queue 300 bound",
+                 "INFO lua-init: 2 scripts loaded"]
+        got = ids(quiet, HEALTHY)
+        for rule_id in ("lua_compat_mismatch", "reasm_queue_overflow",
+                        "lua_bad_argument"):
+            with self.subTest(rule=rule_id):
+                self.assertNotIn(rule_id, got)
+
+
 class TestMetricRules(unittest.TestCase):
     """Измерения без единой строки лога — тоже повод для подсказки."""
 

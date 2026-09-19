@@ -1515,6 +1515,20 @@ def resolve_binary(cfg=None) -> str:
         return ""
 
 
+def lua_named_patterns() -> set:
+    """Имена, которые объявляет ``init_vars.lua``, а не реестр blob'ов.
+
+    ``blob=tls_rnd`` и ``blob=tls_youtube`` — это не файлы, а глобальные
+    переменные lua: их заводит ``init_vars.lua``, который
+    :meth:`NFQWSManager._build_lua_init_args` подмешивает сам, как
+    только стратегия на такое имя ссылается. Нужны тому, кто проверяет
+    стратегию ДО запуска (``core/strategy_lint.py``): без этого списка
+    каждая вторая каталожная стратегия получала бы ложную ошибку
+    «blob не объявлен».
+    """
+    return set(_INIT_VARS_NAMES)
+
+
 def _format_uptime(seconds: int) -> str:
     """Форматировать uptime."""
     if seconds <= 0:

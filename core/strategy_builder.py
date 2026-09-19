@@ -81,6 +81,208 @@ def autowrap_bare_trick(profile_args: list) -> list:
             "--filter-l7=%s" % l7] + profile_args
 
 
+# ── Декларативная сборка профиля (SKILL.md §15) ─────────────────────────────
+# Профиль строится ровно по схеме справочника: фильтр профиля →
+# внутрипрофильные фильтры (range/payload) → последовательность инстансов.
+# Порядок значим: `--payload`/`--out-range` действуют на СЛЕДУЮЩИЕ
+# `--lua-desync`, а не на предыдущие (§3.4), поэтому собирается он здесь
+# один раз, а не повторяется в UI, CLI и MCP тремя разными способами.
+_COMPOSE_PROTOCOLS = ("tcp", "udp")
+
+# Имя списка (hostlist/ipset) — как его принимают сами менеджеры.
+_COMPOSE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+# Имя lua-функции в `--lua-desync=<fn>`.
+_COMPOSE_FN_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
+_COMPOSE_PARAM_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
+
+
+def _compose_list_ref(value: str, what: str) -> str:
+    """Имя списка → ссылка, которую отрезолвит resolve_paths_in_args.
+
+    Принимаем короткое имя (``youtube``), имя с расширением
+    (``youtube.txt``) и готовый абсолютный путь. Всё остальное — отказ:
+    молча превращать «../../etc/passwd» в существующий файл со странным
+    именем (как это делает санитизация id) здесь нельзя.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if value.startswith("/"):
+        return value
+    name = value[:-4] if value.endswith(".txt") else value
+    if not _COMPOSE_NAME_RE.match(name):
+        raise ValueError(
+            "%s «%s»: допустимы латиница, цифры, «_» и «-» (или "
+            "абсолютный путь)" % (what, value))
+    return "lists/%s.txt" % name
+
+
+def _compose_param(key, value) -> str:
+    """Один аргумент lua-инстанса: ``:key`` либо ``:key=value``.
+
+    Значение — всегда строка (§7 справочника): ``True`` означает
+    «ключ без значения» (``:tcp_md5``), ``False`` — «не ставить вовсе».
+    Двоеточие внутри значения экранируется, пробельное значение
+    заворачивается в одинарные кавычки — ровно тот идиом, которым в
+    каталогах живёт inline-Lua (``code='desync.x = 1'``).
+    """
+    key = str(key or "").strip()
+    if not _COMPOSE_PARAM_RE.match(key):
+        raise ValueError(
+            "имя параметра «%s»: допустимы латиница, цифры и «_»" % key)
+    if value is True or value is None or value == "":
+        return ":%s" % key
+    if value is False:
+        return ""
+    if isinstance(value, float):
+        text = repr(value)
+    else:
+        text = str(value)
+    text = text.replace(":", r"\:")
+    if any(ch in text for ch in " \t\r\n"):
+        if "'" in text:
+            raise ValueError(
+                "значение «%s=%s» содержит и пробел, и апостроф — "
+                "собрать такой аргумент нельзя; пишите профиль строкой "
+                "в strategy_save" % (key, value))
+        if not (text.startswith('"') and text.endswith('"')):
+            text = "'%s'" % text
+    return ":%s=%s" % (key, text)
+
+
+def compose_profile_args(spec: dict) -> str:
+    """Собрать строку аргументов профиля из декларативного описания.
+
+    Чистая функция: никакого I/O, только строки. Формат ``spec``::
+
+        {"filter": {"proto": "tcp", "ports": "443", "l7": "tls",
+                     "hostlist": "youtube", "hostlist_exclude": "netrogat",
+                     "ipset": "my-ipset"},
+         "payload": "tls_client_hello",
+         "out_range": "-d10", "in_range": "-s5556",
+         "desync": [{"fn": "fake",
+                      "params": {"blob": "tls_google", "tcp_md5": true}}]}
+
+    Returns:
+        str: строка вида ``--filter-tcp=443 --filter-l7=tls …`` —
+        то, что кладётся в ``profile["args"]``.
+
+    Raises:
+        ValueError: с человеческим текстом о том, что именно не так.
+    """
+    spec = dict(spec or {})
+    flt = dict(spec.get("filter") or {})
+    args = []
+
+    proto = str(flt.get("proto") or "").strip().lower()
+    ports = str(flt.get("ports") or "").strip()
+    if proto and proto not in _COMPOSE_PROTOCOLS:
+        raise ValueError("filter.proto: ожидается tcp или udp, получено «%s»"
+                         % proto)
+    if ports and not proto:
+        raise ValueError(
+            "filter.ports задан без filter.proto: нельзя понять, "
+            "--filter-tcp это или --filter-udp")
+    if proto:
+        # Без портов фильтр протокола пишется как `*` (§3.3): пустое
+        # значение nfqws2 не примет.
+        args.append("--filter-%s=%s" % (proto, ports or "*"))
+
+    l7 = str(flt.get("l7") or "").strip()
+    if l7:
+        args.append("--filter-l7=%s" % l7)
+
+    for key, flag in (("hostlist", "--hostlist"),
+                      ("hostlist_exclude", "--hostlist-exclude"),
+                      ("ipset", "--ipset")):
+        ref = _compose_list_ref(flt.get(key), "filter.%s" % key)
+        if ref:
+            args.append("%s=%s" % (flag, ref))
+
+    # Внутрипрофильные фильтры — ПОСЛЕ фильтров профиля и ДО инстансов:
+    # они действуют на следующие --lua-desync (§3.4).
+    for key, flag in (("out_range", "--out-range"),
+                      ("in_range", "--in-range"),
+                      ("payload", "--payload")):
+        value = str(spec.get(key) or "").strip()
+        if value:
+            args.append("%s=%s" % (flag, value))
+
+    desync = spec.get("desync") or []
+    if not desync:
+        raise ValueError(
+            "в профиле нет ни одного desync-действия: движок будет "
+            "разбирать пакеты, но не менять их")
+    for item in desync:
+        item = dict(item or {})
+        fn = str(item.get("fn") or "").strip()
+        if not _COMPOSE_FN_RE.match(fn):
+            raise ValueError(
+                "desync.fn «%s»: имя lua-функции — латиница, цифры и "
+                "«_»; что есть на устройстве, покажет lua_functions_list"
+                % fn)
+        rendered = "--lua-desync=%s" % fn
+        for key, value in (item.get("params") or {}).items():
+            rendered += _compose_param(key, value)
+        args.append(rendered)
+
+    return " ".join(args)
+
+
+def compose_profiles(specs) -> list:
+    """Декларативные профили → список ``{id, name, args, enabled}``.
+
+    Тот же формат, который принимают ``save_user_strategy`` и
+    ``build_nfqws_args``: собранное этой функцией можно и запустить, и
+    сохранить, не перекладывая руками.
+
+    Явно перечисленные в ``spec["blobs"]`` имена дозаявляются
+    ``--blob=NAME:VALUE`` в НАЧАЛО первого профиля: декларации блобов
+    глобальны и читаются до первого ``--new`` (§2, инвариант 6).
+    Ссылки вида ``blob=NAME`` внутри инстансов дозаявляет сам
+    ``build_nfqws_args`` — здесь только то, что движок по ссылке не
+    найдёт (``pattern=``, ``seqovl_pattern=``, ``%NAME``).
+
+    Raises:
+        ValueError: неизвестное имя blob'а или кривой профиль.
+    """
+    from core.blob_registry import BUILTIN_BLOB_NAMES, get_blob_value
+
+    specs = list(specs or [])
+    if not specs:
+        raise ValueError("нужен хотя бы один профиль")
+
+    profiles = []
+    declarations = []
+    seen_blobs = set()
+    for index, spec in enumerate(specs):
+        spec = dict(spec or {})
+        for name in spec.get("blobs") or []:
+            name = str(name or "").strip()
+            if not name or name in BUILTIN_BLOB_NAMES or name in seen_blobs:
+                continue
+            seen_blobs.add(name)
+            value = get_blob_value(name)
+            if not value:
+                raise ValueError(
+                    "blob «%s» не известен реестру: объявить его нечем. "
+                    "Что есть — blobs_list(); свой добавляется blob_add()"
+                    % name)
+            declarations.append("--blob=%s:%s" % (name, value))
+        profiles.append({
+            "id": str(spec.get("id") or "p%d" % (index + 1)),
+            "name": str(spec.get("name") or "профиль %d" % (index + 1)),
+            "args": compose_profile_args(spec),
+            "enabled": True,
+        })
+
+    if declarations:
+        profiles[0]["args"] = ("%s %s" % (" ".join(declarations),
+                                          profiles[0]["args"])).strip()
+    return profiles
+
+
 class StrategyManager:
     """
     Загрузка, хранение и сборка стратегий.

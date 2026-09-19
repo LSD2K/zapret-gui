@@ -8,142 +8,135 @@
 
 ---
 
-## Состояние: после S10 (движок экспериментов)
+## Состояние: после S11 (сборка и валидация стратегий)
 
-**Дата:** 2026-09-18 · **Ветка/PR:** `claude/festive-heisenberg-8fltll`
+**Дата:** 2026-09-19 · **Ветка/PR:** `claude/relaxed-hopper-gr45pq`
 
 ### Сделано
 
-- `core/strategy_experiment.py` (1489) — **не в пакете MCP**: синглтон
-  `get_experiment_runner()`, класс `ExperimentRunner` с
-  `start/get_status/get_result/history/commit/rollback/stop`,
-  правила-подсказки `HINT_RULES` + `hints_for()`, лимиты `limits()`
-  из `mcp.experiment`, снимок на диске (`MARKER_NAME`,
-  `recover_after_restart()`).
-- `core/mcp/tools/experiments.py` (547) — семь `strategy_experiment_*`
-  под одним scope `experiments`.
-- `core/strategy_scanner.py` — вынесены **module-level**
-  `compose_score(success, success_rate, kbps, latency_ms)` и
-  `credit_success(success, baseline_open)`; `_deep_probe` теперь зовёт
-  их (поведение то же, включая UDP-ветку: там в формулу уходит
-  единичная «скорость», и score вырождается в прежние
-  `1000 / латентность`).
-- `core/probe_runner.py` — `fold(..., latency="mean"|"median")` и
-  `probe_target(..., latency=…)`; в записи появилось `latency_stat`.
-  Дефолт остался средним — на нём построены ответы S8.
-- `app.py` — `recover_after_restart()` в `_apply_autostart_on_boot`,
-  ДО `reapply_if_missing()` и автозапуска.
-- тесты: `test_mcp_experiment.py` (26) — полный цикл и возврат к
-  снимку, авто-откат по TTL, `commit`/`rollback`/`stop`, выбор не-best
-  варианта, отказ занятому движку и второму старту, снимок на диске +
-  `recover_after_restart`, dev-машина без бинарника, провал валидации не
-  доезжает до движка, медиана по повторам, отчёт в лимите ответа;
-  `test_mcp_hints.py` (18) — эталонные строки лога и наборы измерений,
-  полнота таблицы правил; дополнены `test_mcp_permissions.py` (+2) и
-  `test_mcp_tool_counts.py` (`experiments: 7` + список имён).
-  По `test_mcp_*` — 613 зелёных; весь `tests/` — 3488 passed, 1 skipped;
-  `make lint` чист.
+- `core/strategy_lint.py` (нов., ~390) — **не в пакете MCP**: чистые
+  функции без I/O. `lint(argv, known_functions=None, known_blobs=None)`
+  → список `{code, severity, message, section, where?, profile?}`,
+  `summary(findings)` → `{errors, warnings, codes, blocking}`,
+  `known_codes()`, `rule(code)`, `split_profiles(argv)`. Восемь правил
+  таблицей `RULES` — данные, не цепочка `if`.
+- `core/strategy_builder.py` — **module-level** `compose_profile_args
+  (spec)` (декларативный профиль → строка аргументов, порядок по §15
+  скила) и `compose_profiles(specs)` → `[{id, name, args, enabled}]` —
+  ровно тот формат, что принимают `save_user_strategy` и
+  `build_nfqws_args`. Явные `blobs` дозаявляются в НАЧАЛО первого
+  профиля.
+- `core/nfqws_manager.py` — `lua_named_patterns()`: публичная обёртка
+  над `_INIT_VARS_NAMES`. Без неё линтер объявлял бы ошибкой
+  `blob=tls_rnd` и ещё 14 имён, которые объявляет `init_vars.lua`, а не
+  реестр блобов.
+- `core/mcp/tools/compose.py` (нов., ~470) — `strategy_compose` и
+  `strategy_validate` под `strategies_write`, **оба `mutating=False`**.
+- `core/strategy_experiment.py` — `HINT_RULES` дополнены тремя
+  `log`-правилами из §16 скила: `lua_compat_mismatch`,
+  `reasm_queue_overflow`, `lua_bad_argument`. Код `hints_for` не
+  тронут.
+- тесты: `test_strategy_lint.py` (39) — каждое правило на минимальном
+  примере, «молчит там, где не должно», сторож по всем 730+ встроенным
+  стратегиям; `test_mcp_compose.py` (21) — порядок сборки, совпадение
+  argv с рукописной стратегией, профили уезжают в `strategy_save` как
+  есть, отказы на входе; `test_mcp_validate.py` (16) — три источника,
+  успех/ошибка разбора/ошибка lua/нет бинарника, подсказки привязаны к
+  выводу; дополнены `test_mcp_hints.py` (+4) и `test_mcp_tool_counts.py`
+  (`strategies_write: 8` + список исключений `READ_ONLY_UNDER_WRITE`).
+  По `test_mcp_*` — 655 зелёных; весь `tests/` — 3569 passed, 2 skipped;
+  `node --test tests/*.js` — 11 passed; `make lint` чист.
 
 ### Зафиксированные контракты
 
-**Запуск.** `start(variants, targets=None, probes=None, repeats=None,
-baseline=True, ttl_sec=None, keep_best=None, source=…)` →
-`{ok, run_id, variants, targets, ttl_sec, keep_best, async: True}` либо
-отказ с `busy`/`holder`. Вариант — `{label, args|strategy_id|profiles}`;
-метка пустая → `A`, `B`, `C`. Цели пустые → первый хост каждого сервиса
-из `core/targets.py`.
+**Формат профиля** (один и тот же у `strategy_compose` и
+`strategy_validate`):
+`{id?, name?, filter: {proto, ports, l7, hostlist, hostlist_exclude,
+ipset}, payload?, out_range?, in_range?, desync: [{fn, params}],
+blobs?}`. `params`: `true` — ключ без значения, `false` — не ставить,
+число — как есть. `hostlist`/`ipset` — **имя списка, а не путь**.
 
-**Отчёт.** `get_result(run_id="")` → `run_id`, `state`, `targets`,
-`baseline` (`per_target`, `open_without_bypass`), `variants[]`
-(`validation`, `started_nfqws`, `per_target`, `success_rate`, `score`,
-`delta_vs_baseline` = `fixed/broken/unchanged/net`, `nfqws_log`,
-`hints`), `ranking`, `best`, `warnings`, `committed`, `awaiting_commit`.
-Инструмент отдаёт варианты страницей (`_paging.page`, лучший первым).
+**Порядок сборки профиля** — по §15 скила nfqws2: фильтр профиля →
+`out_range`/`in_range`/`payload` → инстансы. Он значим и проверяется
+тестом дословно.
 
-**Состояния.** `idle | running | finished | failed | reverted`; сверх них
-булевы `committed`, `awaiting_commit`, `expired`. Отдельного состояния
-«committed» нет намеренно — оно не про ход прогона.
+**Коды линтера** (стабильные символы; переименование = поломка
+контракта): `bare_trick_no_filter`, `unknown_lua_function`,
+`blob_unknown`, `blob_file_missing`, `blob_declared_after_new`,
+`lua_init_order`, `l7_filter_without_ports`, `no_desync_action`.
+Уровни — `error` (argv заведомо не сработает) и `warning`
+(подозрительно, но бывает осознанно).
 
-**Правила-подсказки.** `HINT_RULES` — кортеж записей
-`{id, when: "log"|"metric", patterns|rule, hint, ref}`. `log` — ВСЕ
-подстроки в ОДНОЙ строке лога (регистр не важен); `metric` — предикат
-из `_METRIC_RULES`. S11 дополняет список, не код. `ref` обязателен.
+**Вердикт.** `valid: bool` в ответе обоих инструментов. При
+`lint.blocking` **или** провале `dry_run` — `ok: false` (то есть
+`isError`), но `strategy_args`, `command` и `profiles` остаются в
+ответе. Предупреждение ответ не роняет. Отсутствие бинарника
+(`validation.available: false`) — не провал, а «не проверяли».
 
-**Score и baseline — общие со сканером.**
-`strategy_scanner.compose_score()` и `credit_success()`. Победитель при
-измеренном baseline требует непустого `fixed`: score у варианта на уже
-открытой цели ненулевой, и без этого условия прогон по открытому домену
-выдавал бы «находку».
-
-**Дедмен.** TTL от старта прогона, покрывает и ожидание `commit`.
-Отдельного потока-дедмена нет: ждёт рабочий поток, который держит
-мьютекс. Снимок дублируется на диск (`.mcp-experiment.json` рядом с
-`settings.json`), `recover_after_restart()` возвращает состояние при
-старте GUI.
+**Окружение линтера приходит аргументами.** `None` = правило не
+проверяется; что удалось сверить, говорит `lint.checked`.
 
 ### Следующий шаг
 
-**S11** — [`11-compose-validate.md`](11-compose-validate.md):
-`strategy_compose`/`strategy_validate`, линтер и подсказки.
-Подключаться к `HINT_RULES` (дополнять список, не трогая `hints_for`) и
-к `_validate()` движка: сейчас это `NFQWSManager.dry_run`, полноценная
-валидация — ваша.
+**S12** — [`12-shell.md`](12-shell.md): shell, файлы, пакеты, службы,
+`system_reboot`. Ни от чего из S3–S11 не зависит.
 
-**S12** — [`12-shell.md`](12-shell.md) ни от чего из этого не зависит.
+Цикл §8.4 плана (**собрал → проверил → сохранил → применил → измерил →
+откатил**) после этой сессии **замкнут полностью**: `strategy_compose`
+→ `strategy_validate` → `strategy_save` → `strategy_apply` →
+`strategy_experiment_*` → `mcp_undo_last`.
 
 ### Что оказалось не так, как написано в задании
 
-1. **`NfqwsSession.restore()` не сверяет argv.** Он идемпотентен по
-   СОСТОЯНИЮ: движок запущен и снимок говорит «запущен» — шага нет.
-   После эксперимента это оставляло бы временную стратегию на роутере
-   (поймано тестом `test_keep_best_reverts_without_commit`). Решение —
-   `_stop_engine()` перед `restore()`, тот же двухуровневый возврат, что
-   у `_ensure_cleanup` сканера. Менять `restore()` не стали: его
-   поведение — контракт S9, и от него зависит сканер.
-2. **Отдельного потока-дедмена нет.** Захват мьютекса потоко-привязан, и
-   восстановление из второго потока означало бы двух восстановителей
-   наперегонки — ровно то, ради чего писался S9. Вместо этого рабочий
-   поток сам ждёт `commit` до дедлайна, а `commit`/`rollback` из потока
-   HTTP кладут решение в `_decision` и ждут его исполнения
-   (`DECISION_WAIT_SEC = 45`).
-3. **`commit` без `keep_best` — отказ, а не применение.** «Оставить
-   вариант применённым» имеет смысл, только пока он применён; после
-   штатного возврата подтверждать нечего, и ответ прямо называет два
-   пути (перезапустить с `keep_best=true` либо `strategy_save` +
-   `strategy_apply`).
-4. **`probes=["quic"]` не поддержан.** Движок меряет одной цепочкой
-   `core/testers/probe.py` (DNS → TCP → TLS → HTTP); QUIC уезжает в
-   `probes_unsupported` с причиной. Заводить второй измеритель ради
-   одного слова из задания — это отдельная сессия.
-5. **Маленький TTL для теста задаётся конфигом, а не подменой времени.**
-   `_bounded(None, default, …)` возвращает дефолт как есть, поэтому
-   `mcp.experiment.default_ttl_sec = 2` даёт двухсекундный дедмен без
-   единой заплатки на `time`.
+1. **«Голый приём без фильтра» нельзя сделать ошибкой — и он не
+   аномалия.** Правило срабатывает на 608 из 732 встроенных стратегий:
+   каталожные приёмы (`basic/`/`advanced/`/`direct/`) НАМЕРЕННО идут
+   без фильтра, его подставляет сканер (`_wrap_trick_args`). Поэтому
+   уровень — `warning`, а в тексте прямо сказано, что для каталожных
+   приёмов это норма и переписывать их не надо (есть тест на эту
+   фразу): иначе модель «чинила» бы работающий каталог.
+2. **`--filter-l7` без портов ругается не на всякий L7.** §15.5
+   (`--filter-l7=wireguard,stun,discord`) — документированный шаблон
+   вообще без портов. Правило фильтрует только `tls`/`http`/`quic` —
+   те, что в наших шаблонах всегда идут с портом.
+3. **Два правила пришлось чинить по факту прогона по каталогу.**
+   `blob=0x0000…` — это инлайновый hex, а не имя (53 ложные ошибки), а
+   `tls_rnd`/`tls_youtube`/ещё 13 имён объявляет `init_vars.lua`.
+   Сторож `test_builtin_strategies_have_no_lint_errors` оставлен
+   специально — следующее правило проверяется им же.
+4. **`strategy_compose`/`strategy_validate` — первые НЕ мутирующие
+   инструменты под разрешением на запись.** Сторож
+   `test_mutating_tools_declare_it` считал, что таких не бывает;
+   исключения теперь поимённые (`READ_ONLY_UNDER_WRITE`) и сами
+   проверяются на `mutating=False`.
+5. **Подсказки считаются только по НЕУДАЧНОЙ валидации.** У правила
+   `blob_missing` из S10 подстрока одна и короткая («blob»), и на
+   успешном выводе оно советовало бы чинить исправное.
+6. **`strategy_validate` не принимает два источника сразу.** Ответ
+   «проверил одно, рассказал про другое» хуже отказа.
 
 ### Грабли
 
-- **`_paging.page()` меряет и `extra`.** Сводка отчёта (baseline,
-  ranking, warnings) считается в бюджет вместе с окном вариантов, и
-  окно ужимается под неё. Это то, что нужно, но помнить стоит: крупная
-  сводка съедает варианты, а не наоборот.
-- **`nfqws_control.restart()` сам переставляет правила firewall.**
-  Отдельный `firewall_apply` между вариантами не нужен и вреден: он
-  снял бы и поставил правила второй раз за секунду.
-- **Между вариантами движок гасится.** Иначе хвост лога следующего
-  варианта начинается с чужих строк, а `conntrack` помнит прошлый
-  прогон.
-- **Синглтон движка общий на процесс.** Тест обязан вернуть его чистым
-  (`strategy_experiment._runner = None`), иначе прогон протекает в
-  соседний тест.
-- **`stabilize_sec` — реальный `sleep`.** В тестах ставить 0, иначе 12
-  вариантов превращаются в 36 секунд ожидания на пустом месте.
-- **`bytes_read / latency_ms` — не пропускная способность.** Латентность
-  пробы включает DNS и рукопожатие; число годится только для сравнения
-  вариантов между собой одной меркой. В отчёте оно так и названо
-  (`kbps` рядом с `bytes_read` и `attempts`).
-- **Из S9 осталось в силе:** CLI поднимает движок мимо `nfqws_control` и
-  мьютекс не берёт; `scanner.apply_strategy(index)` тоже. Эксперимент от
-  них защищён только межпроцессным lock-файлом.
+- **Линтовать надо СОБРАННЫЙ argv, а не строку из редактора.**
+  `build_nfqws_args` сам обёртывает голый приём фильтром
+  (`autowrap_bare_trick`), дозаявляет блобы и резолвит пути; линтер на
+  сырой строке ругался бы на то, что сборщик чинит сам.
+- **`--blob=NAME:…` содержит подстроку `blob=`.** Регулярка ссылок
+  без оглядки назад (`(?<!-)blob=`) читала бы каждое объявление как
+  ссылку на само себя.
+- **`pattern=`/`seqovl_pattern=` — НЕ blob'ы.** Там бывает переменная
+  lua, заведённая соседним `luaexec` (§15.7). Проверяем только `blob=`,
+  как и `blob_registry.referenced_blob_names`.
+- **Значение параметра с пробелом заворачивается в одинарные
+  кавычки.** `tokenize_args` кавычки не вырезает, и для inline-Lua это
+  обязательно (`code='desync.x = 1'` — строковый литерал). Значение,
+  где есть и пробел, и апостроф, — честный отказ.
+- **`--intercept=0` не обязан завершаться сразу.** Стратегия, чей
+  `lua-init` заводит периодический таймер, не выйдет никогда; спасает
+  `dry_run(..., timeout=8.0)`.
+- **Из S9/S10 осталось в силе:** CLI поднимает движок мимо
+  `nfqws_control` и мьютекс не берёт; `restore()` не сверяет argv;
+  синглтон движка экспериментов общий на процесс.
 
 ## Шаблон записи (перезаписывать, не дописывать)
 
