@@ -89,6 +89,11 @@ KIND_FIREWALL = "firewall"
 KIND_FILE = "file"
 KIND_PACKAGE = "package"
 KIND_SERVICE = "service"
+# S13 — самоправка кода GUI. ``before``/``after`` здесь короткие
+# (список файлов и id снимка): сами файлы лежат в каталоге снимка
+# ``code-snapshots/<id>/``, и класть их ещё и в mcp-undo.json значило
+# бы хранить исходники дважды. Откат этого вида равен ``code_rollback``.
+KIND_CODE = "code"
 
 # Ротация журнала: сколько записей хранить, если mcp.audit.keep не
 # прочитался или задан бессмысленно.

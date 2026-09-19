@@ -293,7 +293,19 @@ class GuiUpdater:
             "description": latest.get("description"),
             "published_at": latest.get("published_at"),
             "error": latest.get("error"),
+            # Локальные правки кода на устройстве (самоправка из MCP)
+            # обновление затирает без следа — предупреждаем ДО него.
+            "local_code_changes": self._local_code_changes(),
         }
+
+    @staticmethod
+    def _local_code_changes() -> dict:
+        """Правки, сделанные на устройстве через MCP (S13)."""
+        try:
+            from core.code_editor import local_changes_warning
+            return local_changes_warning()
+        except Exception:       # noqa: BLE001 — сравнение версий важнее
+            return {"count": 0, "files": []}
 
     def update(self, tag: str = "", branch: str = "",
                transport: str = "") -> dict:

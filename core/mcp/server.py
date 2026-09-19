@@ -265,6 +265,20 @@ def _instructions(granted, tools_count) -> str:
             "guard={revert_cmd, ttl_sec}; confirm the run_id afterwards "
             "or the revert fires by itself. / Отказ с confirm_token — "
             "это второй шаг, а не провал.")
+    if any(name.startswith("self_edit") for name in granted):
+        # Разрыв соединения на code_apply — норма, а не сбой. Без этой
+        # врезки модель читает ошибку транспорта как «правка не
+        # прошла», пробует снова и получает отказ «предыдущая не
+        # подтверждена» — при том что сторож уже отсчитывает TTL.
+        lines.append(
+            "Self-edit: code_patch/code_write only STAGE changes, "
+            "nothing touches disk until code_apply. code_apply RESTARTS "
+            "the GUI and THE CONNECTION DROPS — that is expected: wait "
+            "5-10 seconds, call system_status, then code_commit. "
+            "Without code_commit an external watchdog restores the "
+            "previous files. / Разрыв соединения после code_apply — "
+            "норма: подождите, проверьте system_status и подтвердите "
+            "code_commit.")
     lines += [
         "",
         # Без справочника модель сочиняет флаги: неизвестную опцию nfqws2
