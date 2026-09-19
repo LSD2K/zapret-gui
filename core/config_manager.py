@@ -700,6 +700,16 @@ class ConfigManager:
             log.error(f"Ошибка импорта конфигурации: {e}", source="config")
             return False
 
+    def strip_masked(self, data: dict) -> None:
+        """Убрать маску "***" из входящих данных (in-place).
+
+        Та же операция, что при импорте, но для частичного обновления
+        (``PUT /api/config``): маска в теле — это значение, которое GET
+        скрыл, и записывать её дословно нельзя.
+        """
+        with self._lock:
+            self._strip_masked(data, self._config)
+
     @staticmethod
     def _strip_masked(override: dict, current) -> None:
         """Убрать маску "***" из импортируемых данных (in-place).

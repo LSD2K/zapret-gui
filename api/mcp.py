@@ -252,7 +252,9 @@ def register(app):
 
         Без токена — иначе UI не покажет, что MCP выключен, пока токен
         не заведён. Зато только с самого роутера: снаружи это разведка
-        (видно, какие разрешения открыты).
+        (видно, какие разрешения открыты). Страница MCP (S15) ходит не
+        сюда, а в ``/api/mcp/ui/state``: она открыта из браузера на
+        LAN-адресе и под общей авторизацией GUI.
         """
         response.content_type = _JSON_CT
         remote = request.environ.get("REMOTE_ADDR", "")
@@ -261,60 +263,69 @@ def register(app):
             return _body({"ok": False,
                           "error": "/api/mcp/info доступен только с самого "
                                    "роутера"})
+        return _body(info_payload())
 
-        cfg = auth.settings()
-        perms = auth.permissions()
-        return _body({
-            "ok": True,
-            "enabled": bool(cfg.get("enabled")),
-            "active": auth.is_enabled(),
-            # Сам токен не отдаём никогда — только факт, что он задан.
-            "token_set": bool(cfg.get("token")),
-            "allow_gui_auth": bool(cfg.get("allow_gui_auth")),
-            "bind": cfg.get("bind", "inherit"),
-            "transports": cfg.get("transports", {}),
-            "permissions": perms,
-            # Разрешение может стоять, но не действовать: experiments без
-            # control/probes выключен. UI обязан показывать именно это,
-            # иначе пользователь видит включённый флаг и выключенные
-            # инструменты (модель разрешений — core/mcp/permissions.py).
-            "permissions_effective": permissions.effective(perms),
-            "permissions_info": permissions.describe(perms),
-            "limits": cfg.get("limits", {}),
-            "protocol_version": server.PROTOCOL_VERSION,
-            "supported_protocol_versions":
-                list(server.SUPPORTED_PROTOCOL_VERSIONS),
-            "gui_version": _gui_version(),
-            "tools_total": len(server.all_tools()),
-            "tools_available": len(server.available_tools(perms)),
-            "tools_by_scope": registry.scope_counts(perms),
-            # Справочники и сценарии разрешений не требуют: их число
-            # показывает UI, и по нему видно, что клиент подключился к
-            # полноценному серверу, а не к пустой заглушке.
-            # Журнал и снимки: страница MCP показывает, ведётся ли
-            # журнал и есть ли что откатывать (`mcp_undo_last`).
-            "audit": {
-                "enabled": audit.is_enabled(),
-                "keep": audit.keep(),
-                "path": audit.journal_path(),
-                "undoable": len(audit.snapshots()),
-            },
-            "resources": len(resources.list_resources()),
-            "prompts": len(prompts.list_prompts()),
-            "endpoint": "/api/mcp",
-            # Legacy-SSE: включён ли и сколько потоков открыто прямо
-            # сейчас. Мёртвая сессия на роутере со 128 МБ — это утечка,
-            # и число на странице MCP делает её видимой.
-            "sse": {
-                "enabled": mcp_session.sse_enabled(),
-                "endpoint": "/api/mcp/sse",
-                "messages": MESSAGES_PATH,
-                "sessions": mcp_session.count(),
-                "max_sessions": mcp_session.max_sessions(),
-                "keepalive_sec": mcp_session.KEEPALIVE_SEC,
-                "idle_timeout_sec": mcp_session.IDLE_TIMEOUT_SEC,
-            },
-        })
+
+def info_payload() -> dict:
+    """Сводка о сервере: то же тело, что отдаёт ``/api/mcp/info``.
+
+    Вынесено из обработчика, потому что ровно эти поля нужны странице
+    MCP, а собирать их в JS из нескольких вызовов нельзя: на слабом
+    роутере страница будет мигать (задание S15, «Грабли»).
+    """
+    cfg = auth.settings()
+    perms = auth.permissions()
+    return {
+        "ok": True,
+        "enabled": bool(cfg.get("enabled")),
+        "active": auth.is_enabled(),
+        # Сам токен не отдаём никогда — только факт, что он задан.
+        "token_set": bool(cfg.get("token")),
+        "allow_gui_auth": bool(cfg.get("allow_gui_auth")),
+        "bind": cfg.get("bind", "inherit"),
+        "transports": cfg.get("transports", {}),
+        "permissions": perms,
+        # Разрешение может стоять, но не действовать: experiments без
+        # control/probes выключен. UI обязан показывать именно это,
+        # иначе пользователь видит включённый флаг и выключенные
+        # инструменты (модель разрешений — core/mcp/permissions.py).
+        "permissions_effective": permissions.effective(perms),
+        "permissions_info": permissions.describe(perms),
+        "limits": cfg.get("limits", {}),
+        "protocol_version": server.PROTOCOL_VERSION,
+        "supported_protocol_versions":
+            list(server.SUPPORTED_PROTOCOL_VERSIONS),
+        "gui_version": _gui_version(),
+        "tools_total": len(server.all_tools()),
+        "tools_available": len(server.available_tools(perms)),
+        "tools_by_scope": registry.scope_counts(perms),
+        # Справочники и сценарии разрешений не требуют: их число
+        # показывает UI, и по нему видно, что клиент подключился к
+        # полноценному серверу, а не к пустой заглушке.
+        # Журнал и снимки: страница MCP показывает, ведётся ли
+        # журнал и есть ли что откатывать (`mcp_undo_last`).
+        "audit": {
+            "enabled": audit.is_enabled(),
+            "keep": audit.keep(),
+            "path": audit.journal_path(),
+            "undoable": len(audit.snapshots()),
+        },
+        "resources": len(resources.list_resources()),
+        "prompts": len(prompts.list_prompts()),
+        "endpoint": "/api/mcp",
+        # Legacy-SSE: включён ли и сколько потоков открыто прямо
+        # сейчас. Мёртвая сессия на роутере со 128 МБ — это утечка,
+        # и число на странице MCP делает её видимой.
+        "sse": {
+            "enabled": mcp_session.sse_enabled(),
+            "endpoint": "/api/mcp/sse",
+            "messages": MESSAGES_PATH,
+            "sessions": mcp_session.count(),
+            "max_sessions": mcp_session.max_sessions(),
+            "keepalive_sec": mcp_session.KEEPALIVE_SEC,
+            "idle_timeout_sec": mcp_session.IDLE_TIMEOUT_SEC,
+        },
+    }
 
 
 # ─────────────────────── legacy-SSE: помощники ──────────────────────

@@ -332,10 +332,6 @@ def shell_confirm(args: dict) -> dict:
                           % denial.get("hint", ""))
         return denial
 
-    action = record.get("action")
-    if callable(action):
-        result = action(record)
-    else:
-        result = shell.run_pending(record)
+    result = shell.run_confirmed(record)
     _journal(result)
     return _decorate(result)

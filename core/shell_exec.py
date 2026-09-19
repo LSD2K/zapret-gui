@@ -1226,6 +1226,50 @@ def take_confirm(token: str):
     return record, None
 
 
+def list_confirms() -> list:
+    """Ожидающие подтверждения, старые первыми — без самих команд-данных.
+
+    Нужно странице MCP (S15): человек видит, что модель просит
+    подтвердить, и решает сам, а не ждёт, пока модель повторит вызов с
+    токеном. Отдаём то же, что видела бы модель в отказе, плюс
+    остаток жизни токена.
+    """
+    now = time.time()
+    with _confirm_lock:
+        _expire_confirms()
+        records = sorted(_CONFIRMS.values(), key=lambda r: r["created_at"])
+        return [{
+            "token": r["token"],
+            "kind": r["kind"],
+            "summary": r["summary"],
+            "scope": r["scope"],
+            "created_at": r["created_at"],
+            "expires_at": r["expires_at"],
+            "expires_in_sec": max(0, int(r["expires_at"] - now)),
+        } for r in records]
+
+
+def drop_confirm(token: str) -> bool:
+    """Отклонить ожидающее подтверждение: ``True``, если оно было."""
+    token = str(token or "").strip()
+    with _confirm_lock:
+        _expire_confirms()
+        return _CONFIRMS.pop(token, None) is not None
+
+
+def run_confirmed(record: dict) -> dict:
+    """Выполнить подтверждённую запись: своё действие или команду.
+
+    Одна точка на обе двери — инструмент ``shell_confirm`` и кнопку
+    «Подтвердить» на странице MCP. Разрешение проверяет вызывающий:
+    токен сам по себе прав не даёт.
+    """
+    action = (record or {}).get("action")
+    if callable(action):
+        return action(record)
+    return run_pending(record)
+
+
 def _expire_confirms():
     now = time.time()
     for token, record in list(_CONFIRMS.items()):
@@ -1237,6 +1281,18 @@ def reset_confirms():
     """Забыть все токены (нужно тестам)."""
     with _confirm_lock:
         _CONFIRMS.clear()
+
+
+def stop_all_jobs() -> list:
+    """Прибить все живые фоновые задачи; вернуть их состояние.
+
+    Кнопка «Запретить shell немедленно» (S15): снять разрешения мало —
+    уже запущенная асинхронная команда продолжает работать, и отбирать
+    доступ, оставив её в живых, значит обещать то, чего не сделано.
+    """
+    with _jobs_lock:
+        alive = [j["job_id"] for j in _JOBS.values() if not j["done"]]
+    return [job_stop(job_id) for job_id in alive]
 
 
 # ───────────────────────── дедмен-свитч ─────────────────────────────

@@ -27,6 +27,11 @@ def register(app):
         # Скрываем пароль в выводе
         if "gui" in data and data["gui"].get("auth_password"):
             data["gui"]["auth_password"] = "***"
+        # И MCP-токен: он даёт клиенту всё, что открыто разрешениями
+        # MCP. Показать его можно ровно в одном месте — по явному
+        # клику на странице MCP (GET /api/mcp/ui/token).
+        if "mcp" in data and data["mcp"].get("token"):
+            data["mcp"]["token"] = "***"
 
         return {"ok": True, "config": data}
 
@@ -49,6 +54,13 @@ def register(app):
             return {"ok": False, "error": "Ожидается JSON-объект"}
 
         cfg = get_config_manager()
+
+        # Маска "***" в теле — это значение, которое мы же и скрыли в
+        # GET (пароль GUI, MCP-токен). Записать её дословно значит
+        # обнулить секрет: пароль станет "***" (лок-аут), токен
+        # перестанет подходить. Возвращаем на её место текущее
+        # значение — тем же способом, что и импорт конфига.
+        cfg.strip_masked(body)
 
         # Обновляем каждую переданную секцию
         updated = []
@@ -145,6 +157,8 @@ def register(app):
         data = cfg.get_all()
         if "gui" in data and data["gui"].get("auth_password"):
             data["gui"]["auth_password"] = "***"
+        if "mcp" in data and data["mcp"].get("token"):
+            data["mcp"]["token"] = "***"
         # Маскируем приватные ключи AWG-конфигов
         for section_key in ("awg", "usque", "tgproxy"):
             sec = data.get(section_key, {})
