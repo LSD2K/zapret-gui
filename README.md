@@ -780,9 +780,23 @@ zapret-gui tgproxy {status|start|stop}  # Telegram Tunnel
 zapret-gui monitor                      # трафик по туннелям (RX/TX и скорости)
 zapret-gui updates                      # проверить обновления всех движков
 zapret-gui dns-routing {list|apply}     # правила «домен → свой DNS»
+zapret-gui mcp {status|tools|call|token|audit|code}   # MCP-сервер
+zapret-gui mcp --stdio                  # MCP-клиент через ssh (stdio-мост)
 ```
 
 Из клона репозитория — напрямую: `python3 app.py status`.
+
+`zapret-gui mcp status` показывает, включён ли MCP-сервер, по какому
+адресу он доступен и что разрешено модели; `mcp tools` — что она видит
+при текущих разрешениях, `mcp call <tool> '<json>'` — вызвать
+инструмент руками. **`zapret-gui mcp token show` печатает токен прямо
+в терминал** — иначе его не скопировать по SSH, но учтите: он
+останется в истории shell и в буфере терминала. `mcp token rotate`
+выдаёт новый токен и **обрывает всех подключённых клиентов**.
+
+`zapret-gui mcp --stdio` поднимает мост «строка ↔ JSON-RPC»: клиент на
+ноутбуке ходит в роутер через `ssh router zapret-gui mcp --stdio`, без
+открытого наружу порта и без токена — канал даёт ssh.
 
 ---
 

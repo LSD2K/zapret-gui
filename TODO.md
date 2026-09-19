@@ -149,10 +149,20 @@
       `self_edit_core`, и список этот в коде, а не только в настройках.
       `code_export_patch` выгружает локальные правки одним диффом, а
       `updates_check` предупреждает, что обновление GUI их затрёт.
-      Следующий шаг — **S14**
-      ([`docs/mcp/14-transports-cli.md`](docs/mcp/14-transports-cli.md)):
-      legacy-SSE, stdio-мост и `zapret-gui mcp …`; затем **S15** —
-      страница MCP в веб-интерфейсе.
+      **Сделано: S14** — совместимость с живыми клиентами: legacy-SSE
+      (`GET /api/mcp/sse` + `POST /api/mcp/messages` под флагом
+      `mcp.transports.sse`, сессии и их уборка в `core/mcp/session.py`,
+      разрыв клиента закрывает сессию, потолок `limits.max_sessions`),
+      настоящая рассылка `notifications/tools/list_changed` при смене
+      разрешений (опросом на круге keep-alive, а не крючком в трёх
+      местах записи), stdio-мост `core/mcp/stdio.py` — «клиент пришёл по
+      ssh» (`ssh router zapret-gui mcp --stdio`), локально или прокси в
+      чужую точку, и подкоманда `zapret-gui mcp
+      status|tools|call|token|audit|code` для отладки из консоли.
+      Следующий шаг — **S15**
+      ([`docs/mcp/15-ui.md`](docs/mcp/15-ui.md)): страница MCP в
+      веб-интерфейсе; затем **S16** — README (раздела про MCP там нет
+      вовсе), скил и приёмка на железе.
       Идея подсмотрена у [b4](https://docs.b4core.app/ru/docs/settings/mcp/).
 
 ## Полевое тестирование (приоритет)
