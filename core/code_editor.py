@@ -1040,6 +1040,34 @@ def last_open_snapshot():
     return None
 
 
+def pending_commit() -> dict:
+    """Применённая правка, которая ждёт ``code_commit``, и её дедлайн.
+
+    Считает то же, что ``recover_after_restart``: дедмен сторожа
+    отмеряется от момента применения и складывается из ожидания
+    перезапуска и ``commit_ttl_sec``. Держать эту арифметику в двух
+    местах нельзя — индикатор «осталось N с» на странице MCP разойдётся
+    с моментом, когда файлы действительно вернутся.
+    """
+    manifest = last_open_snapshot()
+    if not manifest:
+        return {}
+    conf = limits()
+    started = float(manifest.get("applied_at")
+                    or manifest.get("created_ts") or 0)
+    deadline = (started + conf["commit_ttl_sec"]
+                + conf["restart_timeout_sec"]) if started else 0.0
+    return {
+        "snapshot_id": manifest.get("id", ""),
+        "state": manifest.get("state", ""),
+        "reason": manifest.get("reason", ""),
+        "files": [f.get("path") for f in (manifest.get("files") or [])],
+        "commit_ttl_sec": conf["commit_ttl_sec"],
+        "deadline": round(deadline, 3),
+        "left_sec": max(0, int(deadline - time.time())) if deadline else 0,
+    }
+
+
 def create_snapshot(rels, reason: str = "", tool: str = "") -> dict:
     """Скопировать текущие версии файлов и записать манифест.
 

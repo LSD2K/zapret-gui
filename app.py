@@ -626,7 +626,16 @@ def create_app(config_dir: str = None) -> Bottle:
         return origin in _allowed_origins()
 
     def _is_mcp_path(path: str) -> bool:
-        """Путь ведёт в MCP-точку (включая /api/v1/ alias)."""
+        """Путь ведёт в MCP-точку (включая /api/v1/ alias).
+
+        Поддерево ``/api/mcp/ui/`` — исключение: это страница MCP, то
+        есть панель, где выдают токен и раздают разрешения. Пустить
+        туда по Bearer-токену значило бы отдать модели право расширить
+        себе права; туда ходят только через общую авторизацию GUI.
+        """
+        if path.startswith("/api/mcp/ui") or path.startswith(
+                "/api/v1/mcp/ui"):
+            return False
         return (path == "/api/mcp" or path.startswith("/api/mcp/")
                 or path == "/api/v1/mcp" or path.startswith("/api/v1/mcp/"))
 

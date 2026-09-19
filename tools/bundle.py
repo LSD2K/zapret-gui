@@ -105,6 +105,7 @@ JS_FILES = [
     "js/pages/update_checker.js",
     "js/pages/lists.js",
     "js/pages/routing_unified.js",
+    "js/pages/mcp.js",
     "js/pages/settings.js",
     # app.js всегда последним
     "js/app.js",

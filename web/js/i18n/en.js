@@ -22,5 +22,27 @@ const i18n_en = {
     "common.delete": "Delete",
     "common.confirm_delete": "Are you sure?",
     "page.not_found_title": "404",
-    "page.not_found_message": "Page not found"
+    "page.not_found_message": "Page not found",
+
+    // ─── MCP page (S15). Warning texts live here, not in the markup.
+    "mcp.warn.token": "The token grants everything the permissions below open — up to root commands and editing the GUI itself. It is equal to router access: keep it like a password and never commit it.",
+    "mcp.warn.http": "The GUI runs over plain HTTP and has no TLS of its own: the token travels in cleartext in EVERY request and is visible to anyone listening on the network. Safer options: keep MCP on loopback (bind = local) and use an ssh tunnel or the stdio bridge, or put a TLS reverse proxy in front of the GUI.",
+    "mcp.warn.loopback": "The GUI listens on loopback only (127.0.0.1) — MCP is reachable from the router itself: over an ssh tunnel or through the stdio bridge.",
+    "mcp.warn.rotate": "The old token stops working immediately: connected clients will drop and have to be reconfigured.",
+    "mcp.warn.restart": "The GUI is restarting, waiting… Losing the connection here is expected: if the GUI does not come back or the edit is not confirmed, the guard restores the previous files by itself.",
+    "mcp.warn.shell": "Full router access as root. The model can run any command, rewrite any file, install and remove packages, stop services. There is no confirmation that softens this: enable it only knowing what you risk.",
+    "mcp.warn.self_edit": "The model can rewrite the GUI itself on the device. If a restart fails the guard restores the previous files automatically, but a bad edit stays live until the dead-man expires.",
+    "mcp.warn.panic": "Both shell permissions will be switched off, running background commands killed, pending confirmations revoked.",
+
+    "mcp.risk.control": "Can stop and start DPI bypass — clients lose their connection meanwhile.",
+    "mcp.risk.strategies_write": "Can edit and delete your strategies, hostlists, ipsets and lua scripts.",
+    "mcp.risk.config_write": "Can change settings inside allowed subtrees. Paths, the GUI port and desync marks are never writable.",
+    "mcp.risk.probes": "Sends traffic from the router: probes, blockcheck, scanner. Your ISP can see it.",
+    "mcp.risk.experiments": "Applies strategies one by one and measures the result. Bypass keeps switching during a run; auto-revert on a timer.",
+    "mcp.risk.tunnels_write": "Can edit tunnel configs and bring them up — traffic will go through the server it picks.",
+    "mcp.risk.dangerous": "Installs binaries, changes autostart and rules, can reboot the router.",
+    "mcp.risk.shell_readonly": "Safe command list and file reads only. Files may contain secrets.",
+    "mcp.risk.shell_full": "Arbitrary command as root, file writes, packages and services. This is full router access.",
+    "mcp.risk.self_edit": "Reads and edits GUI modules on the device and restarts it under the guard.",
+    "mcp.risk.self_edit_core": "Additionally the protected core: auth, permissions, guard, config. The model can lift its own limits."
 };

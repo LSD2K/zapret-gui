@@ -49,6 +49,7 @@ const App = (() => {
         'updates':         UpdateCheckerPage,
         lists:       ListsPage,
         routing:     RoutingUnifiedPage,
+        mcp:         McpPage,
         settings:    SettingsPage,
     };
 
