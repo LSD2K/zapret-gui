@@ -609,6 +609,226 @@ _KNOWN_NFQWS_PID_FILES = (
     "/var/run/zapret-nfqws.pid",
 )
 
+# Сторонние СБОРКИ zapret/nfqws — те, что делят с нами движок и очередь
+# NFQUEUE (в отличие от _KNOWN_TOOL_MARKERS ниже: те спорят за маршруты,
+# dnsmasq и ipset). Опознаём по файлам, которых у нас не бывает НИКОГДА.
+#
+# Зачем отдельная таблица: «PID 1234 nfqws2 …» без имени владельца
+# ничего человеку не говорит, а спрашивают ровно об этом — «удалил
+# сторонний установщик, откуда процесс». Движок при этом у всех один и
+# тот же (/opt/zapret2/nfq2/nfqws2 — туда ставим и мы), так что по пути
+# бинарника владельца не опознать: отличают его init-скрипт, ndm-хук и
+# имя PID-файла.
+_FOREIGN_NFQWS_INSTALLS = (
+    {
+        "id": "z2k",
+        "name": "z2k (necronicle/z2k)",
+        "init": "/opt/etc/init.d/S99zapret2",
+        # S99zapret2 — init самого z2k; наш называется S99zapret, без
+        # двойки, поэтому пересечься они не могут.
+        "paths": (
+            "/opt/etc/init.d/S99zapret2",
+            "/opt/etc/ndm/netfilter.d/000-zapret2.sh",
+            "/opt/etc/init.d/S99z2k-scheduler",
+            "/opt/zapret2/z2k-nfqueue-selfheal.sh",
+            "/opt/etc/z2k",
+        ),
+        # PID-файлы вида /var/run/nfqws2_<N>.pid — формат апстримного
+        # openwrt-init'а zapret2, который z2k и использует.
+        "pidfile_prefix": "/var/run/nfqws2_",
+        "hint": "Это nfqws2 стороннего установщика z2k. Остановить: "
+                "/opt/etc/init.d/S99zapret2 stop. Одной остановки мало — "
+                "z2k поднимает движок обратно из S99z2k-scheduler, "
+                "ndm-хука 000-zapret2.sh и записей в cron, поэтому "
+                "удалять надо ещё и их (см. подсказку ниже).",
+        "leftovers": (
+            "/opt/etc/init.d/S99zapret2",
+            "/opt/etc/init.d/S99z2k-scheduler",
+            "/opt/etc/init.d/S96z2k-rt-proxy",
+            "/opt/etc/init.d/S97z2k-http-tunnel",
+            "/opt/etc/init.d/S98tg-tunnel",
+            "/opt/etc/init.d/S51z2k-warp",
+            "/opt/etc/init.d/S96z2k-webpanel",
+            "/opt/etc/ndm/netfilter.d/000-zapret2.sh",
+            "/opt/etc/z2k",
+        ),
+        # Хуки NDM/cron, которые переживают «удалил и перезагрузил» и
+        # поднимают движок заново.
+        "revivers": (
+            "/opt/etc/init.d/S99z2k-scheduler",
+            "/opt/etc/ndm/netfilter.d/000-zapret2.sh",
+            "/opt/etc/ndm/netfilter.d/95-z2k-scheduler-watchdog.sh",
+            "/opt/zapret2/z2k-nfqueue-selfheal.sh",
+        ),
+    },
+)
+
+# Наш собственный init-скрипт автозапуска несёт в себе маркер (см.
+# autostart_manager._S99ZAPRET_TEMPLATE). Скрипт с тем же именем, но без
+# маркера, — чужой: классический zapret/nfqws-keenetic ставится ровно
+# сюда и поднимает СВОЙ nfqws на той же очереди.
+_OUR_AUTOSTART_SCRIPT = "/opt/etc/init.d/S99zapret"
+_OUR_AUTOSTART_MARKERS = ("zapret-gui:nfqws-autostart", "zapret-gui")
+
+
+def _proc_ppid(pid: int):
+    """PPID процесса из /proc/<pid>/stat (или None)."""
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            data = f.read()
+    except (IOError, OSError):
+        return None
+    # comm в поле 2 закавычено скобками и может содержать и пробелы, и
+    # скобки — поэтому режем по ПОСЛЕДНЕЙ ')', а не по первой.
+    idx = data.rfind(b")")
+    if idx == -1:
+        return None
+    fields = data[idx + 1:].split()
+    # fields[0] = state, fields[1] = ppid
+    if len(fields) < 2:
+        return None
+    try:
+        return int(fields[1])
+    except ValueError:
+        return None
+
+
+def _is_descendant_of(pid: int, ancestor: int, max_depth: int = 16) -> bool:
+    """Потомок ли `pid` процесса `ancestor` (обход цепочки PPID)."""
+    seen = set()
+    cur = pid
+    for _ in range(max_depth):
+        if cur <= 1 or cur in seen:
+            return False
+        seen.add(cur)
+        ppid = _proc_ppid(cur)
+        if ppid is None:
+            return False
+        if ppid == ancestor:
+            return True
+        cur = ppid
+    return False
+
+
+def _existing_foreign_markers():
+    """Файлы сторонних сборок zapret, реально лежащие на диске."""
+    found = set()
+    for inst in _FOREIGN_NFQWS_INSTALLS:
+        for p in (tuple(inst["paths"]) + tuple(inst.get("revivers", ()))
+                  + tuple(inst.get("leftovers", ()))):
+            try:
+                if os.path.exists(p):
+                    found.add(p)
+            except OSError:
+                continue
+    return found
+
+
+def _foreign_autostart_script():
+    """
+    Путь к ЧУЖОМУ /opt/etc/init.d/S99zapret или None.
+
+    Имя файла мы занимаем сами (autostart_manager), поэтому одного
+    факта «файл есть» мало: отличаем по маркеру внутри. Не прочитали
+    файл — считаем своим, чтобы не пугать пользователя догадкой.
+    """
+    try:
+        if not os.path.isfile(_OUR_AUTOSTART_SCRIPT):
+            return None
+        with open(_OUR_AUTOSTART_SCRIPT, "r", errors="replace") as f:
+            head = f.read(4096)
+    except (IOError, OSError):
+        return None
+    if any(m in head for m in _OUR_AUTOSTART_MARKERS):
+        return None
+    return _OUR_AUTOSTART_SCRIPT
+
+
+def evaluate_foreign_installs(existing_paths, foreign_autostart=None,
+                              installs=_FOREIGN_NFQWS_INSTALLS):
+    """
+    Чистая функция: по найденным путям вернуть предупреждения о
+    сторонних сборках zapret. Тестируется без I/O.
+
+    Смысл отдельно от evaluate_conflicts: те конфликты — про маршруты,
+    эти — про ту же очередь NFQUEUE и тот же движок.
+    """
+    existing_paths = set(existing_paths or ())
+    warnings = []
+    for inst in installs:
+        hit = [p for p in inst["paths"] if p in existing_paths]
+        leftovers = [p for p in inst.get("leftovers", ())
+                     if p in existing_paths]
+        if not hit and not leftovers:
+            continue
+        revivers = [p for p in inst.get("revivers", ())
+                    if p in existing_paths]
+        init = inst.get("init")
+        installed = bool(init and init in existing_paths)
+        detail = "Найдено: %s" % ", ".join(sorted(set(hit + leftovers))[:8])
+        if installed:
+            title = "Установлен %s" % inst["name"]
+            hint = inst["hint"]
+        else:
+            # Init-скрипта нет — значит сборку удаляли, но что-то от неё
+            # осталось. Само по себе это ничего не запускает, КРОМЕ
+            # хуков-оживителей: они поднимают движок обратно.
+            title = "Остатки %s" % inst["name"]
+            hint = ("Сама сборка удалена (её init-скрипта нет), но файлы "
+                    "остались. ")
+            hint += (
+                "Опасны именно эти: %s — ndm-хуки и планировщик поднимают "
+                "движок обратно после перезагрузки, и nfqws2 снова "
+                "появляется «из ниоткуда». Удалите их и перезагрузите "
+                "роутер." % ", ".join(revivers)
+            ) if revivers else (
+                "Ничего из оставшегося движок не запускает — можно удалить "
+                "на досуге."
+            )
+        warnings.append({
+            "id": "install-%s" % inst["id"],
+            "severity": "error" if installed else "warning",
+            "title": title,
+            "detail": detail,
+            "hint": hint,
+        })
+
+    if foreign_autostart:
+        warnings.append({
+            "id": "install-foreign-autostart",
+            "severity": "error",
+            "title": "Чужой init-скрипт автозапуска zapret",
+            "detail": "Найдено: %s (без маркера zapret-gui)" %
+                      foreign_autostart,
+            "hint": "Файл с этим именем создаёт и наш автозапуск, но в "
+                    "этом нет нашего маркера — значит, его поставил "
+                    "другой установщик zapret. Он поднимет свой nfqws на "
+                    "той же очереди NFQUEUE. Остановите его (%s stop) и "
+                    "удалите, либо выключите наш автозапуск и пользуйтесь "
+                    "чужим — но не обоими сразу." % foreign_autostart,
+        })
+    return warnings
+
+
+def attribute_nfqws_owner(cmdline, existing_paths):
+    """
+    Чистая функция: по cmdline постороннего nfqws и множеству найденных
+    в системе маркер-путей сказать, чей это процесс.
+
+    Returns:
+        dict|None: {id, name, hint} известной сторонней сборки.
+    """
+    existing_paths = set(existing_paths or ())
+    cmdline = cmdline or ""
+    for inst in _FOREIGN_NFQWS_INSTALLS:
+        by_marker = any(p in existing_paths for p in inst["paths"])
+        prefix = inst.get("pidfile_prefix")
+        by_pidfile = bool(prefix) and prefix in cmdline
+        if by_marker or by_pidfile:
+            return {"id": inst["id"], "name": inst["name"],
+                    "hint": inst["hint"]}
+    return None
+
 
 def _read_pid_file(path: str):
     """Прочитать PID из файла; вернуть int или None."""
@@ -649,6 +869,9 @@ def check_nfqws_conflicts():
         dict: { conflicts: [{pid, name, cmdline}...], has_conflicts }
     """
     conflicts = []
+    scan_children = 0
+    our_root_pid = os.getpid()
+    marker_paths = _existing_foreign_markers()
 
     # Собираем «свои» PID
     from core.nfqws_manager import get_nfqws_manager
@@ -695,6 +918,16 @@ def check_nfqws_conflicts():
             if _is_zombie(pid):
                 continue
 
+            # Потомки самого GUI — это НЕ конфликт: nfqws2 под собой
+            # запускают blockcheck2.sh и сканер стратегий, пока идёт
+            # подбор. nfqws_manager их отфильтровывает (см.
+            # _find_external_pid), а здесь фильтра не было — и во время
+            # скана «Диагностика» показывала собственный подбор как
+            # стороннюю систему.
+            if _is_descendant_of(pid, our_root_pid):
+                scan_children += 1
+                continue
+
             cmdline = b" ".join(a for a in argv if a).decode(
                 "utf-8", errors="replace"
             )
@@ -702,6 +935,7 @@ def check_nfqws_conflicts():
                 "pid": pid,
                 "name": exe_name,
                 "cmdline": cmdline[:500],
+                "owner": attribute_nfqws_owner(cmdline, marker_paths),
             })
     except (IOError, OSError):
         pass
@@ -730,16 +964,23 @@ def check_nfqws_conflicts():
                         continue
                     if _is_zombie(pid):
                         continue
+                    if _is_descendant_of(pid, our_root_pid):
+                        scan_children += 1
+                        continue
 
                     conflicts.append({
                         "pid": pid,
                         "name": exe_name,
                         "cmdline": cmdline[:500],
+                        "owner": attribute_nfqws_owner(cmdline, marker_paths),
                     })
 
     return {
         "conflicts": conflicts,
         "has_conflicts": len(conflicts) > 0,
+        # Сколько nfqws2 отфильтровано как «наш подбор стратегии»: в UI
+        # это строка «идёт скан», а не тревога.
+        "scan_children": scan_children,
     }
 
 
@@ -881,6 +1122,11 @@ def check_known_conflicts():
                 continue
     running = _running_process_names(set(_KNOWN_FOREIGN_DAEMONS.keys()))
     warnings = evaluate_conflicts(existing, running)
+    # Сторонние сборки самого zapret — отдельным проходом: они спорят не
+    # за маршруты, а за очередь NFQUEUE, и остаются после «я его удалил».
+    warnings = warnings + evaluate_foreign_installs(
+        _existing_foreign_markers(), _foreign_autostart_script()
+    )
     return {
         "ok": True,
         "warnings": warnings,
