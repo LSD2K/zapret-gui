@@ -8,7 +8,7 @@
 
 ## Разрешения
 
-Одиннадцать переключателей в ``settings.json → mcp.permissions``, все
+Двенадцать переключателей в ``settings.json → mcp.permissions``, все
 по умолчанию ``False``; чтение доступно всегда и переключателя не
 имеет. Инструмент объявляет ``scope``; ``tools/list`` отдаёт только
 разрешённые.
@@ -20,6 +20,13 @@
   обещает то, чего не может;
 * ``self_edit_core`` требует ``self_edit`` — это расширение, а не
   отдельная дверь.
+
+Одно разрешение не открывает НИ ОДНОГО инструмента: ``secrets`` (S17)
+снимает маскировку в ответе (``raw: true`` в вызове, см.
+:mod:`core.mcp.redact`) и пускает запись в поля, похожие на секрет. Само
+по себе оно ничего не читает и не пишет — оно расширяет то, что уже
+открыто другими разрешениями, поэтому и в :data:`WRITE_PERMISSIONS` его
+нет: с одним ``secrets`` менять нечего, а значит и откатывать нечего.
 
 Невыполненная зависимость **не игнорируется молча**: :func:`denial`
 возвращает причину и список того, что нужно включить, — иначе
@@ -45,6 +52,12 @@ desync-метка оставляют роутер недоступным, и о�
   даже внутри разрешённого поддерева. Отклоняем **расположение**, но не
   содержимое: сами списки и lua модель правит через ``strategies_write``.
 
+Единственное послабление — разрешение ``secrets`` (S17): с ним
+снимается запрет на **секретные** листья (``is_writable(path,
+secrets=True)``). Запрет на расположения файлов не снимается ничем:
+неверный путь не ломает GUI громко, а тихо выключает часть логики, и к
+секретам это отношения не имеет.
+
 Неверный путь не «ломает громко»: GUI продолжает работать, просто часть
 логики тихо выключается — поэтому пути и не отдаются на запись.
 """
@@ -59,10 +72,13 @@ _MISSING = object()
 
 
 # Порядок — как в docs/mcp/00-contract.md §4.
+# ``secrets`` заведён позже остальных (S17) и стоит последним: порядок
+# §4 контракта — это порядок, в котором разрешения объясняются человеку,
+# и переставлять его ради алфавита значит ломать README и страницу MCP.
 PERMISSIONS = (
     "control", "strategies_write", "config_write", "probes", "experiments",
     "tunnels_write", "dangerous", "shell_readonly", "shell_full",
-    "self_edit", "self_edit_core",
+    "self_edit", "self_edit_core", "secrets",
 )
 
 # Scope инструмента, доступного всегда (чтение).
@@ -80,7 +96,9 @@ ANY_WRITE_SCOPE = "any_write"
 
 # Разрешения, каждое из которых означает «эта модель что-то меняет».
 # ``probes`` сюда не входит: проба выпускает трафик, но снимка не
-# оставляет и откатывать в ней нечего.
+# оставляет и откатывать в ней нечего. ``secrets`` — тоже: он ничего не
+# меняет сам, а только снимает маску с ответа и запрет с секретных
+# листьев настроек, которые всё равно пишет ``config_write``.
 WRITE_PERMISSIONS = (
     "control", "strategies_write", "config_write", "experiments",
     "tunnels_write", "dangerous", "shell_full", "self_edit",
@@ -123,6 +141,8 @@ TITLES = {
                   "службы",
     "self_edit": "чтение и правка модулей GUI на устройстве",
     "self_edit_core": "правка защищённого ядра GUI",
+    "secrets": "полные ответы без маскировки (raw) и запись полей, "
+               "похожих на секрет",
 }
 
 # ─────────────────────── настройки на запись ────────────────────────
@@ -320,12 +340,17 @@ def describe(perms=None) -> list:
 
 # ───────────────────── настройки: что можно писать ──────────────────
 
-def is_writable(path) -> bool:
+def is_writable(path, secrets: bool = False) -> bool:
     """Можно ли записать значение по точечному пути ``settings.json``.
 
     Путь — строка (``"nfqws.ports_tcp"``) или последовательность
     ключей. Секцию целиком (``"nfqws"``) записать нельзя: в ней есть
     запрещённые листья, и запись пачкой обошла бы их проверку.
+
+    ``secrets=True`` (разрешение ``secrets``, S17) снимает запрет на
+    листья, похожие на секрет: с ним модель читает такое поле как есть
+    (``raw: true``) и может вернуть значение обратно. Всё остальное —
+    поддеревья, ``DENY_PATHS`` и ключи-расположения — не меняется.
     """
     parts = split_path(path)
     if len(parts) < 2:
@@ -339,7 +364,7 @@ def is_writable(path) -> bool:
     if any(dotted.startswith(prefix) for prefix in DENY_PATH_PREFIXES):
         return False
     for segment in parts[1:]:
-        if _is_denied_key(segment):
+        if _is_denied_key(segment, secrets=secrets):
             return False
 
     # Настройки, которой нет в DEFAULT_CONFIG, не существует: записать
@@ -355,7 +380,7 @@ def is_writable(path) -> bool:
     return True
 
 
-def why_not_writable(path) -> str:
+def why_not_writable(path, secrets: bool = False) -> str:
     """Почему путь не принимается на запись — текстом для модели."""
     parts = split_path(path)
     if len(parts) < 2:
@@ -370,8 +395,10 @@ def why_not_writable(path) -> str:
         return ("«%s» закрыт: на нём держатся перехват и собственный "
                 "трафик GUI" % dotted)
     for segment in parts[1:]:
-        if redact.is_secret_key(segment):
-            return "«%s» похож на секрет и на запись не принимается" % dotted
+        if redact.is_secret_key(segment) and not secrets:
+            return ("«%s» похож на секрет и на запись не принимается; "
+                    "включите разрешение «secrets», если такое поле "
+                    "нужно менять через MCP" % dotted)
         if DENY_KEY_RE.search(segment):
             return ("«%s» задаёт расположение файла или каталога: неверный "
                     "путь не ломает GUI громко, а тихо выключает часть "
@@ -386,12 +413,14 @@ def why_not_writable(path) -> str:
     return ""
 
 
-def writable_paths() -> list:
+def writable_paths(secrets: bool = False) -> list:
     """Все листья настроек, открытые на запись.
 
     Отдаётся инструменту ``config_writable_paths`` (S6): путь, тип,
     текущее значение и допустимые значения — чтобы модель не угадывала
-    формат.
+    формат. ``secrets`` передаётся как в :func:`is_writable`: список
+    обязан совпадать с тем, что реально примет ``config_set``, иначе
+    модель узнаёт о границе не из справочника, а из отказа.
     """
     from core.config_manager import DEFAULT_CONFIG, get_config_manager
 
@@ -402,7 +431,7 @@ def writable_paths() -> list:
         if not isinstance(defaults, dict):
             continue
         for path, default in sorted(_walk(section, defaults)):
-            if not is_writable(path):
+            if not is_writable(path, secrets=secrets):
                 continue
             keys = path.split(".")
             value = cfg.get(*keys, default=default)
@@ -452,8 +481,12 @@ def split_path(path) -> list:
 
 # ───────────────────────────── частности ────────────────────────────
 
-def _is_denied_key(segment: str) -> bool:
-    return bool(DENY_KEY_RE.search(segment)) or redact.is_secret_key(segment)
+def _is_denied_key(segment: str, secrets: bool = False) -> bool:
+    if DENY_KEY_RE.search(segment):
+        # Расположение файла не отдаётся на запись никогда: к секретам
+        # оно отношения не имеет, а неверный путь выключает логику тихо.
+        return True
+    return redact.is_secret_key(segment) and not secrets
 
 
 def _default_at(parts, missing=None):

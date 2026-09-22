@@ -67,14 +67,28 @@ def register(app):
 
     @app.post("/api/mcp/ui/transports")
     def api_mcp_ui_transports():
-        """Переключить legacy-SSE. HTTP выключать нечем — он всегда есть."""
+        """Переключить транспорты: ``sse`` и/или ``http`` (S17).
+
+        Выключенный ``http`` закрывает ``POST /api/mcp`` для всех
+        клиентов, но не эту страницу: она ходит в ``/api/mcp/ui/*`` под
+        авторизацией GUI и включит транспорт обратно. Поэтому отдельного
+        подтверждения здесь нет — отрезать себя этим переключателем
+        нельзя.
+        """
         response.content_type = _JSON_CT
         body = _body()
         if body is None:
             return _bad("Ожидается JSON-объект")
-        if "sse" not in body:
-            return _bad("Ожидается поле sse")
-        _write(("mcp", "transports", "sse", bool(body.get("sse"))))
+        known = [name for name in ("sse", "http") if name in body]
+        if not known:
+            return _bad("Ожидается поле sse или http")
+        for name in known:
+            _write(("mcp", "transports", name, bool(body.get(name))))
+            if name == "http":
+                _log("Основной транспорт MCP (POST /api/mcp) %s из "
+                     "веб-интерфейса"
+                     % ("включён" if body.get("http") else "выключен"),
+                     level="warning")
         return {"ok": True, "info": info_payload()}
 
     @app.post("/api/mcp/ui/token")

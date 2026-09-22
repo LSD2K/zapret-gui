@@ -32,14 +32,26 @@ class TestDefaults(unittest.TestCase):
         self.assertFalse(mcp["allow_gui_auth"])
         self.assertEqual(mcp["bind"], "inherit")
 
-    def test_all_eleven_permissions_exist_and_are_false(self):
+    def test_all_twelve_permissions_exist_and_are_false(self):
         perms = DEFAULT_CONFIG["mcp"]["permissions"]
         self.assertEqual(set(perms), {
             "control", "strategies_write", "config_write", "probes",
             "experiments", "tunnels_write", "dangerous",
             "shell_readonly", "shell_full", "self_edit", "self_edit_core",
+            # S17: снимает маскировку в ответе и запрет на запись
+            # секретных полей. Своих инструментов не открывает.
+            "secrets",
         })
         self.assertTrue(all(v is False for v in perms.values()))
+
+    def test_defaults_match_the_permission_model(self):
+        # Разрешение, заведённое в модели и забытое в дефолтах, не
+        # появляется в settings.json — и переключателя на странице MCP
+        # у него тоже нет.
+        from core.mcp import permissions as perms_mod
+
+        self.assertEqual(set(DEFAULT_CONFIG["mcp"]["permissions"]),
+                         set(perms_mod.PERMISSIONS))
 
     def test_token_is_64_hex(self):
         token = auth.generate_token()

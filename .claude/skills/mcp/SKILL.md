@@ -6,11 +6,13 @@ description: >-
   Использовать при любых задачах о: наших MCP-инструментах и их объявлении
   (декоратор `@tool`, scope/mutating, схема аргументов, форма ответа
   `content`+`structuredContent`+`isError`), реестре и автозагрузке
-  `core/mcp/tools/*`, модели разрешений (11 переключателей
+  `core/mcp/tools/*`, модели разрешений (12 переключателей
   `mcp.permissions`, зависимость `experiments` → `control`+`probes`,
-  `self_edit_core` → `self_edit`), границе записи настроек (whitelist
+  `self_edit_core` → `self_edit`, `secrets` без своих инструментов),
+  границе записи настроек (whitelist
   поддеревьев, deny-поля, `is_writable`/`writable_paths`), маскировке
-  секретов (`core/mcp/redact.py`, маска по ключам, а не по значениям),
+  секретов (`core/mcp/redact.py`, маска по ключам, а не по значениям,
+  режим «без маскировки» по `raw: true` под разрешением `secrets`),
   ресурсах-справочниках (`core/mcp/resources.py`, схема `zapret://…`,
   живой `nfqws2 -?`, карта `--lua-desync`, каталоги, зеркало «ресурс =
   инструмент» через `docs_get`), описаниях настроек
@@ -75,6 +77,20 @@ description: >-
   поддерево `/api/mcp/ui/` исключено из врезки Bearer-токена в
   `app.py`; тексты предупреждений — `mcp.warn.*`/`mcp.risk.*` в
   `web/js/i18n/*`),
+  запуске и правке туннелей (`core/tunnels_control.py`: одна форма на
+  шесть движков, `tunnel_up`/`tunnel_down`/`tunnel_restart`,
+  `tunnel_config_get`/`_save`, `subscription_refresh`, `pool_refresh`
+  под `tunnels_write`), маршрутах единого слоя
+  (`core/mcp/tools/routing.py`: `unified_route_list`/`_status` на
+  чтение, `_save`/`_delete`/`_apply` под `tunnels_write`,
+  `unified_reapply_all` под `dangerous`), правке lua на ходу
+  (`lua_script_get`/`_patch`/`_delete`, `apply=true` →
+  `nfqws_restart`), снифере трафика после движка
+  (`core/traffic_capture.py` — фиксированный argv tcpdump, потолки
+  `mcp.capture`, автоудаление файла; `core/pcap_reader.py` — разбор
+  pcap в поля: флаги, TTL, длина, SNI), ожидании вместо опроса
+  (`core/mcp/tools/jobs.py`: `job_wait`, бюджет `mcp.limits.wait_sec`,
+  разрешение по виду операции),
   мини-валидаторе JSON Schema (`core/mcp/schema.py`),
   диспетчере JSON-RPC (`core/mcp/server.py`, ревизия спеки 2025-06-18,
   `initialize`/`tools/list`/`tools/call`, батч, уведомления), тестах-сторожах
@@ -137,6 +153,11 @@ scope, mutating, файл, аргументы), имя в README и число �
 | `core/nfqws_session.py` | **не в пакете MCP**: общий мьютекс на nfqws2/firewall (`acquire`/`holder`), снимок состояния и возврат «как было» |
 | `core/strategy_experiment.py` | **не в пакете MCP**: движок экспериментов — варианты, baseline, метрики, правила-подсказки, дедмен-свитч и снимок на диске |
 | `core/shell_exec.py` | **не в пакете MCP**: исполнение команд — safe-список, запреты, подтверждения, дедмен-свитч, фоновые задачи |
+| `core/tunnels_control.py` | **не в пакете MCP**: поднять/погасить/перезапустить туннель и переписать его конфиг — одной формой на все шесть движков (пара к `tunnels_overview`) |
+| `core/traffic_capture.py` | **не в пакете MCP**: короткий дамп tcpdump с фиксированным argv, потолками и автоудалением файла |
+| `core/pcap_reader.py` | **не в пакете MCP и без единой зависимости**: разбор pcap в поля (направление, флаги, TTL, длина, SNI) |
+| `core/mcp/tools/jobs.py` | `job_wait` — ожидание конца долгой операции вместо опроса в цикле |
+| `core/mcp/tools/routing.py` | маршруты единого слоя: чтение, правка, переприменение |
 | `core/code_editor.py` | **не в пакете MCP**: самоправка — границы, staging, слепок дерева, проверки, снимки, применение |
 | `core/code_guard.py` | **не в пакете MCP и без единого нашего импорта**: сторож перезапуска, отдельный процесс, откат по health-check и по TTL |
 | `core/cli.py` | **не в пакете MCP**: подкоманда `zapret-gui mcp …` — status/tools/call/token/audit/code и точка входа моста |
@@ -195,8 +216,8 @@ def logs_tail(args: dict) -> dict:
 
 ## Разрешения
 
-`settings.json → mcp.permissions`, все по умолчанию `false`; чтение
-переключателя не имеет и доступно всегда.
+`settings.json → mcp.permissions`, все двенадцать по умолчанию
+`false`; чтение переключателя не имеет и доступно всегда.
 
 | Ключ | Что открывает | Зависит от |
 |---|---|---|
@@ -205,13 +226,24 @@ def logs_tail(args: dict) -> dict:
 | `config_write` | запись в whitelisted-поддеревья настроек | — |
 | `probes` | активные пробы (трафик с роутера), blockcheck, сканер | — |
 | `experiments` | движок экспериментов | `control`, `probes` |
-| `tunnels_write` | конфиги и запуск туннелей | — |
-| `dangerous` | бинарники, автозапуск, миграции, unified-правила, ребут | — |
+| `tunnels_write` | конфиги и запуск туннелей, подписки, пул, маршруты единого слоя | — |
+| `dangerous` | бинарники, автозапуск, миграции, переприменение ВСЕЙ маршрутизации, ребут | — |
 | `shell_readonly` | safe-команды, чтение файлов и каталогов | — |
 | `shell_full` | произвольная команда от root, запись файлов, пакеты | открывает `shell_readonly` |
 | `self_edit` | чтение и правка модулей GUI (13 инструментов `code_*`) | — |
 | `self_edit_core` | правка защищённого ядра; **своих инструментов нет**, спрашивается по месту | `self_edit` |
+| `secrets` | ответ без маскировки по явному `raw: true` + запись секретных листьев настроек; **своих инструментов нет** | — |
 | `any_write` *(псевдо)* | не переключатель: открывается ЛЮБЫМ из `WRITE_PERMISSIONS`. Нужен одному `mcp_undo_last` | — |
+
+**`secrets` не открывает инструментов и не входит в
+`WRITE_PERMISSIONS` (S17).** Он ничего не меняет сам — он снимает две
+границы с того, что уже открыто другими разрешениями: маскировку
+ответа (по явному `raw: true`, см. «Секреты») и запрет на запись
+листьев настроек, похожих на секрет (`is_writable(path,
+secrets=True)`). Поэтому и в `WRITE_PERMISSIONS` его нет: с одним
+`secrets` менять нечего, а значит `mcp_undo_last` публиковать не за
+чем. Запрет на ключи-расположения (`DENY_KEY_RE`) им НЕ снимается: к
+секретам он отношения не имеет.
 
 **`IMPLIES` — обратная сторона `REQUIRES` (S12).** `shell_full`
 включает `shell_readonly` сам: кому отдали произвольную команду от
@@ -259,6 +291,9 @@ UI), и `tools_by_scope`.
 | `updates_check` | read | нет | `tools/updates.py` | refresh?, updates_only?, offset?, limit? | версии движков и обновления; по умолчанию из кеша, `refresh` — по `probes` |
 | `config_writable_paths` | read | нет | `tools/config.py` | section?, search?, offset?, limit? | что можно менять: путь, тип, текущее значение, `enum` |
 | `audit_list` | read | нет | `tools/audit.py` | tool?, status?, mutating_only?, offset?, limit? | последние вызовы MCP из журнала, новые первыми, с пометкой «ещё откатывается» |
+| `job_wait` | read | нет | `tools/jobs.py` | kind, job_id?, timeout_sec? | ЖДАТЬ конца долгой операции одним вызовом; разрешение спрашивается по виду операции |
+| `unified_route_list` | read | нет | `tools/routing.py` | id?, method?, search?, enabled_only?, offset?, limit? | маршруты единого слоя: назначение → метод, fallback'и, приоритет |
+| `unified_route_status` | read | нет | `tools/routing.py` | id?, offset?, limit? | какой метод РАБОТАЕТ сейчас (`active_method`), статистика монитора, советы сканера |
 | `config_set` | config_write | **да** | `tools/config.py` | path, value | записать ОДНУ настройку; ответ — дифф «было/стало», список заменяется целиком |
 | `nfqws_start` | control | **да** | `tools/nfqws.py` | — | правила перехвата + движок с активной стратегией; обратное — `nfqws_stop` |
 | `nfqws_stop` | control | **да** | `tools/nfqws.py` | — | остановить движок и снять правила |
@@ -273,6 +308,9 @@ UI), и `tools_by_scope`.
 | `ipset_edit` | strategies_write | **да** | `tools/lists.py` | name, mode?, entries | то же для IP/CIDR; непринятые записи перечисляются |
 | `blob_add` | strategies_write | **да** | `tools/lists.py` | name, hex | записать blob из hex (≤ 64 КБ); builtin-имена — отказ |
 | `lua_script_save` | strategies_write | **да** | `tools/lists.py` | name, content, force? | сохранить lua-скрипт; битый синтаксис — отказ, `force=true` перебивает |
+| `lua_script_get` | strategies_write | нет | `tools/lists.py` | name?, offset?, limit?, numbered? | текст скрипта окном; без имени — перечень скриптов с их функциями |
+| `lua_script_patch` | strategies_write | **да** | `tools/lists.py` | name, edits?, diff?, force?, apply? | точечная правка (тем же кодом, что `code_patch`); `apply=true` — ещё и `nfqws_restart` |
+| `lua_script_delete` | strategies_write | **да** | `tools/lists.py` | name | удалить пользовательский скрипт; bundled — отказ; в ответе — потерянные функции |
 | `mcp_undo_last` | any_write | **да** | `tools/audit.py` | kind? | откатить последнее изменение по снимку с диска (любой вид) |
 | `scan_status` | read | нет | `tools/scan.py` | job_id? | прогресс подбора: фаза, сколько проверено, `baseline_open`; `job_id` — опционально |
 | `scan_results` | read | нет | `tools/scan.py` | failed?, offset?, limit? | что нашёл подбор, лучшие первыми; `failed=true` — что НЕ сработало |
@@ -289,6 +327,10 @@ UI), и `tools_by_scope`.
 | `blockcheck2_start` | probes | **да** | `tools/blockcheck.py` | domains?, scanlevel?, ipv?, repeats?, http?, tls12?, tls13?, http3? | оригинальный скрипт zapret2 (DOMAINS/SCANLEVEL/REPEATS/…) |
 | `blockcheck2_stop` | probes | **да** | `tools/blockcheck.py` | — | прибить скрипт; собранная телеметрия остаётся читаемой |
 | `healthcheck_run` | probes | **да** | `tools/blockcheck.py` | — | разовый прогон healthcheck в фоне; результат — в `healthcheck_status` |
+| `traffic_capture_start` | probes | **да** | `tools/traffic.py` | iface?, host?, port?, proto?, packets?, seconds? | короткий дамп после движка; argv фиксирован, ответ — `run_id`, сразу |
+| `traffic_capture_status` | probes | нет | `tools/traffic.py` | run_id? | идёт ли дамп и сколько успел снять |
+| `traffic_capture_result` | probes | нет | `tools/traffic.py` | run_id?, summary_only?, with_sni_only?, offset?, limit? | пакеты полями (флаги, TTL, длина, SNI) + сводка: разрезан ли ClientHello, разные ли TTL |
+| `traffic_capture_stop` | probes | **да** | `tools/traffic.py` | — | прибить дамп; снятое остаётся читаемым |
 | `scan_apply` | control | **да** | `tools/scan.py` | index?, strategy_id? | применить найденное: сохранить USER-стратегию и поднять движок; нужен ещё `strategies_write` |
 | `strategy_experiment_start` | experiments | **да** | `tools/experiments.py` | variants, targets?, probes?, repeats?, baseline?, ttl_sec?, keep_best? | прогнать варианты стратегии с измерением; ответ — `run_id`, сразу |
 | `strategy_experiment_status` | experiments | нет | `tools/experiments.py` | — | фаза, номер варианта, сколько осталось до авто-отката |
@@ -299,6 +341,17 @@ UI), и `tools_by_scope`.
 | `strategy_experiment_history` | experiments | нет | `tools/experiments.py` | offset?, limit? | прошлые прогоны этого процесса GUI, новые первыми |
 | `strategy_compose` | strategies_write | нет | `tools/compose.py` | profiles, validate? | описание (фильтр/payload/инстансы) → argv + команда + линтер; ничего не сохраняет |
 | `strategy_validate` | strategies_write | нет | `tools/compose.py` | strategy_id?, args?, profiles? | `nfqws2 --intercept=0` по `strategy_id`/`args`/`profiles`: опции, файлы и **исполнение lua-init** |
+| `tunnel_up` | tunnels_write | **да** | `tools/tunnels.py` | engine, name? | поднять инстанс движка (шесть движков — шесть способов, см. `core/tunnels_control.py`) |
+| `tunnel_down` | tunnels_write | **да** | `tools/tunnels.py` | engine, name? | погасить инстанс; маршруты, которые вели в него, остаются |
+| `tunnel_restart` | tunnels_write | **да** | `tools/tunnels.py` | engine, name? | перезапуск — так применяется правка конфига |
+| `tunnel_config_get` | tunnels_write | нет | `tools/tunnels.py` | engine, name, raw? | текст конфига sing-box/mihomo/AWG; ключи замаскированы, если не `raw` |
+| `tunnel_config_save` | tunnels_write | **да** | `tools/tunnels.py` | engine, name, text, restart? | переписать конфиг ЦЕЛИКОМ; проверка разбором самого движка; откат — `mcp_undo_last` |
+| `subscription_refresh` | tunnels_write | **да** | `tools/tunnels.py` | id? | перекачать подписку (или все) и пересобрать её конфиг |
+| `pool_refresh` | tunnels_write | **да** | `tools/tunnels.py` | status_only? | пересобрать пул серверов фоном; опрос — `job_wait(kind="pool")` |
+| `unified_route_save` | tunnels_write | **да** | `tools/routing.py` | method, id?, name?, destination?, fallbacks?, devices?, enabled?, monitor_enabled?, failover_enabled?, probe_domain?, priority?, apply? | создать/заменить маршрут ЦЕЛИКОМ; непереданные поля берутся из прежней записи |
+| `unified_route_delete` | tunnels_write | **да** | `tools/routing.py` | id | удалить маршрут и снять его с ядра |
+| `unified_route_apply` | tunnels_write | **да** | `tools/routing.py` | id | разложить ОДИН маршрут заново (домены резолвятся заново) |
+| `unified_reapply_all` | dangerous | **да** | `tools/routing.py` | — | sweep протухших `ip rule`/таблиц + переприменение ВСЕЙ маршрутизации |
 | `shell_exec` | shell_readonly | **да** | `tools/shell.py` | command?, argv?, timeout_sec?, workdir?, guard? | команда на роутере; safe-список и argv — по `shell_readonly`, произвольная строка (`sh -c`) — по `shell_full` |
 | `shell_exec_async` | shell_readonly | **да** | `tools/shell.py` | command?, argv?, timeout_sec?, workdir?, label?, guard? | то же фоном: ответ — `job_id`, сразу |
 | `shell_job_status` | shell_readonly | нет | `tools/shell.py` | job_id? | состояние фоновой команды; без `job_id` — список всех |
@@ -1694,6 +1747,183 @@ loopback-only, а GUI открывают из браузера на LAN-адре
   `mcp.warn.*` (токен, HTML-транспорт, ротация, перезапуск, shell,
   самоправка, аварийный запрет) и `mcp.risk.<разрешение>` (по строке на
   каждое из 11). **S16 переиспользует их в README дословно.**
+
+## Туннели, маршруты, lua, снифер и ожидание (S17)
+
+Сессия закрывает долги первого круга (TODO.md) и добавляет четыре
+недостающих вещи. Общее у них одно: **логика живёт в `core/*.py`, а не
+в `tools/`** — как `nfqws_control` у S7.
+
+### `tunnels_write` наконец что-то открывает
+
+Переключатель существовал с S2 и не публиковал ни одного инструмента:
+модель читала `tunnels_status` и на этом останавливалась. Теперь за ним
+десять инструментов, а шесть способов поднять туннель сведены в
+`core/tunnels_control.py`.
+
+Почему отдельный модуль, а не код в `tools/tunnels.py`: у sing-box и
+mihomo это `up(name)`; AWG похож, но имя конфига и имя интерфейса
+расходятся; usque требует СНАЧАЛА выделить интерфейс
+(`iface_for_config`) и только потом `start(iface, path, sni=…,
+transport_profile=…)` с профилем из настроек; Opera Proxy собирает
+аргументы старта из секции конфига и после успешного старта обязана
+выставить `opera_proxy.enabled` и перенастроить watchdog (иначе
+автозапуск и сторож остаются мёртвыми); Telegram-прокси — это два
+независимых движка под одной страницей, и имя инстанса у него
+обязательно. Всё это уже было написано — внутри HTTP-обработчиков
+`api/*.py`. Позвать их из MCP нельзя, повторить по памяти значит
+завести вторую реализацию: «поднял из GUI» и «поднял из MCP» начали бы
+значить разное (в первую очередь — переживает ли туннель перезагрузку).
+
+`tunnel_config_get`/`_save` работают только с тремя движками
+(`CONFIG_ENGINES`): у usque конфиг создаётся регистрацией устройства в
+Cloudflare, у Telegram- и Opera-прокси файла нет вовсе. Конфиг
+переписывается **целиком** — у трёх движков три формата (JSON, YAML,
+ini-подобный `.conf`), и точечная правка каждого была бы третьей
+реализацией разбора. Прежний текст уезжает в снимок
+(`audit.KIND_TUNNEL_CONFIG`), откат — `mcp_undo_last`.
+
+`pool_refresh` — единственный здесь фоновый: сборка пула ходит в
+десяток источников и, при включённом health-фильтре, тестирует сотни
+серверов. Она опирается на готовый `server_pool.get_refresh_job()`, а
+не заводит свою очередь.
+
+### Маршруты единого слоя (`tools/routing.py`)
+
+Разговор с моделью почти всегда кончается вопросом «а теперь пустить
+этот домен через что?». До S17 ответа не было: `tunnels_status`
+показывал туннели, связать с ними домен было нечем.
+
+Граница разрешений здесь проходит по трём уровням, и это не
+формальность:
+
+- **чтение — без разрешения.** В маршруте нет ничего секретного
+  (домены, CIDR, имя интерфейса), а половина жалоб «почему не
+  открывается» объясняется именно им: домен уже ведёт в погашенный
+  туннель. `unified_route_status` отдельно от `unified_route_list`
+  потому, что отвечает на другой вопрос: `active_method`,
+  отличающийся от `method`, значит, что failover увёл трафик на
+  запасной путь;
+- **правка — `tunnels_write`.** Маршрут выбирает, через какой туннель
+  пойдёт трафик; это ровно то, что разрешение обещает;
+- **`unified_reapply_all` — `dangerous`.** Он не правит запись, а
+  сносит «левые» `ip rule`/таблицы (`core/routing/sweeper`) и
+  раскладывает картину маршрутов заново. На роутере, через который
+  ходит и сам админ, это на секунды меняет всё сразу.
+
+Низкоуровневых правил `core/routing` (CIDR/device/DSCP по одному) в MCP
+**нет намеренно**: единый слой раскладывается в них сам, правило с
+префиксом `uni-` — производное маршрута, и давать модели оба уровня
+значит разрешить ей их рассогласовать.
+
+`unified_route_save` **дочитывает непереданные поля из прежней записи**
+(и только потом отдаёт их `manager.save_route`): иначе «поменяй метод»
+стирало бы список доменов — маршрут сохраняется целиком.
+
+### lua: читать, патчить, удалять
+
+Долг S7: писать скрипт целиком модель умела, а прочитать существующий
+могла только через `file_read`, то есть ценой `shell_readonly` на всю
+файловую систему. Несоразмерно для «поменяй в этом скрипте одну
+строку».
+
+- `lua_script_get` без имени отдаёт **перечень** скриптов — по образцу
+  `ipsets_list`: чтобы прочитать скрипт, его надо назвать, а имена
+  взять было неоткуда (`lua_functions_list` перечисляет функции, а не
+  файлы);
+- `lua_script_patch` зовёт `code_editor.apply_edits` / `apply_unified`
+  — **тот же код**, что у `code_patch`: совпадение точное и
+  единственное, найденное дважды отклоняется. Второй реализации
+  «замени фрагмент» в репозитории нет;
+- `apply=true` перезапускает движок, но `control` спрашивается **по
+  месту** (как `strategies_write` у `scan_apply`): правка скриптов и
+  право дёргать движок — разные вещи. Без перезапуска правка лежит на
+  диске и не действует: lua читается при СТАРТЕ, и снаружи это
+  выглядит как «поправил, и ничего не изменилось»;
+- `lua_script_delete` отказывается удалять bundled (они приходят с GUI)
+  и перечисляет в ответе `functions_lost`: стратегия, зовущая
+  пропавшую функцию, не падает — она обрывает обработку пакета.
+
+Поле называется `is_builtin`, а не `is_bundled` (`lua_manager.
+get_stats()`); в ответе инструмента оно отдаётся как `is_bundled` —
+имя, которое понимает модель.
+
+### Снифер после движка (`traffic_capture_*`)
+
+Обратная половина `traffic_recent`: тот отвечает «дошёл ли пакет ДО
+движка», этот — «что ушло в сеть ПОСЛЕ него». Раньше это стоило
+`shell_full` (root) и tcpdump руками.
+
+Рамки — в `core/traffic_capture.py`:
+
+- **argv фиксирован.** Интерфейс проверяется по `/sys/class/net`,
+  фильтр собирается ЗДЕСЬ из разобранных полей (`host`/`port`/`proto`)
+  и уезжает списком, без оболочки. Произвольное BPF-выражение не
+  принимается: это же и способ дописать `-z` с посторонней командой.
+  `host` — только IP или подсеть: домен модель сначала разрешает
+  `probe_targets`;
+- потолки на число пакетов и время (`mcp.capture`, жёсткие рамки —
+  константы модуля), короткий снапшот (`-s 256`: заголовки и начало
+  ClientHello, а не содержимое чужих соединений), автоудаление файла;
+- один прогон за раз: два tcpdump на роутере со 128 МБ кончаются не
+  двумя дампами.
+
+Разбор — `core/pcap_reader.py`, чистый модуль без единого побочного
+действия (поэтому тестируется байтами, без роутера). Разбирать
+**текстовый** вывод tcpdump было нельзя: формат зависит от версии и
+ключей, а TTL, длины payload'а и SNI в короткой строке нет вовсе.
+Понимаются три канальных уровня, которые встречаются на роутере:
+Ethernet, Linux SLL (`-i any`) и RAW IP (TUN).
+
+Сводка (`traffic_capture.summary`) считается в core, а не в
+инструменте: то же понадобится UI. Смысл снифера не в списке пакетов, а
+в трёх вещах, и `_capture_hint` говорит их словами: ушло ли имя
+открытым текстом, разные ли TTL (значит, fake-пакеты действительно
+уходят), есть ли RST.
+
+### `job_wait` — таймер вместо опроса
+
+Асинхронный контракт (`*_start` → `job_id` → опрашивай `*_status`)
+писался под таймаут клиента и эту половину решает. Но модель не умеет
+ждать: она опрашивает статус в цикле, по нескольку раз в секунду, и
+трёхминутный скан превращается в полторы сотни вызовов, из которых сто
+сорок девять говорят «ещё идёт» — контекст, журнал и рейт-лимит.
+
+`job_wait` блокируется на стороне сервера до конца операции или до
+бюджета (`mcp.limits.wait_sec`, потолок `max_wait_sec`) и возвращает
+**ровно то, что вернул бы соответствующий `*_status`** — он его и
+зовёт (`KINDS`). Второй реализации статуса нет.
+
+Три вещи, которые легко сломать обратно:
+
+1. **Бюджет меньше `tool_timeout_sec`** (минус `TIMEOUT_MARGIN_SEC`).
+   Ожидание, которое само отваливается по таймауту, хуже опроса:
+   модель не узнает ни результата, ни того, что операция идёт;
+2. **Разрешение спрашивается за вид операции** (`probes` для скана,
+   `experiments` для эксперимента, `shell_readonly` для фоновой
+   команды). Инструмент объявлен `read`, и без этой проверки он стал
+   бы дырой, через которую чтение без разрешений видит чужие
+   результаты;
+3. **У эксперимента признак конца — не `running`.** `awaiting_commit`
+   это ТОЖЕ конец ожидания: прогон отработал и ждёт решения. Ждать его
+   дальше значит проспать дедмен-свитч, по которому всё откатится.
+
+Веб-сервер многопоточный (`app.py`, `_ThreadingWSGIServer`), поэтому
+ожидание держит свой поток запроса и ничего больше.
+
+### `mcp.transports.http` перестал быть декорацией
+
+Долг S14: флаг висел в настройках и не влиял ни на что — хуже, чем его
+отсутствие. Теперь `auth.http_enabled()` читается на каждом запросе
+(как флаг SSE), и выключенный транспорт отдаёт **503 + Retry-After**,
+до авторизации: для подбирающего токен это неотличимо от «точки нет», а
+тому, кто выключил сам, понятно.
+
+Отрезать себя этим нельзя: страница MCP ходит в `/api/mcp/ui/*` —
+отдельную дверь под авторизацией GUI, — и включает транспорт обратно;
+stdio-мост зовёт диспетчер напрямую и флагом не закрывается. Отсутствие
+ключа в настройках читается как «включён»: транспорт был всегда, и
+молча выключиться при обновлении GUI он не должен.
 
 ## Секреты
 

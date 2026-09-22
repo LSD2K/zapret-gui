@@ -434,20 +434,23 @@ MCP то, что уже умеет менеджер, нельзя: разойд�
 |--------|-----------|
 | `mcp/server.py` | Диспетчер JSON-RPC: `initialize`, `tools/*`, `resources/*`, `prompts/*`, батчи, уведомления. `PROTOCOL_VERSION` = ревизия спеки, с которой мы говорим. |
 | `mcp/registry.py` | Декоратор `@tool`, проверки объявления (имя, описание ≤ 300, scope/mutating, схема), `call()` и **единственная точка сериализации ответа**: маскировка секретов + обрезка по `mcp.limits.response_kb`. |
-| `mcp/permissions.py` | 11 разрешений (`mcp.permissions`, все по умолчанию `false`), их зависимости, whitelist настроек на запись (`is_writable`). |
+| `mcp/permissions.py` | 12 разрешений (`mcp.permissions`, все по умолчанию `false`), их зависимости, whitelist настроек на запись (`is_writable`). |
 | `mcp/auth.py` | bind → Origin → Bearer-токен → рейт-лимит. Выключенный MCP отдаёт 404, а не 403: наружу не видно даже факта наличия точки. |
 | `mcp/audit.py` | Журнал вызовов (`mcp-audit.jsonl`) и снимки «до» (`mcp-undo.json`) рядом с `settings.json` — откат переживает перезагрузку. |
-| `mcp/redact.py` | Маскировка секретов **по ключам, а не по значениям**; `redact_text()` для сырого вывода shell и файлов. |
+| `mcp/redact.py` | Маскировка секретов **по ключам, а не по значениям**; `redact_text()` для сырого вывода shell и файлов; переключатель «без маскировки» (`unredacted()`) под разрешением `secrets` и явным `raw: true` в вызове. |
 | `mcp/schema.py` | Мини-валидатор JSON Schema (stdlib, без `jsonschema`). |
 | `mcp/resources.py` / `mcp/config_docs.py` / `mcp/prompts.py` | Справочники `zapret://…` (живой `nfqws2 -?`, карта `--lua-desync`, каталоги), описания настроек, промты-сценарии. |
 | `mcp/session.py` / `mcp/stdio.py` | Сессии legacy-SSE и stdio-мост (`ssh router zapret-gui mcp --stdio`). |
-| `mcp/tools/*.py` | 93 инструмента по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает). |
+| `mcp/tools/*.py` | 114 инструментов по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает), `jobs.py` — `job_wait` (ожидание вместо опроса в цикле). |
 
 Логика, которую MCP **использует, но не содержит**: `nfqws_control.py`
 (старт/стоп/применение стратегии — общий код для UI, CLI и MCP),
 `nfqws_session.py` (мьютекс на движок), `probe_runner.py`,
 `strategy_experiment.py`, `shell_exec.py`, `code_editor.py`,
-`code_guard.py`, `tunnels_overview.py`.
+`code_guard.py`, `tunnels_overview.py` (читает состояние шести движков),
+`tunnels_control.py` (меняет его: поднять/погасить/переписать конфиг —
+одной формой на все шесть), `traffic_capture.py` + `pcap_reader.py`
+(короткий дамп после движка и его разбор в поля).
 
 Точная спецификация — скил [`mcp`](.claude/skills/mcp/SKILL.md);
 пользовательская часть — README, раздел «Управление через ИИ (MCP)».

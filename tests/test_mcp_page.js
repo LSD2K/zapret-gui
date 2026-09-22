@@ -333,3 +333,34 @@ test('журнал вызовов показывает инструмент и �
     assert.match(html, /нужно разрешение shell_full/);
     page.destroy();
 });
+
+test('основной транспорт — переключатель, и выключенный он предупреждает',
+     async () => {
+    // S17: `mcp.transports.http` наконец что-то выключает. Главное,
+    // что должно быть видно на экране, — что клиенты получают 503, а
+    // сама страница продолжает работать и включит транспорт обратно.
+    const on = makeSandbox(fixture());
+    await on.page.render(makeElement('page-container'));
+    assert.match(on.elements.get('mcp-status').innerHTML,
+                 /Основной транспорт \(POST\)/);
+    on.page.destroy();
+
+    const state = fixture();
+    state.info.transports = { http: false, sse: false };
+    const off = makeSandbox(state);
+    await off.page.render(makeElement('page-container'));
+    const html = off.elements.get('mcp-status').innerHTML;
+    assert.match(html, /503/);
+    assert.match(html, /stdio-мост|stdio/);
+    off.page.destroy();
+});
+
+test('отсутствие поля transports читается как «включён»', async () => {
+    // Обновление GUI не должно молча выключать транспорт, который
+    // работал всегда (core/mcp/auth.http_enabled).
+    const { page, elements } = makeSandbox(fixture());
+    await page.render(makeElement('page-container'));
+    const html = elements.get('mcp-status').innerHTML;
+    assert.ok(!/503/.test(html), 'без поля transports тревоги быть не должно');
+    page.destroy();
+});

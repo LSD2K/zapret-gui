@@ -38,9 +38,27 @@
 
 :func:`redact_text` вынесена отдельно: ею пользуется S12 (вывод
 shell-команд) — там ключей нет, есть сырой текст.
+
+## Режим «без маскировки» (S17)
+
+Маска спасает от утечки, но ломает работу: прочитав конфиг с ``***``
+вместо ключа и записав его обратно, модель уничтожает этот ключ. Поэтому
+есть **опциональный** режим: разрешение ``secrets`` плюс явный аргумент
+``raw: true`` в вызове (см. :func:`core.mcp.registry.call`). Включается
+он не флагом в каждой функции, а :func:`unredacted` — переключателем на
+время вызова, который живёт в thread-local:
+
+* точка маскировки по-прежнему **одна** — меняется не место вызова, а
+  режим;
+* ``redact_text`` внутри ``core/shell_exec.py`` и ``tools/files.py``
+  зовётся до сериализации, мимо ``tool_result``; флагом в аргументе их
+  пришлось бы протаскивать по всей цепочке, а thread-local их
+  выключает заодно;
+* соседний запрос это не затрагивает: у каждого свой поток bottle.
 """
 
 import re
+import threading
 
 
 MASK = "***"
@@ -106,12 +124,55 @@ _TEXT_RULES = (
 )
 
 
-def redact(value, _depth: int = 0):
+# Режим «отдать как есть» — на время одного вызова, в его потоке.
+# Значение по умолчанию (маскируем) не зависит ни от какой настройки:
+# отсутствие ключа в thread-local — это «маскировать», и так же
+# выглядит любой поток, который об этом режиме не знает.
+_local = threading.local()
+
+
+def raw_mode() -> bool:
+    """Идёт ли сейчас вызов, которому разрешено отдать секреты как есть."""
+    return bool(getattr(_local, "raw", False))
+
+
+class unredacted:
+    """Контекст «не маскировать» для текущего потока.
+
+    Зовётся ровно из одного места — :func:`core.mcp.registry.call`,
+    когда включено разрешение ``secrets`` И вызов явно попросил
+    ``raw: true``. Вложенность и исключения переживает: прежнее
+    значение возвращается в ``__exit__``.
+    """
+
+    __slots__ = ("_previous",)
+
+    def __init__(self):
+        self._previous = False
+
+    def __enter__(self):
+        self._previous = raw_mode()
+        _local.raw = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        _local.raw = self._previous
+        return False
+
+
+def redact(value, _depth: int = 0, force: bool = False):
     """Вернуть копию ``value`` без секретов.
 
     Исходная структура не меняется: инструменты отдают куски живого
     конфига, и порча их по дороге обошлась бы дороже утечки.
+
+    ``force=True`` маскирует **несмотря на** режим «без маскировки»:
+    так пишется журнал вызовов (``core/mcp/audit.py``). Ответ уезжает
+    модели и исчезает, а журнал остаётся на диске и переживает вызов —
+    секретам там не место, о чём бы ни попросил клиент.
     """
+    if raw_mode() and not force:
+        return value
     if _depth > MAX_DEPTH:
         return value
 
@@ -122,26 +183,30 @@ def redact(value, _depth: int = 0):
             if _is_secret_key(name):
                 out[key] = _mask_value(item)
             elif isinstance(item, str) and URL_KEY_RE.search(name):
-                out[key] = shorten_url(item)
+                out[key] = shorten_url(item, force=force)
             elif isinstance(item, str) and name.lower() in TEXT_KEYS:
-                out[key] = redact_text(item)
+                out[key] = redact_text(item, force=force)
             else:
-                out[key] = redact(item, _depth + 1)
+                out[key] = redact(item, _depth + 1, force=force)
         return out
 
     if isinstance(value, (list, tuple)):
-        return [redact(item, _depth + 1) for item in value]
+        return [redact(item, _depth + 1, force=force) for item in value]
 
     return value
 
 
-def redact_text(text: str) -> str:
+def redact_text(text: str, force: bool = False) -> str:
     """Замаскировать секреты в сыром тексте (вывод команд, логи).
 
     Работает по словам-маркерам (``token=``, ``Authorization:``), а не
     по виду значения: иначе под маску попадут домены и аргументы
     стратегий, ради которых текст и запрашивали.
+
+    ``force`` — как у :func:`redact`: журналу маска нужна всегда.
     """
+    if raw_mode() and not force:
+        return text
     if not isinstance(text, str) or not text:
         return text
     for pattern, index in _TEXT_RULES:
@@ -149,12 +214,14 @@ def redact_text(text: str) -> str:
     return text
 
 
-def shorten_url(value: str) -> str:
+def shorten_url(value: str, force: bool = False) -> str:
     """Оставить от адреса схему и хост: ``https://host/…``.
 
     Подписка — это путь и query; хост оставляем, потому что по нему
     видно, куда ходит GUI, и это сама по себе полезная диагностика.
     """
+    if raw_mode() and not force:
+        return value
     if not isinstance(value, str):
         return value
     text = value.strip()
@@ -163,7 +230,7 @@ def shorten_url(value: str) -> str:
         # Не HTTP — но и не обязательно безобидно: `tg://proxy?…secret=`
         # это готовый доступ к прокси, а «ключ похож на URL» про схему
         # ничего не обещает. Отдаём такой адрес через текстовую чистку.
-        return redact_text(value)
+        return redact_text(value, force=force)
     scheme, _, rest = text.partition("://")
     host = rest.split("/", 1)[0].split("?", 1)[0]
     if "@" in host:                       # user:pass@host

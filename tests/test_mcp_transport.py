@@ -568,6 +568,77 @@ class TestSSEInfo(_SSEBase):
         self.assertEqual(body["sse"]["sessions"], 1)
 
 
+class TestHttpTransportToggle(_McpHTTPBase):
+    """`mcp.transports.http` — переключатель, а не украшение (S17).
+
+    До S17 флаг висел в настройках и не влиял ни на что: пользователь
+    выключал транспорт и продолжал работать. Это хуже отсутствия флага.
+    """
+
+    def disable(self):
+        from core.config_manager import get_config_manager
+        cfg = get_config_manager()
+        self.addCleanup(cfg.set, "mcp", "transports", "http", True)
+        cfg.set("mcp", "transports", "http", False)
+
+    def test_enabled_by_default(self):
+        self.assertTrue(auth.http_enabled())
+
+    def test_missing_key_means_enabled(self):
+        # Обновление GUI не должно молча выключать транспорт, который
+        # работал всегда.
+        saved = auth.settings
+        self.addCleanup(setattr, auth, "settings", saved)
+        auth.settings = lambda: {"transports": {"sse": False}}
+        self.assertTrue(auth.http_enabled())
+
+    def test_post_is_503_when_disabled(self):
+        self.disable()
+        code, headers, body = self.rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        # 503, а не 404: точка вернётся, как только транспорт включат, —
+        # клиенту есть смысл повторить.
+        self.assertEqual(code, 503)
+        self.assertEqual(headers.get("retry-after"), "60")
+        self.assertIn("mcp.transports.http", body["error"])
+
+    def test_refusal_names_the_way_back(self):
+        self.disable()
+        _, _, body = self.rpc({"jsonrpc": "2.0", "id": 1,
+                               "method": "initialize"})
+        # Отрезать себя этим нельзя, и в ответе сказано чем включить.
+        self.assertIn("MCP-сервер", body["error"])
+        self.assertIn("stdio", body["hint"])
+
+    def test_refused_before_authorization(self):
+        # Для подбирающего токен это неотличимо от «точки нет».
+        self.disable()
+        code, _, _ = self.client.request(
+            "POST", "/api/mcp",
+            body={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        self.assertEqual(code, 503)
+
+    def test_get_also_says_so(self):
+        self.disable()
+        code, _, _ = self.client.request("GET", "/api/mcp")
+        self.assertEqual(code, 503)
+
+    def test_ui_panel_keeps_working(self):
+        # Главное свойство: страница MCP — отдельная дверь, и она
+        # включает транспорт обратно.
+        self.disable()
+        answer = self.client.get_json("/api/mcp/ui/state")
+        self.assertEqual(answer["_status"], 200)
+
+    def test_post_works_again_once_enabled(self):
+        self.disable()
+        from core.config_manager import get_config_manager
+        get_config_manager().set("mcp", "transports", "http", True)
+        code, _, _ = self.rpc({"jsonrpc": "2.0", "id": 1,
+                               "method": "initialize"})
+        self.assertEqual(code, 200)
+
+
 class TestExistingRoutesIntact(_McpHTTPBase):
     """MCP не должен ничего сдвинуть в уже работающем API."""
 

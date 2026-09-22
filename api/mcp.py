@@ -27,7 +27,11 @@ HTTP-транспорт MCP-сервера.
 диспетчер тот же самый.
 
 Флаг транспорта читается на каждом запросе — включение и выключение SSE
-не требует перезапуска GUI.
+не требует перезапуска GUI. То же и с основным транспортом:
+``mcp.transports.http=false`` закрывает ``POST /api/mcp`` (503 + Retry-
+After), но не трогает ни страницу MCP (``/api/mcp/ui/*`` — отдельная
+дверь под авторизацией GUI), ни stdio-мост, который зовёт диспетчер
+напрямую. Выключив транспорт, от управления не отрезаешься.
 """
 
 import json
@@ -59,6 +63,12 @@ def register(app):
     def api_mcp_rpc():
         """Единственная рабочая точка MCP: JSON-RPC поверх HTTP POST."""
         response.content_type = _JSON_CT
+
+        # 0. Транспорт выключен настройкой — отказ ДО авторизации:
+        #    неотличимо от «нет такой точки» для того, кто подбирает
+        #    токен, и понятно тому, кто сам его выключил.
+        if not auth.http_enabled():
+            return _http_disabled()
 
         # 1. Доступ: bind → Origin → токен → рейт-лимит.
         headers = _Headers(request.environ)
@@ -120,6 +130,8 @@ def register(app):
     @app.route("/api/mcp", method="GET")
     def api_mcp_get():
         """SSE-канала здесь нет — и это не поломка, а свойство точки."""
+        if not auth.http_enabled():
+            return _http_disabled()
         return _method_not_allowed(
             "GET /api/mcp не поддерживается: основной транспорт работает "
             "без SSE, все вызовы идут через POST /api/mcp. Это не ошибка "
@@ -432,6 +444,28 @@ def _session_param(headers) -> str:
         if value:
             return str(value).strip()
     return (headers.get(SESSION_HEADER, "") or "").strip()
+
+
+def _http_disabled():
+    """Отказ, когда ``mcp.transports.http`` выключен.
+
+    503, а не 404: точка существует и вернётся, как только транспорт
+    включат обратно, — клиенту есть смысл повторить, а не считать
+    сервер несуществующим.
+    """
+    response.status = 503
+    response.set_header("Retry-After", "60")
+    response.content_type = _JSON_CT
+    return _body({
+        "ok": False,
+        "error": "основной транспорт MCP выключен: mcp.transports.http="
+                 "false. Включить — на странице «MCP-сервер» в GUI "
+                 "(она работает независимо от этого флага) или в "
+                 "settings.json.",
+        "transports": {"http": False, "sse": mcp_session.sse_enabled()},
+        "hint": "stdio-мост (zapret-gui mcp --stdio) этим флагом не "
+                "закрывается: он зовёт диспетчер напрямую",
+    })
 
 
 def _sse_disabled():
