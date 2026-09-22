@@ -110,7 +110,9 @@ zapret-gui/
 │   ├── routing/            # selective routing (cidr/domain/device/dscp)
 │   ├── testers/            # сетевые тестеры (TLS/TCP/QUIC/STUN/DPI)
 │   ├── ndms/               # Keenetic RCI (интерфейсы, политики хостов)
-│   └── connectivity/       # матрица связности + traffic-серии (RAM)
+│   ├── connectivity/       # матрица связности + traffic-серии (RAM)
+│   └── mcp/                # MCP-сервер: реестр инструментов, разрешения
+│       └── tools/          #   сами инструменты, по модулю на домен
 │
 ├── web/                    # фронтенд (SPA)
 │   ├── index.html
@@ -418,6 +420,38 @@ Interface), `commands` (интерфейсы, политики хостов), `w
 | `auto_remediation.py` | Авто-починка: по сигналам мониторинга поднимает упавшее и переключает метод. |
 | `iface_socks.py` | SOCKS-прокси, привязанный к интерфейсу (`SO_BINDTODEVICE`) — регистрация usque/WARP через уже работающий обход. |
 
+### 5.8 MCP-сервер: `core/mcp/`
+
+Единственный подпакет `core/`, у которого есть **внешний потребитель —
+языковая модель**. Отсюда правила, которых нет у остальных доменов:
+инструмент публикуется сам (декоратор `@tool`, автозагрузка
+`core/mcp/tools/*` через `pkgutil`), каждая мутация оставляет снимок для
+отката, и **вся логика живёт в обычных модулях `core/`** — внутри
+`core/mcp/tools/*` только упаковка аргументов и ответа. Дублировать в
+MCP то, что уже умеет менеджер, нельзя: разойдётся с UI и CLI.
+
+| Модуль | Назначение |
+|--------|-----------|
+| `mcp/server.py` | Диспетчер JSON-RPC: `initialize`, `tools/*`, `resources/*`, `prompts/*`, батчи, уведомления. `PROTOCOL_VERSION` = ревизия спеки, с которой мы говорим. |
+| `mcp/registry.py` | Декоратор `@tool`, проверки объявления (имя, описание ≤ 300, scope/mutating, схема), `call()` и **единственная точка сериализации ответа**: маскировка секретов + обрезка по `mcp.limits.response_kb`. |
+| `mcp/permissions.py` | 11 разрешений (`mcp.permissions`, все по умолчанию `false`), их зависимости, whitelist настроек на запись (`is_writable`). |
+| `mcp/auth.py` | bind → Origin → Bearer-токен → рейт-лимит. Выключенный MCP отдаёт 404, а не 403: наружу не видно даже факта наличия точки. |
+| `mcp/audit.py` | Журнал вызовов (`mcp-audit.jsonl`) и снимки «до» (`mcp-undo.json`) рядом с `settings.json` — откат переживает перезагрузку. |
+| `mcp/redact.py` | Маскировка секретов **по ключам, а не по значениям**; `redact_text()` для сырого вывода shell и файлов. |
+| `mcp/schema.py` | Мини-валидатор JSON Schema (stdlib, без `jsonschema`). |
+| `mcp/resources.py` / `mcp/config_docs.py` / `mcp/prompts.py` | Справочники `zapret://…` (живой `nfqws2 -?`, карта `--lua-desync`, каталоги), описания настроек, промты-сценарии. |
+| `mcp/session.py` / `mcp/stdio.py` | Сессии legacy-SSE и stdio-мост (`ssh router zapret-gui mcp --stdio`). |
+| `mcp/tools/*.py` | 93 инструмента по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает). |
+
+Логика, которую MCP **использует, но не содержит**: `nfqws_control.py`
+(старт/стоп/применение стратегии — общий код для UI, CLI и MCP),
+`nfqws_session.py` (мьютекс на движок), `probe_runner.py`,
+`strategy_experiment.py`, `shell_exec.py`, `code_editor.py`,
+`code_guard.py`, `tunnels_overview.py`.
+
+Точная спецификация — скил [`mcp`](.claude/skills/mcp/SKILL.md);
+пользовательская часть — README, раздел «Управление через ИИ (MCP)».
+
 ---
 
 ## 6. Backend: `api/` и REST
@@ -457,6 +491,7 @@ Interface), `commands` (интерфейсы, политики хостов), `w
 | `diagnostics.py` | `/api/diagnostics` | ping/http/dns/conflicts/**known-conflicts**/firewall/system/**selfcheck** |
 | `healthcheck.py` | `/api/healthcheck` | autocircular-демон: enable/disable/run/status/config |
 | `backup.py` / `config_api.py` / `autostart.py` / `gui_update.py` / `logs.py` | … | бэкап / настройки / автозапуск / обновление GUI (+`/releases`) / логи (SSE) |
+| `mcp.py` / `mcp_ui.py` | `/api/mcp`, `/api/mcp/ui` | MCP-сервер (JSON-RPC, legacy-SSE, loopback-only `/info`) / панель управления им. **Две разные двери:** в `/api/mcp` пускает Bearer-токен, в `/api/mcp/ui` — только авторизация GUI (панель раздаёт разрешения, и токен модели не должен их расширять — врезка в `app.py`) |
 | `v1_compat.py` | `/api/v1/*` | алиасы старых путей — чтобы внешние скрипты не сломались при переименованиях |
 
 > Полный список конкретных роутов — в docstring каждого файла `api/*.py`
@@ -658,6 +693,7 @@ make lint
 | новый тип routing-правила | `core/routing/rules.py` + `*_rule.py` + бэкенды + `unified/model.METHOD_KINDS` если метод |
 | новый сетевой тест | `core/testers/`, подключить в `blockcheck.py` |
 | новый REST-эндпоинт | `api/<домен>.py` (`register`), задокументировать в docstring |
+| новый MCP-инструмент | `core/mcp/tools/<домен>.py` (декоратор `@tool`, логика — в менеджере, не здесь) + строка в скиле [`mcp`](.claude/skills/mcp/SKILL.md) + имя в README + тест. Сторож `tests/test_mcp_tools_docs.py` не даст забыть документацию, `tests/test_mcp_tool_counts.py` — счётчик по разрешению |
 | новую страницу UI | `web/js/pages/*.js` + `index.html` + роутер + `sidebar` |
 | новый фоновый воркер | синглтон с `reconfigure()` + регистрация в boot-хуках `app.py` |
 | новую настройку | `DEFAULT_CONFIG` в `config_manager.py` |
