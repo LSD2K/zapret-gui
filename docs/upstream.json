@@ -157,18 +157,23 @@
       "kind": "branch",
       "branch": "main",
       "pinned": "2025-06-18",
-      "verified_at": "2026-09-17",
+      "verified_at": "2026-09-22",
       "skill": ".claude/skills/mcp/SKILL.md",
       "mentions": [
         ".claude/skills/mcp/SKILL.md",
-        "core/mcp/server.py"
+        "core/mcp/server.py",
+        "README.md"
       ],
       "paths": [
         "schema/2025-06-18/schema.json",
         "docs/specification/2025-06-18/index.mdx"
       ],
+      "content_checks": {
+        "schema/2025-06-18/schema.json": "\"structuredContent\"",
+        "docs/specification/2025-06-18/index.mdx": "specification/2025-06-18/"
+      },
       "vendored": {},
-      "note": "Пиннинг — не версия чужого кода, а РЕВИЗИЯ спеки, на которой говорит наш сервер (server.PROTOCOL_VERSION). Ревизии date-based и выходят редко, но выход новой — это не «обновить число»: меняются методы и поля, а клиенты переходят не все, поэтому старые ревизии остаются в SUPPORTED_PROTOCOL_VERSIONS. paths стерегут, что пиннингу всё ещё соответствует реальная папка спеки: переименуют — узнаем сразу, а не когда клиент перестанет подключаться."
+      "note": "Пиннинг — не версия чужого кода, а РЕВИЗИЯ спеки, на которой говорит наш сервер (server.PROTOCOL_VERSION). Ревизии date-based и выходят редко, но выход новой — это не «обновить число»: меняются методы и поля, а клиенты переходят не все, поэтому старые ревизии остаются в SUPPORTED_PROTOCOL_VERSIONS. paths стерегут, что пиннингу всё ещё соответствует реальная папка спеки: переименуют — узнаем сразу, а не когда клиент перестанет подключаться. content_checks стерегут формат ВНУТРИ неё: structuredContent — поле результата tools/call, которое появилось именно в этой ревизии и которое отдаёт наш registry.tool_result(); исчезнет оно — ответы станут невалидными для клиента, а пути при этом останутся на месте."
     }
   ]
 }

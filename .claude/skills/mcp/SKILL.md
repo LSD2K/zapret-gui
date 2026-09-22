@@ -77,21 +77,35 @@ description: >-
   `web/js/i18n/*`),
   мини-валидаторе JSON Schema (`core/mcp/schema.py`),
   диспетчере JSON-RPC (`core/mcp/server.py`, ревизия спеки 2025-06-18,
-  `initialize`/`tools/list`/`tools/call`, батч, уведомления) и тестах-сторожах
-  (`tests/test_mcp_*.py`: счётчик инструментов, утечка секретов, writable-пути).
+  `initialize`/`tools/list`/`tools/call`, батч, уведомления), тестах-сторожах
+  (`tests/test_mcp_*.py`: счётчик инструментов, утечка секретов, writable-пути,
+  синхронность реестра с документацией — `tests/test_mcp_tools_docs.py`) и
+  разделении документации (README — «зачем и как включить», этот скил —
+  сигнатуры и грабли, `CoderManual.md` — куда класть новый инструмент,
+  `docs/mcp/` — архив рабочих заданий).
   Источник истины по спеке — modelcontextprotocol.io (ревизия 2025-06-18),
   по нарезке работ — `docs/mcp/00-contract.md` и `docs/mcp/HANDOFF.md`,
   привязка — наш код `core/mcp/*.py`, `core/mcp/tools/*.py`, `api/mcp.py`.
 ---
 
-# MCP-сервер zapret-gui — справочник для сессий S5+
+# MCP-сервер zapret-gui — справочник
 
 Слепок того, **как устроен MCP в этом репозитории**. Читать вместо того,
-чтобы заново разбирать уже написанный код: контракт (`docs/mcp/00-contract.md`)
-говорит, *что* строим, этот файл — *как оно сделано сейчас*.
+чтобы заново разбирать уже написанный код: контракт
+(`docs/mcp/00-contract.md`) говорит, *что* строили, этот файл — *как оно
+сделано сейчас*. Фича доведена до конца (S1–S16); рабочие задания
+сессий лежат в [`docs/mcp/`](../../../docs/mcp/README.md) как архив.
 
-Обновляется **каждой сессией**: добавили инструмент — добавили строку в
-таблицу и в `tests/test_mcp_tool_counts.py`.
+**Этот файл — для того, кто правит код.** Пользовательский текст («зачем
+это нужно, как включить, чем рискую») живёт в README, раздел
+«Управление через ИИ (MCP)», и дублировать его сюда не надо: разойдутся.
+Здесь — точные сигнатуры, границы и грабли.
+
+Добавили инструмент — обязаны появиться: строка в таблице ниже (имя,
+scope, mutating, файл, аргументы), имя в README и число в
+`tests/test_mcp_tool_counts.py`. Первые два стережёт
+`tests/test_mcp_tools_docs.py`, и он сверяет не только наличие строки, но
+и её scope с объявленным в коде.
 
 Ревизия спеки: **2025-06-18** (`server.PROTOCOL_VERSION`; понимаются также
 `2025-03-26` и `2024-11-05`). Ограничение на весь пакет — **только stdlib**.
@@ -218,102 +232,101 @@ UI), и `tools_by_scope`.
 
 ## Инструменты (обновлять каждой сессией)
 
-| Имя | Scope | Mut. | Файл | Что делает |
-|---|---|---|---|---|
-| `system_status` | read | нет | `tools/status.py` | платформа, аптайм, память, какие движки подняты |
-| `nfqws_status` | read | нет | `tools/status.py` | движок nfqws2: pid, аптайм, argv, код выхода |
-| `config_get` | read | нет | `tools/config.py` | настройки по точечному пути, с флагом `writable` |
-| `logs_tail` | read | нет | `tools/logs.py` | хвост журнала: `source`, `level`, `search`, `since`, `limit` ≤ 200 |
-| `docs_get` | read | нет | `tools/docs.py` | любой ресурс `zapret://…` постранично: `uri`/`topic`, `section`, `offset`/`limit` |
-| `config_describe` | read | нет | `tools/docs.py` | описание настройки: тип, дефолт, единица, что значит 0/пусто, writable |
-| `strategy_list` | read | нет | `tools/strategies.py` | стратегии (builtin+user) с `is_active`; фильтры protocol/level/source/featured/active_only |
-| `strategy_get` | read | нет | `tools/strategies.py` | одна стратегия целиком: профили, их args, `techniques`, blob'ы |
-| `catalog_search` | read | нет | `tools/strategies.py` | поиск по INI-каталогам: `query`, `technique`, protocol, level, label |
-| `nfqws_command_preview` | read | нет | `tools/strategies.py` | итоговый argv стратегии — через `build_preview_command`, как при живом запуске |
-| `strategy_state_list` | read | нет | `tools/strategies.py` | выученное circular'ом из `state.tsv`: host, `group`, номер, возраст |
-| `hostlists_list` | read | нет | `tools/lists.py` | списки доменов: сколько записей, путь, есть ли файл |
-| `hostlist_get` | read | нет | `tools/lists.py` | окно одного списка + `search`; на 50 000 доменов отдаёт окно, не дамп |
-| `ipsets_list` | read | нет | `tools/lists.py` | списки IP: перечень, с `name` — содержимое |
-| `lists_list` | read | нет | `tools/lists.py` | именованные списки единого слоя: домены и CIDR по списку |
-| `blobs_list` | read | нет | `tools/lists.py` | реестр blob'ов и **существует ли файл** (`missing_only`) |
-| `lua_functions_list` | read | нет | `tools/lists.py` | функции `--lua-desync` с этого устройства: параметры, `needs_blob` |
-| `firewall_status` | read | нет | `tools/firewall.py` | правила NFQUEUE, бэкенд, `queue_numbers`, `conflicts` |
-| `traffic_recent` | read | нет | `tools/traffic.py` | дошёл ли трафик до движка: домен/профиль/вердикт за N минут |
-| `tunnels_status` | read | нет | `tools/tunnels.py` | шесть движков одним ответом: установлен/запущен/конфиги/трафик/последняя ошибка |
-| `diagnostics_run` | read | нет | `tools/diagnostics.py` | окружение, конфликты, предпосылки; сетевые пробы — по разрешению `probes` |
-| `dpi_report` | read | нет | `tools/diagnostics.py` | последняя классификация DPI из blockcheck; **проб не запускает** |
-| `updates_check` | read | нет | `tools/updates.py` | версии движков и обновления; по умолчанию из кеша, `refresh` — по `probes` |
-| `config_writable_paths` | read | нет | `tools/config.py` | что можно менять: путь, тип, текущее значение, `enum` |
-| `audit_list` | read | нет | `tools/audit.py` | последние вызовы MCP из журнала, новые первыми, с пометкой «ещё откатывается» |
-| `config_set` | config_write | **да** | `tools/config.py` | записать ОДНУ настройку; ответ — дифф «было/стало», список заменяется целиком |
-| `nfqws_start` | control | **да** | `tools/nfqws.py` | правила перехвата + движок с активной стратегией; обратное — `nfqws_stop` |
-| `nfqws_stop` | control | **да** | `tools/nfqws.py` | остановить движок и снять правила |
-| `nfqws_restart` | control | **да** | `tools/nfqws.py` | перезапуск со свежесобранными аргументами активной стратегии |
-| `nfqws_reload_lists` | control | **да** | `tools/nfqws.py` | SIGHUP: перечитать списки БЕЗ перезапуска; в ответе `signalled` |
-| `strategy_apply` | control | **да** | `tools/nfqws.py` | применить стратегию по id; снимок вида `strategy_active` |
-| `firewall_apply` | control | **да** | `tools/firewall.py` | поставить правила NFQUEUE; порты управления исключаются |
-| `firewall_remove` | control | **да** | `tools/firewall.py` | снять правила: трафик пойдёт напрямую |
-| `strategy_save` | strategies_write | **да** | `tools/strategies.py` | создать/перезаписать USER-стратегию; профили заменяются целиком; `validation` — прогон `--intercept=0` |
-| `strategy_delete` | strategies_write | **да** | `tools/strategies.py` | удалить USER-стратегию; builtin — отказ |
-| `hostlist_edit` | strategies_write | **да** | `tools/lists.py` | `replace`/`add`/`remove` по списку доменов; SIGHUP; пустой список — предупреждение |
-| `ipset_edit` | strategies_write | **да** | `tools/lists.py` | то же для IP/CIDR; непринятые записи перечисляются |
-| `blob_add` | strategies_write | **да** | `tools/lists.py` | записать blob из hex (≤ 64 КБ); builtin-имена — отказ |
-| `lua_script_save` | strategies_write | **да** | `tools/lists.py` | сохранить lua-скрипт; битый синтаксис — отказ, `force=true` перебивает |
-| `mcp_undo_last` | any_write | **да** | `tools/audit.py` | откатить последнее изменение по снимку с диска (любой вид) |
-| `scan_status` | read | нет | `tools/scan.py` | прогресс подбора: фаза, сколько проверено, `baseline_open`; `job_id` — опционально |
-| `scan_results` | read | нет | `tools/scan.py` | что нашёл подбор, лучшие первыми; `failed=true` — что НЕ сработало |
-| `blockcheck_status` | read | нет | `tools/blockcheck.py` | прогресс НАШЕГО blockcheck; вердикт — в `dpi_report` |
-| `blockcheck2_status` | read | нет | `tools/blockcheck.py` | прогон скрипта bol-van: идёт ли, код выхода, `found`, `highlights` |
-| `blockcheck2_output` | read | нет | `tools/blockcheck.py` | телеметрия скрипта инкрементально: `offset` → `next_offset` |
-| `healthcheck_status` | read | нет | `tools/blockcheck.py` | расписание, сервисы, история и `fail_streak`; проб не запускает |
-| `connectivity_matrix` | read | нет | `tools/probes.py` | матрица «цель × интерфейс»; `refresh` — по `probes` |
-| `probe_targets` | probes | нет | `tools/probes.py` | проба доменов DNS→TCP→TLS→HTTP; коды из `PROBE_CODES`, состояния не меняет |
-| `probe_compare` | probes | **да** | `tools/probes.py` | домен с обходом и без; вердикт из пяти; переключение движка требует ещё и `control` |
-| `scan_start` | probes | **да** | `tools/scan.py` | запустить подбор стратегий; ответ — `job_id`, сразу |
-| `scan_stop` | probes | **да** | `tools/scan.py` | остановить подбор; проверенное остаётся в `scan_results` |
-| `blockcheck_start` | probes | **да** | `tools/blockcheck.py` | наш blockcheck в фоне; отчёт потом — `dpi_report` |
-| `blockcheck2_start` | probes | **да** | `tools/blockcheck.py` | оригинальный скрипт zapret2 (DOMAINS/SCANLEVEL/REPEATS/…) |
-| `blockcheck2_stop` | probes | **да** | `tools/blockcheck.py` | прибить скрипт; собранная телеметрия остаётся читаемой |
-| `healthcheck_run` | probes | **да** | `tools/blockcheck.py` | разовый прогон healthcheck в фоне; результат — в `healthcheck_status` |
-| `scan_apply` | control | **да** | `tools/scan.py` | применить найденное: сохранить USER-стратегию и поднять движок; нужен ещё `strategies_write` |
-| `strategy_experiment_start` | experiments | **да** | `tools/experiments.py` | прогнать варианты стратегии с измерением; ответ — `run_id`, сразу |
-| `strategy_experiment_status` | experiments | нет | `tools/experiments.py` | фаза, номер варианта, сколько осталось до авто-отката |
-| `strategy_experiment_result` | experiments | нет | `tools/experiments.py` | отчёт: цифры по целям, `score`, дельта к baseline, лог движка, подсказки |
-| `strategy_experiment_commit` | experiments | **да** | `tools/experiments.py` | оставить вариант применённым; `save_as` — ещё и `strategies_write` |
-| `strategy_experiment_rollback` | experiments | **да** | `tools/experiments.py` | вернуть состояние к снимку немедленно |
-| `strategy_experiment_stop` | experiments | **да** | `tools/experiments.py` | остановить прогон; измеренное остаётся в отчёте |
-| `strategy_experiment_history` | experiments | нет | `tools/experiments.py` | прошлые прогоны этого процесса GUI, новые первыми |
-| `strategy_compose` | strategies_write | нет | `tools/compose.py` | описание (фильтр/payload/инстансы) → argv + команда + линтер; ничего не сохраняет |
-| `strategy_validate` | strategies_write | нет | `tools/compose.py` | `nfqws2 --intercept=0` по `strategy_id`/`args`/`profiles`: опции, файлы и **исполнение lua-init** |
-| `shell_exec` | shell_readonly | **да** | `tools/shell.py` | команда на роутере; safe-список и argv — по `shell_readonly`, произвольная строка (`sh -c`) — по `shell_full` |
-| `shell_exec_async` | shell_readonly | **да** | `tools/shell.py` | то же фоном: ответ — `job_id`, сразу |
-| `shell_job_status` | shell_readonly | нет | `tools/shell.py` | состояние фоновой команды; без `job_id` — список всех |
-| `shell_job_output` | shell_readonly | нет | `tools/shell.py` | вывод фоновой команды инкрементально: `offset` → `next_offset` |
-| `shell_job_stop` | shell_readonly | **да** | `tools/shell.py` | прибить фоновую команду; собранный вывод остаётся читаемым |
-| `shell_confirm` | shell_readonly | **да** | `tools/shell.py` | второй шаг: `confirm_token` — исполнить, `run_id` — снять дедмен |
-| `file_read` | shell_readonly | нет | `tools/files.py` | окно файла (`offset`/`limit_kb`/`tail`), секреты вырезаны |
-| `file_list` | shell_readonly | нет | `tools/files.py` | каталог полями: имя, размер, права, mtime, тип |
-| `package_list` | shell_readonly | нет | `tools/packages.py` | что установлено: `opkg list-installed` / `apk list -I` |
-| `service_list` | shell_readonly | нет | `tools/services.py` | исполняемые скрипты `/opt/etc/init.d` и `/etc/init.d` |
-| `service_control` | shell_readonly | **да** | `tools/services.py` | `status` — по `shell_readonly`, `start/stop/restart/reload` — по `shell_full` |
-| `file_write` | shell_full | **да** | `tools/files.py` | запись внутрь `allow_write_paths`, атомарно, с бэкапом в аудит |
-| `package_install` | shell_full | **да** | `tools/packages.py` | поставить пакет; обратимо через `mcp_undo_last` |
-| `package_remove` | shell_full | **да** | `tools/packages.py` | удалить пакет — через `shell_confirm`; обратимо |
-| `system_reboot` | dangerous | **да** | `tools/system.py` | перезагрузка: токен → `shell_confirm` → `core/system_control.py` |
-| `code_tree` | self_edit | нет | `tools/code.py` | файлы GUI: путь, размер, mtime, `protected`, `staged`; маска и пагинация |
-| `code_read` | self_edit | нет | `tools/code.py` | окно файла: `content` (для точного совпадения) + нумерация по запросу |
-| `code_search` | self_edit | нет | `tools/code.py` | поиск по коду (подстрока/регэксп) с контекстом ±N строк |
-| `code_check` | self_edit | нет | `tools/code.py` | проверки **без применения**: разбор, импорт из слепка, полный `make lint` |
-| `code_test` | self_edit | нет | `tools/code.py` | `pytest tests/ -q -k …` по staging-слепку; нет pytest — `available: false` |
-| `code_history` | self_edit | нет | `tools/code.py` | снимки: id, время, файлы, размер diff, состояние, причина отката |
-| `code_diff` | self_edit | нет | `tools/code.py` | unified diff: staging / снимок / исходный эталон |
-| `code_export_patch` | self_edit | нет | `tools/code.py` | все локальные правки устройства одним диффом — чтобы перенести в репозиторий |
-| `code_patch` | self_edit | **да** | `tools/code.py` | точечная правка в staging: `edits` ИЛИ `diff`; неоднозначное совпадение — отказ |
-| `code_write` | self_edit | **да** | `tools/code.py` | файл целиком (в т.ч. новый) — тоже в staging |
-| `code_apply` | self_edit | **да** | `tools/code.py` | снимок → проверки → диск → сторож → перезапуск; **рвёт соединение** |
-| `code_commit` | self_edit | **да** | `tools/code.py` | подтвердить применённое; без него откат по `commit_ttl_sec` |
-| `code_rollback` | self_edit | **да** | `tools/code.py` | вернуть снимок (последний или по `snapshot_id`) |
-
+| Имя | Scope | Mut. | Файл | Аргументы (`?` — необязательный) | Что делает |
+|---|---|---|---|---|---|
+| `system_status` | read | нет | `tools/status.py` | — | платформа, аптайм, память, какие движки подняты |
+| `nfqws_status` | read | нет | `tools/status.py` | — | движок nfqws2: pid, аптайм, argv, код выхода |
+| `config_get` | read | нет | `tools/config.py` | path?, depth? | настройки по точечному пути, с флагом `writable` |
+| `logs_tail` | read | нет | `tools/logs.py` | source?, level?, search?, since?, limit? | хвост журнала: `source`, `level`, `search`, `since`, `limit` ≤ 200 |
+| `docs_get` | read | нет | `tools/docs.py` | topic?, uri?, section?, offset?, limit? | любой ресурс `zapret://…` постранично: `uri`/`topic`, `section`, `offset`/`limit` |
+| `config_describe` | read | нет | `tools/docs.py` | path?, query?, limit? | описание настройки: тип, дефолт, единица, что значит 0/пусто, writable |
+| `strategy_list` | read | нет | `tools/strategies.py` | query?, protocol?, level?, source?, featured?, active_only?, offset?, limit? | стратегии (builtin+user) с `is_active`; фильтры protocol/level/source/featured/active_only |
+| `strategy_get` | read | нет | `tools/strategies.py` | id? | одна стратегия целиком: профили, их args, `techniques`, blob'ы |
+| `catalog_search` | read | нет | `tools/strategies.py` | query?, technique?, protocol?, level?, label?, offset?, limit? | поиск по INI-каталогам: `query`, `technique`, protocol, level, label |
+| `nfqws_command_preview` | read | нет | `tools/strategies.py` | strategy_id? | итоговый argv стратегии — через `build_preview_command`, как при живом запуске |
+| `strategy_state_list` | read | нет | `tools/strategies.py` | host?, group?, offset?, limit? | выученное circular'ом из `state.tsv`: host, `group`, номер, возраст |
+| `hostlists_list` | read | нет | `tools/lists.py` | offset?, limit? | списки доменов: сколько записей, путь, есть ли файл |
+| `hostlist_get` | read | нет | `tools/lists.py` | name, search?, offset?, limit? | окно одного списка + `search`; на 50 000 доменов отдаёт окно, не дамп |
+| `ipsets_list` | read | нет | `tools/lists.py` | name?, search?, offset?, limit? | списки IP: перечень, с `name` — содержимое |
+| `lists_list` | read | нет | `tools/lists.py` | id?, offset?, limit? | именованные списки единого слоя: домены и CIDR по списку |
+| `blobs_list` | read | нет | `tools/lists.py` | query?, missing_only?, offset?, limit? | реестр blob'ов и **существует ли файл** (`missing_only`) |
+| `lua_functions_list` | read | нет | `tools/lists.py` | name?, query?, needs_blob?, offset?, limit? | функции `--lua-desync` с этого устройства: параметры, `needs_blob` |
+| `firewall_status` | read | нет | `tools/firewall.py` | rules?, offset?, limit? | правила NFQUEUE, бэкенд, `queue_numbers`, `conflicts` |
+| `traffic_recent` | read | нет | `tools/traffic.py` | minutes?, domain?, source?, offset?, limit? | дошёл ли трафик до движка: домен/профиль/вердикт за N минут |
+| `tunnels_status` | read | нет | `tools/tunnels.py` | engine?, logs?, running_only?, instances?, offset?, limit? | шесть движков одним ответом: установлен/запущен/конфиги/трафик/последняя ошибка |
+| `diagnostics_run` | read | нет | `tools/diagnostics.py` | checks?, services?, offset?, limit? | окружение, конфликты, предпосылки; сетевые пробы — по разрешению `probes` |
+| `dpi_report` | read | нет | `tools/diagnostics.py` | targets?, offset?, limit? | последняя классификация DPI из blockcheck; **проб не запускает** |
+| `updates_check` | read | нет | `tools/updates.py` | refresh?, updates_only?, offset?, limit? | версии движков и обновления; по умолчанию из кеша, `refresh` — по `probes` |
+| `config_writable_paths` | read | нет | `tools/config.py` | section?, search?, offset?, limit? | что можно менять: путь, тип, текущее значение, `enum` |
+| `audit_list` | read | нет | `tools/audit.py` | tool?, status?, mutating_only?, offset?, limit? | последние вызовы MCP из журнала, новые первыми, с пометкой «ещё откатывается» |
+| `config_set` | config_write | **да** | `tools/config.py` | path, value | записать ОДНУ настройку; ответ — дифф «было/стало», список заменяется целиком |
+| `nfqws_start` | control | **да** | `tools/nfqws.py` | — | правила перехвата + движок с активной стратегией; обратное — `nfqws_stop` |
+| `nfqws_stop` | control | **да** | `tools/nfqws.py` | — | остановить движок и снять правила |
+| `nfqws_restart` | control | **да** | `tools/nfqws.py` | — | перезапуск со свежесобранными аргументами активной стратегии |
+| `nfqws_reload_lists` | control | **да** | `tools/nfqws.py` | reason? | SIGHUP: перечитать списки БЕЗ перезапуска; в ответе `signalled` |
+| `strategy_apply` | control | **да** | `tools/nfqws.py` | id | применить стратегию по id; снимок вида `strategy_active` |
+| `firewall_apply` | control | **да** | `tools/firewall.py` | — | поставить правила NFQUEUE; порты управления исключаются |
+| `firewall_remove` | control | **да** | `tools/firewall.py` | — | снять правила: трафик пойдёт напрямую |
+| `strategy_save` | strategies_write | **да** | `tools/strategies.py` | id, name, description?, protocol?, profiles | создать/перезаписать USER-стратегию; профили заменяются целиком; `validation` — прогон `--intercept=0` |
+| `strategy_delete` | strategies_write | **да** | `tools/strategies.py` | id | удалить USER-стратегию; builtin — отказ |
+| `hostlist_edit` | strategies_write | **да** | `tools/lists.py` | name, mode?, domains | `replace`/`add`/`remove` по списку доменов; SIGHUP; пустой список — предупреждение |
+| `ipset_edit` | strategies_write | **да** | `tools/lists.py` | name, mode?, entries | то же для IP/CIDR; непринятые записи перечисляются |
+| `blob_add` | strategies_write | **да** | `tools/lists.py` | name, hex | записать blob из hex (≤ 64 КБ); builtin-имена — отказ |
+| `lua_script_save` | strategies_write | **да** | `tools/lists.py` | name, content, force? | сохранить lua-скрипт; битый синтаксис — отказ, `force=true` перебивает |
+| `mcp_undo_last` | any_write | **да** | `tools/audit.py` | kind? | откатить последнее изменение по снимку с диска (любой вид) |
+| `scan_status` | read | нет | `tools/scan.py` | job_id? | прогресс подбора: фаза, сколько проверено, `baseline_open`; `job_id` — опционально |
+| `scan_results` | read | нет | `tools/scan.py` | failed?, offset?, limit? | что нашёл подбор, лучшие первыми; `failed=true` — что НЕ сработало |
+| `blockcheck_status` | read | нет | `tools/blockcheck.py` | job_id? | прогресс НАШЕГО blockcheck; вердикт — в `dpi_report` |
+| `blockcheck2_status` | read | нет | `tools/blockcheck.py` | job_id? | прогон скрипта bol-van: идёт ли, код выхода, `found`, `highlights` |
+| `blockcheck2_output` | read | нет | `tools/blockcheck.py` | offset?, limit?, job_id? | телеметрия скрипта инкрементально: `offset` → `next_offset` |
+| `healthcheck_status` | read | нет | `tools/blockcheck.py` | history?, limit? | расписание, сервисы, история и `fail_streak`; проб не запускает |
+| `connectivity_matrix` | read | нет | `tools/probes.py` | refresh?, ifaces?, offset?, limit? | матрица «цель × интерфейс»; `refresh` — по `probes` |
+| `probe_targets` | probes | нет | `tools/probes.py` | targets, repeats?, timeout_sec?, port?, offset?, limit? | проба доменов DNS→TCP→TLS→HTTP; коды из `PROBE_CODES`, состояния не меняет |
+| `probe_compare` | probes | **да** | `tools/probes.py` | target, repeats?, timeout_sec?, toggle? | домен с обходом и без; вердикт из пяти; переключение движка требует ещё и `control` |
+| `scan_start` | probes | **да** | `tools/scan.py` | target, protocol?, mode?, resume?, dpi_type? | запустить подбор стратегий; ответ — `job_id`, сразу |
+| `scan_stop` | probes | **да** | `tools/scan.py` | — | остановить подбор; проверенное остаётся в `scan_results` |
+| `blockcheck_start` | probes | **да** | `tools/blockcheck.py` | mode?, domains?, timeout_sec? | наш blockcheck в фоне; отчёт потом — `dpi_report` |
+| `blockcheck2_start` | probes | **да** | `tools/blockcheck.py` | domains?, scanlevel?, ipv?, repeats?, http?, tls12?, tls13?, http3? | оригинальный скрипт zapret2 (DOMAINS/SCANLEVEL/REPEATS/…) |
+| `blockcheck2_stop` | probes | **да** | `tools/blockcheck.py` | — | прибить скрипт; собранная телеметрия остаётся читаемой |
+| `healthcheck_run` | probes | **да** | `tools/blockcheck.py` | — | разовый прогон healthcheck в фоне; результат — в `healthcheck_status` |
+| `scan_apply` | control | **да** | `tools/scan.py` | index?, strategy_id? | применить найденное: сохранить USER-стратегию и поднять движок; нужен ещё `strategies_write` |
+| `strategy_experiment_start` | experiments | **да** | `tools/experiments.py` | variants, targets?, probes?, repeats?, baseline?, ttl_sec?, keep_best? | прогнать варианты стратегии с измерением; ответ — `run_id`, сразу |
+| `strategy_experiment_status` | experiments | нет | `tools/experiments.py` | — | фаза, номер варианта, сколько осталось до авто-отката |
+| `strategy_experiment_result` | experiments | нет | `tools/experiments.py` | run_id?, include_log?, offset?, limit? | отчёт: цифры по целям, `score`, дельта к baseline, лог движка, подсказки |
+| `strategy_experiment_commit` | experiments | **да** | `tools/experiments.py` | label?, save_as?, save_name?, make_active? | оставить вариант применённым; `save_as` — ещё и `strategies_write` |
+| `strategy_experiment_rollback` | experiments | **да** | `tools/experiments.py` | — | вернуть состояние к снимку немедленно |
+| `strategy_experiment_stop` | experiments | **да** | `tools/experiments.py` | — | остановить прогон; измеренное остаётся в отчёте |
+| `strategy_experiment_history` | experiments | нет | `tools/experiments.py` | offset?, limit? | прошлые прогоны этого процесса GUI, новые первыми |
+| `strategy_compose` | strategies_write | нет | `tools/compose.py` | profiles, validate? | описание (фильтр/payload/инстансы) → argv + команда + линтер; ничего не сохраняет |
+| `strategy_validate` | strategies_write | нет | `tools/compose.py` | strategy_id?, args?, profiles? | `nfqws2 --intercept=0` по `strategy_id`/`args`/`profiles`: опции, файлы и **исполнение lua-init** |
+| `shell_exec` | shell_readonly | **да** | `tools/shell.py` | command?, argv?, timeout_sec?, workdir?, guard? | команда на роутере; safe-список и argv — по `shell_readonly`, произвольная строка (`sh -c`) — по `shell_full` |
+| `shell_exec_async` | shell_readonly | **да** | `tools/shell.py` | command?, argv?, timeout_sec?, workdir?, label?, guard? | то же фоном: ответ — `job_id`, сразу |
+| `shell_job_status` | shell_readonly | нет | `tools/shell.py` | job_id? | состояние фоновой команды; без `job_id` — список всех |
+| `shell_job_output` | shell_readonly | нет | `tools/shell.py` | job_id, offset? | вывод фоновой команды инкрементально: `offset` → `next_offset` |
+| `shell_job_stop` | shell_readonly | **да** | `tools/shell.py` | job_id | прибить фоновую команду; собранный вывод остаётся читаемым |
+| `shell_confirm` | shell_readonly | **да** | `tools/shell.py` | confirm_token?, run_id? | второй шаг: `confirm_token` — исполнить, `run_id` — снять дедмен |
+| `file_read` | shell_readonly | нет | `tools/files.py` | path, offset?, limit_kb?, tail? | окно файла (`offset`/`limit_kb`/`tail`), секреты вырезаны |
+| `file_list` | shell_readonly | нет | `tools/files.py` | path, search?, offset?, limit? | каталог полями: имя, размер, права, mtime, тип |
+| `package_list` | shell_readonly | нет | `tools/packages.py` | search?, offset?, limit? | что установлено: `opkg list-installed` / `apk list -I` |
+| `service_list` | shell_readonly | нет | `tools/services.py` | search?, offset?, limit? | исполняемые скрипты `/opt/etc/init.d` и `/etc/init.d` |
+| `service_control` | shell_readonly | **да** | `tools/services.py` | name, action? | `status` — по `shell_readonly`, `start/stop/restart/reload` — по `shell_full` |
+| `file_write` | shell_full | **да** | `tools/files.py` | path, content, mode?, create_dirs? | запись внутрь `allow_write_paths`, атомарно, с бэкапом в аудит |
+| `package_install` | shell_full | **да** | `tools/packages.py` | name, update? | поставить пакет; обратимо через `mcp_undo_last` |
+| `package_remove` | shell_full | **да** | `tools/packages.py` | name | удалить пакет — через `shell_confirm`; обратимо |
+| `system_reboot` | dangerous | **да** | `tools/system.py` | reason? | перезагрузка: токен → `shell_confirm` → `core/system_control.py` |
+| `code_tree` | self_edit | нет | `tools/code.py` | mask?, path?, offset?, limit? | файлы GUI: путь, размер, mtime, `protected`, `staged`; маска и пагинация |
+| `code_read` | self_edit | нет | `tools/code.py` | path, offset?, limit?, numbered? | окно файла: `content` (для точного совпадения) + нумерация по запросу |
+| `code_search` | self_edit | нет | `tools/code.py` | pattern, regex?, path?, mask?, context?, limit?, offset? | поиск по коду (подстрока/регэксп) с контекстом ±N строк |
+| `code_check` | self_edit | нет | `tools/code.py` | paths?, lint?, tests?, test_pattern? | проверки **без применения**: разбор, импорт из слепка, полный `make lint` |
+| `code_test` | self_edit | нет | `tools/code.py` | pattern?, timeout_sec? | `pytest tests/ -q -k …` по staging-слепку; нет pytest — `available: false` |
+| `code_history` | self_edit | нет | `tools/code.py` | offset?, limit? | снимки: id, время, файлы, размер diff, состояние, причина отката |
+| `code_diff` | self_edit | нет | `tools/code.py` | against?, snapshot_id?, path?, limit_kb? | unified diff: staging / снимок / исходный эталон |
+| `code_export_patch` | self_edit | нет | `tools/code.py` | limit_kb? | все локальные правки устройства одним диффом — чтобы перенести в репозиторий |
+| `code_patch` | self_edit | **да** | `tools/code.py` | path?, edits?, diff?, drop? | точечная правка в staging: `edits` ИЛИ `diff`; неоднозначное совпадение — отказ |
+| `code_write` | self_edit | **да** | `tools/code.py` | path, content, mode? | файл целиком (в т.ч. новый) — тоже в staging |
+| `code_apply` | self_edit | **да** | `tools/code.py` | reason, restart?, run_tests?, test_pattern? | снимок → проверки → диск → сторож → перезапуск; **рвёт соединение** |
+| `code_commit` | self_edit | **да** | `tools/code.py` | snapshot_id? | подтвердить применённое; без него откат по `commit_ttl_sec` |
+| `code_rollback` | self_edit | **да** | `tools/code.py` | snapshot_id?, restart?, reason? | вернуть снимок (последний или по `snapshot_id`) |
 Эталон формы — первые четыре: одинаковые имена полей, одинаковая
 обработка «нет данных», одинаковые лимиты. Новый инструмент делается по ним.
 `docs_get`/`config_describe` — эталон **постраничного** ответа
@@ -806,7 +819,6 @@ Keenetic (23, 233) и **порт GUI живьём из конфига**. Диа�
 | `blockcheck_status`, `blockcheck2_status`, `blockcheck2_output` | `blockcheck_start`, `blockcheck2_start`, `blockcheck2_stop` |
 | `healthcheck_status` | `healthcheck_run` |
 | `connectivity_matrix` (снимок) | `connectivity_matrix(refresh=true)` |
-
 Опрос задачи — чтение: он не выпускает ни одного пакета, а без него
 асинхронный контракт не работает вовсе. Остановка — проба: она меняет
 состояние прогона, и право на неё есть у того, кто мог его запустить.
@@ -1701,11 +1713,48 @@ loopback-only, а GUI открывают из браузера на LAN-адре
 S12/S13 (shell, самоправка) отдают сырой текст: кладите его под ключ из
 `TEXT_KEYS` или зовите `redact.redact_text()` явно.
 
+## Документация: кто что говорит (S16)
+
+Четыре текста про одно и то же — и у каждого своя работа. Путать их
+дорого: README, написанный как спека, никто не прочитает, а скил,
+написанный как README, перестанет быть источником сигнатур.
+
+| Файл | Для кого | Отвечает на вопрос |
+|---|---|---|
+| `README.md`, раздел «Управление через ИИ (MCP)» | пользователь роутера | зачем это нужно, как включить, как подключить клиента, **чем я рискую** |
+| `.claude/skills/mcp/SKILL.md` (этот файл) | тот, кто правит код | как устроено, точные сигнатуры, границы, грабли |
+| `CoderManual.md` §5.1, §6, §13 | тот, кто добавляет свой инструмент | куда класть файл и что ещё обновить |
+| `docs/mcp/*` | архив | как фича делалась, сессия за сессией; см. `docs/mcp/README.md` |
+
+Правила, которые легко нарушить:
+
+- **README называет каждый инструмент.** Не потому что пользователю
+  нужны 93 имени, а потому что он решает, какие разрешения включать, —
+  и должен видеть, что именно открывает каждое из них. Группировка в
+  README идёт **по разрешению**, а не по домену;
+- **тексты предупреждений — из одного места.** `mcp.warn.*` и
+  `mcp.risk.*` в `web/js/i18n/{ru,en}.js` показывает страница, README
+  повторяет их смысл. Меняете формулировку риска — меняйте в i18n, и
+  пусть README следует за ней, а не наоборот;
+- **«включите HTTPS» писать нельзя** — своего TLS у GUI нет. Честные
+  пути: `bind = local` + ssh-туннель, stdio-мост, обратный прокси;
+- **`tunnels_write` — разрешение без инструментов.** Переключатель есть
+  с S2, туннельные write-инструменты не вынесены (долг S7). И README, и
+  эта таблица обязаны говорить это прямо: молча висящий переключатель
+  выглядит как сломанная фича;
+- **`docs/upstream.json` → `mcp-spec`.** `pinned` — не версия чужого
+  кода, а **ревизия спеки** (`server.PROTOCOL_VERSION`). `paths` и
+  `content_checks` стерегут, что папка спеки с этим именем ещё
+  существует и внутри неё всё ещё та ревизия. Выход новой ревизии — это
+  не «обновить число»: старые остаются в `SUPPORTED_PROTOCOL_VERSIONS`,
+  потому что клиенты переходят не все.
+
 ## Тесты-сторожа
 
 | Файл | Что стережёт | Когда обновлять |
 |---|---|---|
 | `tests/test_mcp_tool_counts.py` | сколько инструментов открывает каждое разрешение (`BY_SCOPE`) | **каждая сессия**, добавляя свои |
+| `tests/test_mcp_tools_docs.py` | реестр не разошёлся с документацией: у каждого инструмента есть строка в ЭТОЙ таблице (с верными scope/mutating/файлом) и имя в README | не трогать — он перебирает реестр сам |
 | `tests/test_mcp_redaction.py` | ни один read-only инструмент не отдаёт секрет; перебирает реестр сам | не трогать — он находит новое сам |
 | `tests/test_mcp_writable_paths.py` | каждый ключ `DEFAULT_CONFIG` отнесён к writable/не-writable осознанно | при добавлении настроек |
 | `tests/test_mcp_schema.py` | объявления инструментов: имя, описание, scope/mutating, схема | не трогать |
