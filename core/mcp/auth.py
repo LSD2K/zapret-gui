@@ -101,6 +101,27 @@ def permissions() -> dict:
     return {k: bool(v) for k, v in perms.items()}
 
 
+def http_enabled() -> bool:
+    """Включён ли основной транспорт — ``POST /api/mcp``.
+
+    Флаг ``mcp.transports.http`` до S17 не влиял ни на что, и это было
+    хуже его отсутствия: пользователь видел переключатель в
+    ``settings.json``, выключал его и продолжал работать. Теперь он
+    действительно закрывает точку — читается на каждом запросе, как и
+    флаг SSE, поэтому перезапуск GUI не нужен.
+
+    Выключение **не отрезает от управления**: страница MCP
+    (``/api/mcp/ui/*``) — отдельная дверь под авторизацией GUI, и
+    включить транспорт обратно можно оттуда. Отсутствие ключа — это
+    «включён»: транспорт был всегда, и молча выключиться при
+    обновлении GUI он не должен.
+    """
+    transports = settings().get("transports")
+    if not isinstance(transports, dict) or "http" not in transports:
+        return True
+    return bool(transports.get("http"))
+
+
 def is_enabled() -> bool:
     """MCP включён и способен кого-то пустить.
 

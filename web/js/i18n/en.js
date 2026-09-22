@@ -44,5 +44,6 @@ const i18n_en = {
     "mcp.risk.shell_readonly": "Safe command list and file reads only. Files may contain secrets.",
     "mcp.risk.shell_full": "Arbitrary command as root, file writes, packages and services. This is full router access.",
     "mcp.risk.self_edit": "Reads and edits GUI modules on the device and restarts it under the guard.",
-    "mcp.risk.self_edit_core": "Additionally the protected core: auth, permissions, guard, config. The model can lift its own limits."
+    "mcp.risk.self_edit_core": "Additionally the protected core: auth, permissions, guard, config. The model can lift its own limits.",
+    "mcp.risk.secrets": "Opens no tools of its own: it drops the masking from answers where a call explicitly asks for them as-is (keys, tokens, passwords, subscription URLs) and allows writing secret-looking settings. The call journal is still masked."
 };

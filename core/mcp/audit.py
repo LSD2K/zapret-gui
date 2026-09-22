@@ -94,6 +94,13 @@ KIND_SERVICE = "service"
 # ``code-snapshots/<id>/``, и класть их ещё и в mcp-undo.json значило
 # бы хранить исходники дважды. Откат этого вида равен ``code_rollback``.
 KIND_CODE = "code"
+# S17 — туннели и маршрутизация. ``tunnel_config`` хранит ПРЕЖНИЙ текст
+# конфига целиком (конфиг sing-box на полсотни outbound'ов — десятки
+# килобайт, и это тот предел, ради которого стоит держать снимок);
+# ``unified_route`` — прежнюю запись маршрута, а ``None`` в ``before``
+# означает, что маршрута не было и откат его удалит.
+KIND_TUNNEL_CONFIG = "tunnel_config"
+KIND_UNIFIED_ROUTE = "unified_route"
 
 # Ротация журнала: сколько записей хранить, если mcp.audit.keep не
 # прочитался или задан бессмысленно.
@@ -413,7 +420,8 @@ def record(tool, *, scope="", mutating=False, args=None, status=STATUS_OK,
     if remote:
         entry["remote"] = remote
     if error:
-        entry["error"] = redact_mod.redact_text(str(error))[:500]
+        entry["error"] = redact_mod.redact_text(str(error),
+                                            force=True)[:500]
 
     undo = take_pending()
     if undo:
@@ -499,19 +507,25 @@ def _safe_args(args) -> dict:
     секрет внутри строки под таким именем прошёл бы насквозь. Журнал
     лежит на диске и переживает вызов — поэтому строки дополнительно
     чистятся по маркерам (``token=``, ``Authorization:``).
+
+    ``force=True`` везде: вызов мог быть сделан в режиме «без
+    маскировки» (S17, разрешение ``secrets``), и тогда ответ уезжает
+    модели как есть — но журнал остаётся на диске, и секрет в нём
+    переживёт и вызов, и разрешение.
     """
     if not isinstance(args, dict) or not args:
         return {}
-    clean = redact_mod.redact(args)
+    clean = redact_mod.redact(args, force=True)
     out = {}
     for key, value in clean.items():
         if isinstance(value, str):
-            value = redact_mod.redact_text(value)
+            value = redact_mod.redact_text(value, force=True)
         if isinstance(value, str) and len(value) > MAX_ARG_CHARS:
             out[key] = value[:MAX_ARG_CHARS] + "…"
         elif isinstance(value, (dict, list)):
             text = redact_mod.redact_text(
-                json.dumps(value, ensure_ascii=False, default=str))
+                json.dumps(value, ensure_ascii=False, default=str),
+                force=True)
             if len(text) > MAX_ARG_CHARS:
                 out[key] = text[:MAX_ARG_CHARS] + "…"
             else:

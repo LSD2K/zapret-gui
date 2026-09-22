@@ -380,6 +380,16 @@ def _render_overview(params) -> dict:
         "`docs_get(topic=\"cli\")` и `docs_get(topic=\"lua\")`.",
         "* **Не считать «нет данных» поводом угадать.** Инструменты "
         "честно отвечают «не знаю» и показывают, что есть рядом.",
+        "* **Не опрашивать статус в цикле.** У долгой операции (скан, "
+        "blockcheck, эксперимент, фоновая команда, снифер, сборка "
+        "пула) есть `job_wait(kind=…)`: один вызов ждёт её конца на "
+        "стороне сервера и возвращает тот же статус. Череда "
+        "`*_status` тратит вызовы, контекст и квоту рейт-лимита "
+        "впустую.",
+        "* **Не записывать обратно то, что приехало с `***`.** Это "
+        "маска, а не значение: запись уничтожит настоящий ключ. Если "
+        "значение действительно нужно — повторите вызов с "
+        "`raw: true` (нужно разрешение `secrets`).",
         "",
         "## Справочники",
         "",
@@ -787,13 +797,16 @@ def describe_path(path) -> dict:
     parts = perms_mod.split_path(path)
     default = _at(DEFAULT_CONFIG, parts)
     value = _at(get_config_manager().effective(), parts)
-    writable = perms_mod.is_writable(path)
+    secrets = perms_mod.granted("secrets")
+    writable = perms_mod.is_writable(path, secrets=secrets)
 
     # Маскировка секретов работает по ИМЕНИ ключа, а здесь путь
     # развёрнут в плоские поля `default`/`value` — имя ключа для неё
     # потеряно, и `gui.auth_password` уехал бы значением наружу.
     # Восстанавливаем его сами, по последнему сегменту пути.
-    if parts and redact.is_secret_key(parts[-1]):
+    # `raw_mode()` — тот же переключатель, что и у самой маскировки
+    # (S17): иначе один ответ отдавал бы секрет, а соседний — «***».
+    if parts and redact.is_secret_key(parts[-1]) and not redact.raw_mode():
         default = redact.MASK if isinstance(default, str) else default
         value = redact.MASK if isinstance(value, str) else value
 
@@ -808,7 +821,8 @@ def describe_path(path) -> dict:
         "documented": False,
     }
     if not writable:
-        item["writable_reason"] = perms_mod.why_not_writable(path)
+        item["writable_reason"] = perms_mod.why_not_writable(
+            path, secrets=secrets)
     if path in perms_mod.ENUMS:
         item["enum"] = list(perms_mod.ENUMS[path])
 

@@ -177,7 +177,8 @@ const McpPage = (() => {
                  [info.enabled, info.active, info.token_set,
                   info.tools_available, info.tools_total,
                   JSON.stringify(info.tools_by_scope || {}),
-                  JSON.stringify(info.sse || {}), access.loopback_only]);
+                  JSON.stringify(info.sse || {}), access.loopback_only,
+                  JSON.stringify(info.transports || {})]);
 
         _section('mcp-token', _tokenHtml(info),
                  [info.token_set, _tokenVisible, _token.length]);
@@ -258,6 +259,16 @@ const McpPage = (() => {
         }
 
         const sse = info.sse || {};
+        const transports = info.transports || {};
+        // Ключа нет — транспорт включён: он был всегда, и обновление GUI
+        // не должно выключать его молча (core/mcp/auth.http_enabled).
+        const httpOn = transports.http !== false;
+        if (!httpOn) {
+            warnings.push(['warning',
+                'Основной транспорт (POST /api/mcp) выключен: клиенты ' +
+                'получают 503. Работают только stdio-мост и, если ' +
+                'включён, старый SSE.']);
+        }
 
         return `
             <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px;">
@@ -292,6 +303,20 @@ const McpPage = (() => {
                 <span>Справочников: ${info.resources || 0}</span>
                 <span>Сценариев: ${info.prompts || 0}</span>
                 <span>Журнал: ${info.audit && info.audit.enabled ? 'ведётся' : 'выключен'}</span>
+            </div>
+
+            <div style="margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <label class="settings-toggle" for="mcp-http">
+                    <input type="checkbox" id="mcp-http" ${httpOn ? 'checked' : ''}
+                           data-action="toggleHttp">
+                    <span class="settings-toggle-slider"></span>
+                    <span class="settings-toggle-label">Основной транспорт (POST)</span>
+                </label>
+                <span class="text-muted" style="font-size:12px;max-width:520px;">
+                    Обычный путь всех клиентов. Выключение закрывает
+                    точку для них, но не эту страницу — включить обратно
+                    можно отсюда же. Stdio-мост работает независимо.
+                </span>
             </div>
 
             <div style="margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
@@ -784,6 +809,11 @@ const McpPage = (() => {
             await _act(() => API.post('/api/mcp/ui/enabled',
                                       { enabled: input.checked }),
                        input.checked ? 'MCP включён' : 'MCP выключен');
+        } else if (action === 'toggleHttp') {
+            await _act(() => API.post('/api/mcp/ui/transports',
+                                      { http: input.checked }),
+                       'Основной транспорт ' +
+                       (input.checked ? 'включён' : 'выключен'));
         } else if (action === 'toggleSse') {
             await _act(() => API.post('/api/mcp/ui/transports',
                                       { sse: input.checked }),

@@ -55,11 +55,16 @@ class TestNoTeardown(unittest.TestCase):
                 self.assertNotIn(forbidden, names)
 
     def test_nothing_new_hides_under_dangerous(self):
-        # Единственный инструмент под `dangerous` — перезагрузка.
-        # Появился второй — он обязан быть описан и в скиле, и здесь.
+        # Под `dangerous` живут ровно две вещи, и обе названы поимённо:
+        # перезагрузка (S12) и переприменение ВСЕЙ маршрутизации (S17,
+        # `unified_reapply_all`) — он не правит одну запись, а сносит
+        # «левые» ip rule и раскладывает картину маршрутов заново, то
+        # есть на секунды меняет всё сразу, включая путь, которым ходит
+        # сам админ. Появился третий — он обязан быть описан и в скиле,
+        # и здесь.
         names = sorted(spec.name for spec in registry.all_tools()
                        if spec.scope == "dangerous")
-        self.assertEqual(names, ["system_reboot"])
+        self.assertEqual(names, ["system_reboot", "unified_reapply_all"])
 
 
 class TestReboot(unittest.TestCase):

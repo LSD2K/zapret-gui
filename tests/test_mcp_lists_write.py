@@ -394,5 +394,162 @@ class TestLua(Sandbox):
         self.assertIsNone(self.read())
 
 
+class TestLuaRead(Sandbox):
+    """S17: прочитать скрипт можно тем же разрешением, что и записать.
+
+    До этого текст скрипта отдавал только `file_read` — то есть правка
+    одной строки стоила разрешения на чтение всей файловой системы.
+    """
+
+    def seed(self, name="mcp_test", text="local a = 1\nlocal b = 2\n"):
+        self.data("lua_script_save", {"name": name, "content": text})
+        return text
+
+    def test_listing_without_a_name(self):
+        self.seed()
+        payload = self.data("lua_script_get", {})
+        names = [item["name"] for item in payload["items"]]
+        self.assertIn("mcp_test", names)
+        self.assertIn("lua_script_get(name=", payload["hint"])
+
+    def test_window_of_a_script(self):
+        self.seed(text="".join("line%d\n" % i for i in range(1, 11)))
+        payload = self.data("lua_script_get",
+                            {"name": "mcp_test", "offset": 3, "limit": 2})
+        self.assertEqual(payload["content"], "line3\nline4\n")
+        self.assertEqual(payload["lines_total"], 10)
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["next_offset"], 5)
+
+    def test_unknown_script_lists_what_there_is(self):
+        self.seed()
+        payload = self.data("lua_script_get", {"name": "nope"})
+        self.assertFalse(payload["ok"])
+        self.assertIn("mcp_test", payload["known"])
+
+    def test_needs_the_write_permission(self):
+        answer = registry.call("lua_script_get", {}, {})
+        self.assertTrue(answer["isError"])
+        self.assertEqual(answer["structuredContent"]["permission"],
+                         "strategies_write")
+
+
+class TestLuaPatch(Sandbox):
+    """Точечная правка: тем же кодом, что `code_patch`."""
+
+    def seed(self, text="local a = 1\nlocal b = 2\n"):
+        self.data("lua_script_save", {"name": "mcp_test", "content": text})
+
+    def read(self):
+        from core.lua_manager import get_lua_manager
+        return get_lua_manager().get_script("mcp_test")
+
+    def test_replaces_one_fragment(self):
+        self.seed()
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test",
+                             "edits": [{"old": "local a = 1",
+                                        "new": "local a = 42"}]})
+        self.assertTrue(payload["ok"])
+        self.assertIn("local a = 42", self.read())
+        self.assertIn("local b = 2", self.read())
+
+    def test_ambiguous_fragment_is_refused(self):
+        # Заменить «первое вхождение» молча — это правка не того места,
+        # которую никто не заметит до следующего прогона.
+        self.seed(text="local a = 1\nlocal a = 1\n")
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test",
+                             "edits": [{"old": "local a = 1",
+                                        "new": "local a = 2"}]})
+        self.assertFalse(payload["ok"])
+        self.assertIn("2 раза", payload["error"])
+        self.assertNotIn("local a = 2", self.read())
+
+    def test_missing_fragment_is_refused(self):
+        self.seed()
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test",
+                             "edits": [{"old": "нет такого",
+                                        "new": "x"}]})
+        self.assertFalse(payload["ok"])
+        self.assertIn("не найден", payload["error"])
+
+    def test_broken_result_is_refused(self):
+        self.seed()
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test",
+                             "edits": [{"old": "local a = 1",
+                                        "new": "function broken("}]})
+        self.assertFalse(payload["ok"])
+        self.assertIn("синтаксис", payload["error"])
+        self.assertIn("local a = 1", self.read())
+
+    def test_edits_and_diff_are_exclusive(self):
+        self.seed()
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test",
+                             "edits": [{"old": "a", "new": "b"}],
+                             "diff": "@@"})
+        self.assertFalse(payload["ok"])
+        self.assertIn("ровно одно", payload["error"])
+
+    def test_missing_script_is_refused(self):
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test",
+                             "edits": [{"old": "a", "new": "b"}]})
+        self.assertFalse(payload["ok"])
+        self.assertIn("lua_script_save", payload["hint"])
+
+    def test_apply_without_control_says_so(self):
+        # `apply` перезапускает движок, а это `control`: разрешение
+        # спрашивается ПО МЕСТУ, и молчать об отказе нельзя — иначе
+        # модель считает, что правка уже действует.
+        self.seed()
+        payload = self.data("lua_script_patch",
+                            {"name": "mcp_test", "apply": True,
+                             "edits": [{"old": "local a = 1",
+                                        "new": "local a = 3"}]})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["applied"])
+        self.assertEqual(payload["apply_skipped"]["permission"], "control")
+
+    def test_undo_returns_the_previous_text(self):
+        self.seed()
+        self.data("lua_script_patch",
+                  {"name": "mcp_test",
+                   "edits": [{"old": "local a = 1", "new": "local a = 9"}]})
+        self.assertTrue(self.undo()["reverted"])
+        self.assertIn("local a = 1", self.read())
+
+
+class TestLuaDelete(Sandbox):
+
+    def names(self):
+        from core.lua_manager import get_lua_manager
+        return get_lua_manager().list_names()
+
+    def test_deletes_a_user_script_and_undo_brings_it_back(self):
+        self.data("lua_script_save",
+                  {"name": "mcp_test", "content": "return 1\n"})
+        payload = self.data("lua_script_delete", {"name": "mcp_test"})
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("mcp_test", self.names())
+        self.assertTrue(self.undo()["reverted"])
+        self.assertIn("mcp_test", self.names())
+
+    def test_bundled_script_is_refused(self):
+        # Bundled приходит с GUI: удалять его нечем — файл вернётся при
+        # следующем обновлении, а стратегии тем временем сломаются.
+        payload = self.data("lua_script_delete", {"name": "zapret-lib"})
+        self.assertFalse(payload["ok"])
+        self.assertIn("bundled", payload["error"])
+
+    def test_unknown_script_is_refused(self):
+        payload = self.data("lua_script_delete", {"name": "nope"})
+        self.assertFalse(payload["ok"])
+        self.assertIn("нет", payload["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

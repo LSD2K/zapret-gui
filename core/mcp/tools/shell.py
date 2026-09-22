@@ -64,8 +64,14 @@ def _journal(result: dict):
 
 def _decorate(result: dict) -> dict:
     """Общие пометки ответа: недоверенность вывода и подсказка про guard."""
+    from core.mcp import redact
+
     if "output" in result or "job_id" in result:
         result.setdefault("note", UNTRUSTED)
+    if "output" in result:
+        # «Маскировано или нет» — не косметика: по этому полю модель
+        # решает, можно ли записывать прочитанное обратно.
+        result.setdefault("redacted", not redact.raw_mode())
     return result
 
 
@@ -93,6 +99,16 @@ _COMMON_PROPERTIES = {
         "type": "string",
         "description": "Working directory (default mcp.shell.workdir). / "
                        "Каталог запуска.",
+    },
+    # S17. Вывод команды чистит сам `core/shell_exec.py`, до сборки
+    # ответа; `raw` выключает эту чистку тем же переключателем, что и
+    # маскировку ответа (см. core/mcp/redact.py). Без него `cat` конфига
+    # отдаёт «***» вместо ключа — и записать прочитанное обратно нельзя.
+    "raw": {
+        "type": "boolean", "default": False,
+        "description": "Return output as-is, no secret masking (needs "
+                       "the `secrets` permission). / Вывод без "
+                       "маскировки секретов.",
     },
 }
 
@@ -231,6 +247,10 @@ def shell_job_status(args: dict) -> dict:
             "offset": {"type": "integer", "minimum": 0, "default": 0,
                        "description": "Byte offset to continue from. / "
                                       "С какого байта продолжать."},
+            "raw": {"type": "boolean", "default": False,
+                    "description": "Output as-is, no secret masking "
+                                   "(needs the `secrets` permission). / "
+                                   "Вывод без маскировки секретов."},
         },
         "required": ["job_id"],
         "additionalProperties": False,

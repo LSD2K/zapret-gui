@@ -89,19 +89,38 @@ from core.mcp import registry
 # расширяет те же тринадцать на защищённое ядро — и спрашивается по
 # месту, как `shell_full` у `shell_exec`. Ноль в таблице напротив него
 # — это его смысл, а не забытая строка.
+# S17: + 3 на чтение (job_wait — ожидание вместо опроса;
+# unified_route_list/unified_route_status — маршруты единого слоя: в
+# маршруте нет ничего секретного, а половина вопросов «почему не
+# открывается» решается именно им), + 3 под `strategies_write`
+# (lua_script_get/_patch/_delete: писать lua модель умела с S7, а
+# прочитать существующий скрипт могла только через `shell_readonly`,
+# то есть ценой доступа ко всей файловой системе), + 4 под `probes`
+# (traffic_capture_*: что ушло в сеть ПОСЛЕ движка — раньше это
+# стоило `shell_full` и tcpdump руками), + 1 под `dangerous`
+# (unified_reapply_all — он сносит и раскладывает заново ВСЮ
+# маршрутизацию) и + 10 под `tunnels_write`, у которого до сих пор не
+# было НИ ОДНОГО инструмента: tunnel_up/_down/_restart,
+# tunnel_config_get/_save, subscription_refresh, pool_refresh,
+# unified_route_save/_delete/_apply.
+# Разрешение `secrets` своих инструментов не добавляет — как и
+# `self_edit_core`: оно снимает маскировку в ответе (по явному
+# `raw: true`) и запрет на запись секретных полей настроек. Ноль
+# напротив него — это его смысл.
 BY_SCOPE = {
-    "read": 32,
+    "read": 35,
     "control": 8,
-    "strategies_write": 8,
+    "strategies_write": 11,
     "config_write": 1,
-    "probes": 8,
+    "probes": 12,
     "experiments": 7,
-    "tunnels_write": 0,
-    "dangerous": 1,
+    "tunnels_write": 10,
+    "dangerous": 2,
     "shell_readonly": 11,
     "shell_full": 3,
     "self_edit": 13,
     "self_edit_core": 0,
+    "secrets": 0,
     # Псевдо-scope: открывается ЛЮБЫМ разрешением на запись, поэтому в
     # арифметике «каждое разрешение добавляет ровно свои» он считается
     # отдельно (см. test_every_scope_adds_exactly_its_tools).
@@ -184,6 +203,12 @@ class TestToolCounts(unittest.TestCase):
         "blockcheck2_output", "blockcheck2_status", "blockcheck_status",
         "connectivity_matrix", "healthcheck_status", "scan_results",
         "scan_status",
+        # S17 — ожидание вместо опроса и маршруты единого слоя.
+        # `job_wait` объявлен чтением, но разрешение спрашивает ПО
+        # МЕСТУ, за конкретный вид операции (ждать скан — `probes`,
+        # эксперимент — `experiments`): иначе он стал бы дырой, через
+        # которую чтение без разрешений видит чужие результаты.
+        "job_wait", "unified_route_list", "unified_route_status",
     ]
 
     # S7 — мутирующие наборы. Список имён рядом с числом: две записи об
@@ -199,6 +224,18 @@ class TestToolCounts(unittest.TestCase):
         # S11 — сборка и проверка; записи не делают, но открываются тем
         # же разрешением.
         "strategy_compose", "strategy_validate",
+        # S17 — lua целиком: читать, патчить точечно и удалять. Чтение
+        # здесь, а не в read-наборе, намеренно: скрипт — это код,
+        # который исполняет движок; зато тому, кому доверили его
+        # ПИСАТЬ, странно не дать его прочитать.
+        "lua_script_get", "lua_script_patch", "lua_script_delete",
+    ]
+    # S17 — туннели и маршруты: разрешение `tunnels_write` наконец
+    # что-то открывает. `tunnel_config_get` читает, остальные меняют.
+    TUNNELS_WRITE_TOOLS = [
+        "pool_refresh", "subscription_refresh", "tunnel_config_get",
+        "tunnel_config_save", "tunnel_down", "tunnel_restart", "tunnel_up",
+        "unified_route_apply", "unified_route_delete", "unified_route_save",
     ]
     # S10 — движок экспериментов: и мутирующие, и опрос под одним
     # разрешением.
@@ -217,7 +254,10 @@ class TestToolCounts(unittest.TestCase):
         "shell_job_output", "shell_job_status", "shell_job_stop",
     ]
     SHELL_FULL_TOOLS = ["file_write", "package_install", "package_remove"]
-    DANGEROUS_TOOLS = ["system_reboot"]
+    # S17 добавил сюда переприменение всей маршрутизации: это не правка
+    # одной записи, а пересборка картины маршрутов целиком, вместе со
+    # сметанием протухших `ip rule` и таблиц.
+    DANGEROUS_TOOLS = ["system_reboot", "unified_reapply_all"]
 
     # S13 — самоправка кода GUI. Все тринадцать под `self_edit`;
     # защищённое ядро (`self_edit_core`) спрашивается по месту.
@@ -233,6 +273,11 @@ class TestToolCounts(unittest.TestCase):
         "blockcheck2_start", "blockcheck2_stop", "blockcheck_start",
         "healthcheck_run", "probe_compare", "probe_targets",
         "scan_start", "scan_stop",
+        # S17 — снифер. Сам он пакетов не выпускает, но показывает
+        # чужой трафик и ходит с пробами парой («пусти пробу и посмотри,
+        # что из неё вышло»), поэтому разрешение то же.
+        "traffic_capture_start", "traffic_capture_status",
+        "traffic_capture_result", "traffic_capture_stop",
     ]
 
     def test_read_tools_are_named_in_the_table(self):
@@ -253,6 +298,8 @@ class TestToolCounts(unittest.TestCase):
                          BY_SCOPE["shell_readonly"])
         self.assertEqual(len(self.SHELL_FULL_TOOLS), BY_SCOPE["shell_full"])
         self.assertEqual(len(self.DANGEROUS_TOOLS), BY_SCOPE["dangerous"])
+        self.assertEqual(len(self.TUNNELS_WRITE_TOOLS),
+                         BY_SCOPE["tunnels_write"])
         self.assertEqual(len(self.SELF_EDIT_TOOLS), BY_SCOPE["self_edit"])
 
     def test_write_tools_are_named_in_the_table(self):
@@ -266,6 +313,8 @@ class TestToolCounts(unittest.TestCase):
                                  self.SHELL_READONLY_TOOLS),
                                 ("shell_full", self.SHELL_FULL_TOOLS),
                                 ("dangerous", self.DANGEROUS_TOOLS),
+                                ("tunnels_write",
+                                 self.TUNNELS_WRITE_TOOLS),
                                 ("self_edit", self.SELF_EDIT_TOOLS)):
             names = sorted(spec.name for spec in registry.all_tools()
                            if spec.scope == scope)
@@ -277,7 +326,15 @@ class TestToolCounts(unittest.TestCase):
     # предназначено для записи: модель, которой не дали править
     # стратегии, собирать их вслепую тоже незачем. Список поимённый —
     # чтобы следующий мутирующий инструмент не проехал сюда молча.
-    READ_ONLY_UNDER_WRITE = {"strategy_compose", "strategy_validate"}
+    READ_ONLY_UNDER_WRITE = {
+        "strategy_compose", "strategy_validate",
+        # S17. `lua_script_get` и `tunnel_config_get` читают — но под
+        # разрешением на запись: lua-скрипт и конфиг туннеля это код и
+        # ключи, и отдавать их в наборе «без единого разрешения»
+        # незачем. Тому же, кому доверили их править, странно не дать
+        # их прочитать.
+        "lua_script_get", "tunnel_config_get",
+    }
 
     # Обратный случай (S12): инструмент объявлен мутирующим под
     # `shell_readonly`, хотя под этим разрешением он только читает.
@@ -302,7 +359,7 @@ class TestToolCounts(unittest.TestCase):
             if spec.name in self.READ_ONLY_UNDER_WRITE:
                 continue
             if spec.scope in ("control", "strategies_write",
-                              perms.ANY_WRITE_SCOPE):
+                              "tunnels_write", perms.ANY_WRITE_SCOPE):
                 with self.subTest(tool=spec.name):
                     self.assertTrue(spec.mutating)
 

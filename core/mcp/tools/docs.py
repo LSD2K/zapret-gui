@@ -282,7 +282,8 @@ def _brief(path) -> dict:
     head = text.split(". ")[0]
     return {
         "path": path,
-        "writable": perms_mod.is_writable(path),
+        "writable": perms_mod.is_writable(
+            path, secrets=perms_mod.granted("secrets")),
         "summary": head + ("." if head and not head.endswith(".") else ""),
     }
 

@@ -72,6 +72,13 @@ CUT_FIELD = "_fields"
                 "maximum": MAX_DEPTH,
                 "default": 2,
             },
+            "raw": {
+                "type": "boolean",
+                "default": False,
+                "description": "Return secrets as-is, no masking (needs "
+                               "the `secrets` permission). / Отдать "
+                               "значения без маскировки.",
+            },
         },
         "additionalProperties": False,
     },
@@ -97,20 +104,28 @@ def config_get(args: dict) -> dict:
         node = node[key]
         walked.append(key)
 
+    from core.mcp import redact
+
     cut = []
     value = _limit_depth(node, depth, path, cut)
-    writable = perms_mod.is_writable(path) if parts else False
+    secrets = perms_mod.granted("secrets")
+    writable = perms_mod.is_writable(path, secrets=secrets) if parts \
+        else False
     result = {
         "ok": True,
         "path": path,
         "type": _json_type(node),
         "value": value,
         "writable": writable,
+        # Маскировку делает сериализация ответа (registry.tool_result);
+        # здесь только честно говорим, применялась ли она, — иначе
+        # «***» неотличимо от настоящего значения.
+        "redacted": not redact.raw_mode(),
         "truncated": bool(cut),
     }
     if not writable:
         result["writable_reason"] = (
-            perms_mod.why_not_writable(path) if parts else
+            perms_mod.why_not_writable(path, secrets=secrets) if parts else
             "корень дерева: запись идёт по путям вида «секция.ключ»")
     if cut:
         result["hint"] = ("свёрнуто поддеревьев: %d — запросите их "
@@ -247,8 +262,12 @@ def config_set(args: dict) -> dict:
     if not parts or len(parts) < 2:
         return _refuse(path, "нужен путь вида «секция.ключ»: секцию "
                              "целиком записать нельзя")
-    if not perms_mod.is_writable(path):
-        return _refuse(path, perms_mod.why_not_writable(path))
+    # Разрешение `secrets` (S17) снимает запрет на листья, похожие на
+    # секрет, — и только на них: пути к файлам закрыты им всё равно.
+    secrets = perms_mod.granted("secrets")
+    if not perms_mod.is_writable(path, secrets=secrets):
+        return _refuse(path, perms_mod.why_not_writable(path,
+                                                        secrets=secrets))
 
     described = resources.describe_path(path)
     expected = described.get("type") or "null"
@@ -398,7 +417,8 @@ def config_writable_paths(args: dict) -> dict:
     offset, limit = _paging.limits(args, default=50)
 
     items = []
-    for item in perms_mod.writable_paths():
+    for item in perms_mod.writable_paths(
+            secrets=perms_mod.granted("secrets")):
         path = item["path"]
         if section and not path.startswith(section + "."):
             continue
@@ -454,10 +474,12 @@ def _undo_config(snapshot: dict) -> dict:
 
     path = snapshot.get("target") or ""
     parts = perms_mod.split_path(path)
-    if not parts or not perms_mod.is_writable(path):
+    secrets = perms_mod.granted("secrets")
+    if not parts or not perms_mod.is_writable(path, secrets=secrets):
         return {"ok": False,
                 "error": "«%s» сейчас не принимается на запись: %s"
-                         % (path, perms_mod.why_not_writable(path)
+                         % (path, perms_mod.why_not_writable(
+                             path, secrets=secrets)
                             or "путь недоступен"),
                 "hint": "настройка закрылась после того, как снимок был "
                         "сделан — верните значение вручную"}

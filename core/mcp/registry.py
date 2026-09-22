@@ -32,6 +32,13 @@
 (:func:`tool_result`): редактирование секретов и обрезка по
 ``mcp.limits.response_kb``. Инструменты об этом не знают и знать не
 должны.
+
+Там же решается и **режим «без маскировки»** (S17): инструмент, у
+которого в схеме объявлен аргумент ``raw``, вызывается внутри
+``redact.unredacted()`` — но только если включено разрешение
+``secrets``. Без разрешения ``raw: true`` — не тихая маскировка, а
+честный отказ: модель, прочитавшая конфиг с ``***`` вместо ключа и
+записавшая его обратно, этот ключ уничтожит.
 """
 
 import importlib
@@ -61,6 +68,11 @@ PAGE_SIZE = 50
 # Отличаем «не передали» от «передали None»: scope=None — это законное
 # значение (чтение), а отсутствие scope — ошибка объявления.
 _MISSING = object()
+
+# Имя аргумента, которым вызов просит ответ без маскировки секретов.
+# Одно на все инструменты: разные имена («full», «plain», «no_redact»)
+# модель перепутает, а проверка разрешения тут ровно одна.
+RAW_ARG = "raw"
 
 
 class ToolError(ValueError):
@@ -342,9 +354,28 @@ def call(name, args=None, perms=None, ctx=None) -> dict:
                      ok=False, error=e.message)
         raise
 
+    if args.get(RAW_ARG) is True and not perms_mod.allowed("secrets", perms):
+        # Молча замаскировать ответ на явную просьбу «как есть» нельзя:
+        # модель запишет полученное обратно и уничтожит настоящий ключ.
+        denial = perms_mod.denial("secrets", perms)
+        denial["hint"] = ("ответ без маскировки требует разрешения "
+                          "«secrets»; без него повторите вызов без "
+                          "raw=true — секреты приедут как «***»")
+        audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
+                     args=args, ctx=ctx, status=audit.STATUS_DENIED,
+                     ok=False, error=denial.get("error", ""))
+        return tool_result(denial, is_error=True)
+
     started = time.time()
     try:
-        payload = spec.handler(args)
+        # Режим «без маскировки» охватывает и обработчик, и сериализацию:
+        # часть инструментов (file_read, shell) чистит текст у себя, до
+        # `tool_result`, и выключать их надо тем же переключателем.
+        with _maybe_raw(args):
+            payload = spec.handler(args)
+            payload = _finish(payload, started)
+            ok = bool(payload.get("ok", True))
+            result = tool_result(payload, is_error=not ok)
     except Exception as e:                      # noqa: BLE001 — граница
         log.debug(traceback.format_exc(), source="mcp")
         audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
@@ -355,17 +386,41 @@ def call(name, args=None, perms=None, ctx=None) -> dict:
                             "error": "%s: %s" % (type(e).__name__, e),
                             "tool": spec.name}, is_error=True)
 
-    if not isinstance(payload, dict):
-        payload = {"ok": True, "result": payload}
-    payload.setdefault("ok", True)
-    payload.setdefault("elapsed_ms", int((time.time() - started) * 1000))
-    ok = bool(payload.get("ok", True))
     audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
                  args=args, ctx=ctx,
                  status=audit.STATUS_OK if ok else audit.STATUS_ERROR,
                  ok=ok, error="" if ok else str(payload.get("error", "")),
                  elapsed_ms=payload.get("elapsed_ms", 0))
-    return tool_result(payload, is_error=not ok)
+    return result
+
+
+def _finish(payload, started):
+    """Дописать в ответ инструмента общие поля."""
+    if not isinstance(payload, dict):
+        payload = {"ok": True, "result": payload}
+    payload.setdefault("ok", True)
+    payload.setdefault("elapsed_ms", int((time.time() - started) * 1000))
+    return payload
+
+
+class _maybe_raw:
+    """``redact.unredacted()``, если вызов просил ``raw`` — иначе ничего."""
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, args):
+        self._inner = (redact_mod.unredacted()
+                       if args.get(RAW_ARG) is True else None)
+
+    def __enter__(self):
+        if self._inner is not None:
+            self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._inner is not None:
+            self._inner.__exit__(exc_type, exc, tb)
+        return False
 
 
 # ───────────────────────── результат инструмента ────────────────────
