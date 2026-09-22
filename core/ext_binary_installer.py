@@ -884,7 +884,7 @@ BINARIES = {
         "legacy_source": {
             "repo": "Alexey71/opera-proxy",
             "release_tag": "",
-            "pinned_tag": "v1.29.0",
+            "pinned_tag": "v1.30.0",
             "allow_unpinned": True,
             "dest": "/opt/usr/bin/opera-proxy",
             "arch_map": {
@@ -898,18 +898,18 @@ BINARIES = {
                 # бинарник опубликован.
                 "armv7": "opera-proxy.linux-arm",
             },
-            # sha256 сборок v1.29.0 (посчитаны с релизных URL; процедура
+            # sha256 сборок v1.30.0 (посчитаны с релизных URL; процедура
             # сверена — хэш v1.28.0 amd64, посчитанный так же, совпал с
             # прежним манифестом). Пин обязан ехать за релизом: установщик
             # ставит ПОСЛЕДНИЙ релиз, и пока pinned_tag отставал, скачанное
             # не с чем было сверять — файл принимался «как есть» (по HTTPS,
             # но без хэша).
             "sha256_map": {
-                "aarch64": "547fff7b42c245397526c07edd6996d64b99c3867226669a76a50c7f8d5b35ee",
-                "x86_64": "c020770e720456fcfcc61ccae58d1770c6714b9e2e14ca06379dba7e5b596fc4",
-                "mipsel": "238661a62e191d4792015f1c7d7d5d3671ba203ecf6508968160bb5902485dba",
-                "mips": "0e0a4a0982d1af5e5bea0e1f8df8b335d8e7d7821d7fc354da2761ecaf7c3d16",
-                "armv7": "af71b1b648031067d00c9859588dc09b4c27998a5393f1b9139d9932bddb981c",
+                "aarch64": "167d174f9aac2bffbdf69a1ce0d203b1e6ac36fbf1eaa2408395195f56540941",
+                "x86_64": "04a0412c9e3b55be78c483cfd2aaca415a0b77dca09befd7c990da1a28f431a8",
+                "mipsel": "334a657d5e128d5112d91600148fc6f50c44c78d0df2dcee82a3eba6f3da89ac",
+                "mips": "890075dca0120f922f22f6a1e36ce4a5118278b666a4769ee06b6afca0f1ce78",
+                "armv7": "d34e41bbc3f2c34c7fe6fe932c033b6b3b02c1b5e0d822da1bd59c59062bcc30",
             },
         },
     },

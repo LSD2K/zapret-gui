@@ -309,13 +309,20 @@ def _conflicts() -> list:
     except Exception as e:                      # noqa: BLE001 — граница
         own = {"conflicts": [], "error": "%s: %s" % (type(e).__name__, e)}
     for proc in own.get("conflicts") or []:
+        owner = proc.get("owner") or {}
+        # Если владельца опознали (чужая сборка zapret), отдаём её
+        # подсказку: она называет конкретный init-скрипт, а не общее
+        # «остановите лишний».
+        title = "посторонний процесс %s (pid %s)" % (proc.get("name", "?"),
+                                                     proc.get("pid", "?"))
+        if owner.get("name"):
+            title += " — %s" % owner["name"]
         findings.append(_finding(
-            "conflicts", "foreign-nfqws", "error",
-            "посторонний процесс %s (pid %s)" % (proc.get("name", "?"),
-                                                 proc.get("pid", "?")),
+            "conflicts", "foreign-nfqws", "error", title,
             proc.get("cmdline", ""),
-            "два nfqws/tpws на одной очереди дерутся за пакеты — "
-            "остановите лишний"))
+            owner.get("hint")
+            or "два nfqws/tpws на одной очереди дерутся за пакеты — "
+               "остановите лишний"))
 
     try:
         known = diag.check_known_conflicts()

@@ -1070,7 +1070,9 @@ const DiagnosticsPage = (() => {
                             <div class="diag-conflict-item">
                                 <span class="diag-conflict-pid">PID ${c.pid}</span>
                                 <span class="diag-conflict-name">${_esc(c.name)}</span>
+                                ${c.owner ? `<span class="badge badge-warning">${_esc(c.owner.name)}</span>` : ''}
                                 <code class="diag-conflict-cmd">${_esc(c.cmdline)}</code>
+                                ${c.owner ? `<div style="font-size:12px; flex-basis:100%;">${_esc(c.owner.hint)}</div>` : ''}
                             </div>
                         `).join('')}
                     </div>
@@ -1086,6 +1088,18 @@ const DiagnosticsPage = (() => {
                     <div class="diag-no-conflicts">
                         <span class="diag-dot diag-dot-ok"></span>
                         Посторонних процессов nfqws/tpws нет — очередь NFQUEUE наша.
+                    </div>`;
+            }
+            // Процессы, запущенные нашим же подбором стратегии
+            // (blockcheck2/сканер), раньше попадали в список как
+            // «сторонние» — теперь они отфильтрованы, но молчать о них
+            // нельзя: человек видит их в `ps` и ищет, кто это.
+            if (ci.scan_children > 0) {
+                html += `
+                    <div class="form-hint" style="margin-top:6px;">
+                        Ещё ${ci.scan_children} процесс(ов) nfqws запущено нашим
+                        подбором стратегии (blockcheck/сканер) — это не конфликт,
+                        они исчезнут вместе с проверкой.
                     </div>`;
             }
         }

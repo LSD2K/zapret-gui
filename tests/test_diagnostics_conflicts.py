@@ -4,7 +4,12 @@
 import unittest
 from unittest import mock
 
-from core.diagnostics import evaluate_conflicts, _KNOWN_TOOL_MARKERS
+import os
+
+from core.diagnostics import (
+    evaluate_conflicts, evaluate_foreign_installs, attribute_nfqws_owner,
+    _KNOWN_TOOL_MARKERS, _FOREIGN_NFQWS_INSTALLS,
+)
 
 
 class TestEvaluateConflicts(unittest.TestCase):
@@ -47,6 +52,159 @@ class TestEvaluateConflicts(unittest.TestCase):
         # Каждый встроенный маркер имеет обязательные поля.
         for m in _KNOWN_TOOL_MARKERS:
             self.assertTrue(m["id"] and m["name"] and m["paths"] and m["hint"])
+
+
+class TestForeignZapretInstalls(unittest.TestCase):
+    """Сторонние сборки zapret (issue #349).
+
+    Отличаются от конфликтов окружения тем, что делят с нами ДВИЖОК и
+    очередь NFQUEUE. Человек сносит такую сборку, остатки продолжают
+    поднимать nfqws2, а «Диагностика» показывала безымянный PID.
+    """
+
+    def test_installed_build_is_an_error_with_its_init_script(self):
+        w = evaluate_foreign_installs({"/opt/etc/init.d/S99zapret2"})
+        self.assertEqual(len(w), 1)
+        self.assertEqual(w[0]["id"], "install-z2k")
+        self.assertEqual(w[0]["severity"], "error")
+        self.assertIn("S99zapret2", w[0]["hint"])
+
+    def test_leftovers_without_init_script_are_a_warning(self):
+        w = evaluate_foreign_installs(
+            {"/opt/etc/ndm/netfilter.d/000-zapret2.sh"})
+        self.assertEqual(len(w), 1)
+        self.assertEqual(w[0]["severity"], "warning")
+        self.assertIn("Остатки", w[0]["title"])
+
+    def test_leftovers_name_the_files_that_revive_the_engine(self):
+        # Главная жалоба: «удалил, а процесс снова есть». Подсказка
+        # обязана назвать хуки, которые его поднимают.
+        w = evaluate_foreign_installs(
+            {"/opt/etc/init.d/S99z2k-scheduler",
+             "/opt/etc/ndm/netfilter.d/000-zapret2.sh"})
+        self.assertIn("/opt/etc/init.d/S99z2k-scheduler", w[0]["hint"])
+
+    def test_nothing_found_nothing_reported(self):
+        self.assertEqual(evaluate_foreign_installs(set()), [])
+
+    def test_our_own_paths_are_not_a_foreign_install(self):
+        # Наш автозапуск — S99zapret и хук 100-zapret-gui.sh.
+        self.assertEqual(
+            evaluate_foreign_installs({"/opt/etc/init.d/S99zapret",
+                                       "/opt/etc/ndm/netfilter.d/100-zapret-gui.sh",
+                                       "/opt/zapret2/nfq2/nfqws2"}),
+            [])
+
+    def test_foreign_autostart_script_is_reported_separately(self):
+        w = evaluate_foreign_installs(
+            set(), foreign_autostart="/opt/etc/init.d/S99zapret")
+        self.assertEqual(len(w), 1)
+        self.assertEqual(w[0]["id"], "install-foreign-autostart")
+        self.assertIn("S99zapret", w[0]["hint"])
+
+    def test_install_table_structure_valid(self):
+        for inst in _FOREIGN_NFQWS_INSTALLS:
+            self.assertTrue(inst["id"] and inst["name"] and inst["paths"])
+            self.assertTrue(inst["hint"])
+            # init обязан быть среди paths, иначе «установлено» не
+            # отличить от «остались файлы».
+            self.assertIn(inst["init"], inst["paths"])
+
+
+class TestAttributeNfqwsOwner(unittest.TestCase):
+    """Кому принадлежит посторонний nfqws2."""
+
+    def test_pidfile_name_gives_away_the_upstream_style_init(self):
+        # Движок у всех один (/opt/zapret2/nfq2/nfqws2), поэтому имя
+        # PID-файла — единственная зацепка, когда файлов на диске уже нет.
+        owner = attribute_nfqws_owner(
+            "/opt/zapret2/nfq2/nfqws2 --pidfile=/var/run/nfqws2_1.pid", set())
+        self.assertIsNotNone(owner)
+        self.assertEqual(owner["id"], "z2k")
+
+    def test_marker_on_disk_gives_away_the_owner(self):
+        owner = attribute_nfqws_owner(
+            "/opt/zapret2/nfq2/nfqws2 --qnum=200",
+            {"/opt/etc/init.d/S99zapret2"})
+        self.assertEqual(owner["id"], "z2k")
+
+    def test_unknown_process_has_no_owner(self):
+        self.assertIsNone(
+            attribute_nfqws_owner("/usr/sbin/nfqws --qnum=200", set()))
+
+    def test_empty_cmdline_does_not_crash(self):
+        self.assertIsNone(attribute_nfqws_owner(None, None))
+
+
+class TestOurOwnScanIsNotAConflict(unittest.TestCase):
+    """nfqws2, запущенный НАШИМ подбором стратегии, — не конфликт.
+
+    blockcheck2.sh и сканер поднимают движок под собой; nfqws_manager их
+    отфильтровывает, а «Диагностика» — нет, и во время скана страница
+    показывала собственную работу GUI как стороннюю систему.
+    """
+
+    def test_descendant_of_gui_is_filtered_out(self):
+        import os
+        import subprocess
+        import tempfile
+        import shutil
+        import time
+        from core.diagnostics import check_nfqws_conflicts
+
+        tmp = tempfile.mkdtemp()
+        try:
+            fake = os.path.join(tmp, "nfqws2")
+            shutil.copy(shutil.which("sleep"), fake)
+            # Внук в своей сессии — ровно так запускается blockcheck2.
+            proc = subprocess.Popen(["sh", "-c", "%s 10" % fake],
+                                    preexec_fn=os.setsid)
+            try:
+                time.sleep(0.3)
+                result = check_nfqws_conflicts()
+                pids = {c["pid"] for c in result["conflicts"]}
+                self.assertNotIn(proc.pid, pids)
+                self.assertGreaterEqual(result["scan_children"], 1)
+            finally:
+                proc.kill()
+                proc.wait()
+                # Внук переживает kill родителя — добиваем по группе.
+                try:
+                    os.killpg(proc.pid, 9)
+                except OSError:
+                    pass
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestForeignAutostartDetection(unittest.TestCase):
+    """Чужой S99zapret отличается от нашего маркером внутри файла."""
+
+    def _script(self, body):
+        import tempfile
+        path = tempfile.mktemp()
+        with open(path, "w") as f:
+            f.write(body)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_our_script_is_not_foreign(self):
+        from core import diagnostics
+        path = self._script("#!/bin/sh\n# zapret-gui:nfqws-autostart\n")
+        with mock.patch.object(diagnostics, "_OUR_AUTOSTART_SCRIPT", path):
+            self.assertIsNone(diagnostics._foreign_autostart_script())
+
+    def test_script_without_marker_is_foreign(self):
+        from core import diagnostics
+        path = self._script("#!/bin/sh\n# zapret keenetic init\n")
+        with mock.patch.object(diagnostics, "_OUR_AUTOSTART_SCRIPT", path):
+            self.assertEqual(diagnostics._foreign_autostart_script(), path)
+
+    def test_missing_script_is_not_foreign(self):
+        from core import diagnostics
+        with mock.patch.object(diagnostics, "_OUR_AUTOSTART_SCRIPT",
+                               "/nonexistent/S99zapret"):
+            self.assertIsNone(diagnostics._foreign_autostart_script())
 
 
 if __name__ == "__main__":
