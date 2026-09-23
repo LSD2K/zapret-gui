@@ -247,7 +247,7 @@ _firewall_stop() {
 
 # ──────────────────────────── nftables ────────────────────────────
 # Паритет с Python-путём (_apply_nftables в core/firewall.py): одна inet-таблица
-# zapret_gui с цепочками postrouting / prerouting / natpost. Семейство inet
+# zapret_gui с цепочками predefrag / postrouting / prerouting / natpost. Семейство inet
 # покрывает сразу IPv4 и IPv6, поэтому IPV6_ENABLED здесь не при чём (ровно как
 # в Python-пути).
 #
@@ -308,6 +308,16 @@ _nft_firewall_start() {
         '{ type filter hook prerouting priority -150 ; }'
     nft add chain inet $NFT_TABLE natpost \
         '{ type nat hook postrouting priority 100 ; }'
+    nft add chain inet $NFT_TABLE predefrag \
+        '{ type filter hook output priority -401 ; }'
+
+    # ─── predefrag (output, до conntrack): POSTNAT — пакеты самого nfqws2
+    # (fwmark), IP-фрагменты и data-без-ACK мимо conntrack/NAT, иначе
+    # транзитный обход ломается (паритет с zapret2 common/nft.sh).
+    _nft_rule predefrag "meta mark and $_mark_proc == $_mark_proc notrack"
+    _nft_rule predefrag "ip frag-off & 0x1fff != 0 notrack"
+    _nft_rule predefrag "exthdr frag exists notrack"
+    _nft_rule predefrag "tcp flags ! syn,rst,ack notrack"
 
     # ─── postrouting (исходящий) ───
     # EXCLUDE — это CONNMARK, поэтому матчим `ct mark`, а не пакетный

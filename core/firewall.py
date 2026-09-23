@@ -1328,7 +1328,10 @@ class FirewallManager:
         """
         Применить правила nftables (паритет с iptables-путём).
 
-        В inet-таблице создаём три цепочки:
+        В inet-таблице создаём четыре цепочки:
+          • predefrag (output, priority -401): notrack для пакетов, которые
+            шлёт сам nfqws2 (fwmark), IP-фрагментов и data-без-ACK —
+            иначе conntrack/NAT ломают POSTNAT-обход транзитного трафика;
           • postrouting (исходящий): RETURN для исключённых, NFQUEUE первых N
             пакетов + по TCP-флагам fin/rst;
           • prerouting (входящий/ответы): RETURN исключённых и обработанных,
@@ -1371,6 +1374,24 @@ class FirewallManager:
                     "{ type filter hook prerouting priority -150 ; }" % NFT_TABLE)
         cmds.append("add chain inet %s natpost "
                     "{ type nat hook postrouting priority 100 ; }" % NFT_TABLE)
+        # predefrag: output до defrag/conntrack (-401, как в zapret2
+        # common/nft.sh). Схема POSTNAT: пакеты, которые nfqws2 шлёт сам
+        # (fwmark), уже NAT-ированы и не должны попадать в conntrack/NAT
+        # повторно. Без notrack транзитный (форвардный) трафик LAN-клиентов
+        # даёт conntrack «invalid» на реинжекте и обход для них не работает,
+        # хотя для трафика самого роутера всё в порядке.
+        cmds.append("add chain inet %s predefrag "
+                    "{ type filter hook output priority -401 ; }" % NFT_TABLE)
+
+        # ─── predefrag (output): notrack для пакетов nfqws2 ───
+        cmds.append("add rule inet %s predefrag meta mark and %s == %s notrack"
+                    % (NFT_TABLE, fwmark, fwmark))
+        cmds.append("add rule inet %s predefrag ip frag-off & 0x1fff != 0 notrack"
+                    % NFT_TABLE)
+        cmds.append("add rule inet %s predefrag exthdr frag exists notrack"
+                    % NFT_TABLE)
+        cmds.append("add rule inet %s predefrag tcp flags ! syn,rst,ack notrack"
+                    % NFT_TABLE)
 
         # ─── postrouting (исходящий) ───
         # EXCLUDE — это CONNMARK (ставится на conntrack), поэтому матчим
