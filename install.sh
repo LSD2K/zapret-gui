@@ -477,11 +477,14 @@ install_from_github() {
     if [ -d "$APP_DIR" ]; then
         info "Обновление — бэкап конфигурации..."
         if [ -f "$CONFIG_DIR/settings.json" ]; then
-            cp "$CONFIG_DIR/settings.json" "$TMP_DIR/settings.json.bak"
+            # settings.json может быть 600 root (пароль GUI внутри) — читать
+            # через $SUDO, иначе обновление от обычного пользователя падает на
+            # «Permission denied» до копирования файлов.
+            $SUDO cp "$CONFIG_DIR/settings.json" "$TMP_DIR/settings.json.bak"
             ok "Бэкап settings.json"
         fi
         if [ -d "$APP_DIR/config/strategies/user" ]; then
-            cp -r "$APP_DIR/config/strategies/user" "$TMP_DIR/user_strategies_bak"
+            $SUDO cp -r "$APP_DIR/config/strategies/user" "$TMP_DIR/user_strategies_bak"
             ok "Бэкап пользовательских стратегий"
         fi
     fi
