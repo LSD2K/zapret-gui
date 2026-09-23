@@ -35,8 +35,10 @@ sing-box принимает JSON (не INI-like .conf). Структура сх�
 
 import base64
 import binascii
+import ipaddress
 import json
 import re
+import urllib.parse
 from typing import Any
 
 
@@ -787,6 +789,104 @@ def _norm_suffix_domains(domains) -> list:
     return out
 
 
+# Схема прямого DNS → тип typed-сервера (1.12+). Порт по умолчанию sing-box
+# подставляет сам (53/853/443), path у https — `/dns-query`.
+_DIRECT_DNS_SCHEMES = {"udp": "udp", "tls": "tls", "https": "https"}
+
+DNS_BOOTSTRAP_TAG = "dns-bootstrap"
+
+
+def _ip_literal(s: str) -> bool:
+    try:
+        ipaddress.ip_address((s or "").strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def parse_direct_dns(value):
+    """
+    Разобрать поле «прямой DNS» формы в typed-сервер sing-box 1.12+ (без
+    тега). None — формат не распознан.
+
+      local / ''              → {"type": "local"}
+      1.1.1.1, 1.1.1.1:5353,
+      [2606:4700::1111]:53    → udp (+server_port, если задан)
+      udp://ip[:port]         → udp
+      tls://host[:port]       → tls
+      https://host[:port]/path → https (path, если не `/dns-query`)
+
+    `detour` НЕ ставим: typed-сервер с detour на пустой direct-outbound
+    проходит `sing-box check`, но на `run` падает FATAL «detour to an empty
+    direct outbound makes no sense» (проверено на 1.14.1). Без detour сервер
+    и так ходит напрямую, мимо route.final.
+    """
+    s = str(value if value is not None else "").strip()
+    if s in ("", "local"):
+        return {"type": "local"}
+    if "://" in s:
+        try:
+            u = urllib.parse.urlsplit(s)
+            port = u.port
+        except ValueError:
+            return None
+        typ = _DIRECT_DNS_SCHEMES.get((u.scheme or "").lower())
+        host = u.hostname or ""
+        if not typ or not host:
+            return None
+        srv = {"type": typ, "server": host}
+        if port:
+            srv["server_port"] = port
+        path = u.path or ""
+        if typ == "https" and path not in ("", "/", "/dns-query"):
+            srv["path"] = path
+        return srv
+    # Без схемы — только IP-литерал (udp), опционально с портом.
+    host, port = s, 0
+    if s.startswith("["):
+        end = s.find("]")
+        if end < 0:
+            return None
+        host, rest = s[1:end], s[end + 1:]
+        if rest:
+            if not rest.startswith(":") or not rest[1:].isdigit():
+                return None
+            port = int(rest[1:])
+    elif s.count(":") == 1:
+        host, p = s.split(":")
+        if not p.isdigit():
+            return None
+        port = int(p)
+    if not _ip_literal(host) or not (0 <= port <= 65535):
+        return None
+    srv = {"type": "udp", "server": host}
+    if port:
+        srv["server_port"] = port
+    return srv
+
+
+def make_direct_dns_servers(value, *, tag: str = "dns-direct"):
+    """
+    typed-серверы для прямого DNS: [прямой] или [прямой, bootstrap].
+
+    Если в адресе имя, а не IP (`https://cloudflare-dns.com/dns-query`),
+    серверу нужен свой `domain_resolver`: DNS-серверы не берут
+    `route.default_domain_resolver` («missing domain resolver for domain
+    server address»), а ссылка на самого себя дала бы петлю. Имя резолвим
+    системным резолвером (`local`, тег dns-bootstrap). None — не распознан.
+    """
+    srv = parse_direct_dns(value)
+    if srv is None:
+        return None
+    direct = dict(type=srv["type"], tag=tag)
+    direct.update((k, v) for k, v in srv.items() if k != "type")
+    servers = [direct]
+    if srv["type"] != "local" and not _ip_literal(srv.get("server", "")):
+        direct["domain_resolver"] = DNS_BOOTSTRAP_TAG
+        servers.append({"type": "local", "tag": DNS_BOOTSTRAP_TAG})
+    return servers
+
+
 def make_fakeip_dns(*, proxied_domains=None, direct_dns: str = "local",
                     typed: bool = False, fakeip: bool = True) -> dict:
     """
@@ -797,28 +897,28 @@ def make_fakeip_dns(*, proxied_domains=None, direct_dns: str = "local",
     (`type:`/`type:fakeip`). Оркестратор (core/singbox_fakeip) пробует один,
     при провале `sing-box check` — другой.
 
-    direct_dns: 'local'/'' → системный резолвер (без host-поля, переносимо);
-    голый IP → udp-резолвер. fakeip=False → секция без FakeIP (для режима
+    direct_dns: 'local'/'' → системный резолвер (без host-поля, переносимо).
+    typed: IP / IP:порт / udp:// / tls:// / https:// → свой тип сервера
+    (parse_direct_dns), нераспознанное — как раньше, `local`. legacy: строка
+    уходит в `address` как есть. fakeip=False → секция без FakeIP (для режима
     «весь трафик»), только direct-сервер, чтобы hijack-dns был куда отдавать.
     """
     dd = (direct_dns or "local").strip()
     is_local = dd in ("", "local")
-    is_ip = bool(_IPV4_RE.match(dd))
 
+    extra_srv = []
     if typed:
-        if is_local:
-            direct_srv = {"tag": "dns-direct", "type": "local"}
-        elif is_ip:
-            direct_srv = {"tag": "dns-direct", "type": "udp", "server": dd,
-                          "detour": "direct"}
-        else:                                   # https:// / tls:// и т.п.
-            direct_srv = {"tag": "dns-direct", "type": "local"}
+        direct_srv = {"tag": "dns-direct", "type": "local"}
+        if not is_local:
+            parsed = make_direct_dns_servers(dd)
+            if parsed:
+                direct_srv, extra_srv = parsed[0], parsed[1:]
     else:
         direct_srv = {"tag": "dns-direct", "address": dd if dd else "local"}
         if not is_local:
             direct_srv["detour"] = "direct"
 
-    servers = [direct_srv]
+    servers = [direct_srv] + extra_srv
     rules = []
     proxied = _norm_suffix_domains(proxied_domains)
 
