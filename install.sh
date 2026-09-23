@@ -427,7 +427,8 @@ _tmp_base() {
 install_from_github() {
     local TMP_DIR="$(_tmp_base)/zapret-gui-install-$$"
     mkdir -p "$TMP_DIR"
-    trap "rm -rf '$TMP_DIR'" EXIT
+    # Бэкапы внутри копируются через $SUDO (root-файлы), убирать тоже им.
+    trap "$SUDO rm -rf '$TMP_DIR'" EXIT
 
     local src_dir=""
     if [ -n "$FORCE_GITHUB" ]; then
