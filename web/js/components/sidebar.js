@@ -118,6 +118,37 @@ const Sidebar = (() => {
     let currentPage = 'dashboard';
     // Состояние раскрытия родительских пунктов дерева (id → bool).
     const expanded = {};
+    // Разделы, спрятанные настройкой gui.hidden_pages (id страниц).
+    // Родитель скрывает и своих детей.
+    let hiddenPages = new Set();
+
+    function setHidden(ids) {
+        hiddenPages = new Set(Array.isArray(ids) ? ids : []);
+        render();
+    }
+
+    function isHidden(pageId) {
+        if (hiddenPages.has(pageId)) return true;
+        for (const group of NAV_GROUPS) {
+            for (const item of group.items) {
+                if (hiddenPages.has(item.id)
+                    && (item.children || []).some(c => c.id === pageId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function _visibleItems(group) {
+        return group.items
+            .filter(item => !hiddenPages.has(item.id))
+            .map(item => {
+                if (!item.children) return item;
+                const children = item.children.filter(c => !hiddenPages.has(c.id));
+                return Object.assign({}, item, { children });
+            });
+    }
 
     function _hasActiveChild(item) {
         return (item.children || []).some(c => c.id === currentPage);
@@ -234,8 +265,11 @@ const Sidebar = (() => {
 
         nav.innerHTML = '';
 
-        NAV_GROUPS.forEach((group, gi) => {
+        let gi = -1;
+        NAV_GROUPS.forEach((rawGroup) => {
+            const group = Object.assign({}, rawGroup, { items: _visibleItems(rawGroup) });
             if (group.items.length === 0) return;
+            gi += 1;
 
             // Разделитель между группами (кроме первой)
             if (gi > 0) {
@@ -381,5 +415,5 @@ const Sidebar = (() => {
         })();
     }
 
-    return { render, setCurrentPage, initMobileToggle };
+    return { render, setCurrentPage, initMobileToggle, setHidden, isHidden };
 })();

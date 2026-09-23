@@ -74,6 +74,21 @@ const App = (() => {
         } catch (_) {}
     }
 
+    // gui.hidden_pages из settings.json: спрятать разделы из меню и не
+    // пускать на них по прямому хешу. Косметика поверх полного GUI.
+    async function loadHiddenPages() {
+        try {
+            const data = await API.get('/api/config');
+            const hidden = data && data.config && data.config.gui
+                ? data.config.gui.hidden_pages : null;
+            if (!Array.isArray(hidden) || hidden.length === 0) return;
+            Sidebar.setHidden(hidden);
+            if (currentPageId && Sidebar.isHidden(currentPageId)) {
+                window.location.hash = 'dashboard';
+            }
+        } catch (_) {}
+    }
+
     function init() {
         // Тема (тёмная/светлая) — синхронизируем иконку переключателя
         if (typeof Theme !== 'undefined') Theme.init();
@@ -87,6 +102,9 @@ const App = (() => {
 
         // Загружаем версию GUI в sidebar
         loadSidebarVersion();
+
+        // Спрятанные разделы (gui.hidden_pages)
+        loadHiddenPages();
 
         // Слушаем изменение hash
         window.addEventListener('hashchange', onHashChange);
@@ -111,8 +129,8 @@ const App = (() => {
             return;
         }
 
-        // Если такой страницы нет — на dashboard
-        if (!pages[pageId]) {
+        // Если такой страницы нет или она спрятана — на dashboard
+        if (!pages[pageId] || Sidebar.isHidden(pageId)) {
             pageId = 'dashboard';
             window.location.hash = pageId;
         }

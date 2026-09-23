@@ -634,12 +634,17 @@ INITEOF
         cat > "$TMP_INIT" << UNITEOF
 [Unit]
 Description=Zapret Web-GUI
-After=network.target
+# nftables.service: на Debian с /etc/nftables.conf (flush ruleset) GUI
+# должен подниматься после базового firewall, иначе его таблица улетит.
+# network-online: WAN-интерфейс уже определён (правила по oifname).
+Wants=network-online.target
+After=network-online.target nftables.service
 
 [Service]
 Type=simple
+WorkingDirectory=$APP_DIR
 ExecStart=$(command -v python3) $APP_DIR/app.py --config $CONFIG_DIR
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

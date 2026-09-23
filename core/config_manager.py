@@ -73,6 +73,11 @@ DEFAULT_CONFIG = {
         # — только по IP. Пример: ["my.keenetic.net"]. "*" — проверку
         # выключить совсем.
         "allowed_hosts": [],
+        # Разделы, спрятанные из бокового меню (id страниц SPA:
+        # "awg", "singbox", "mihomo", "usque", "tgproxy", "opera-proxy",
+        # "routing", "mcp", "agent", ...). Родитель скрывает и детей.
+        # Только косметика: API и код разделов остаются на месте.
+        "hidden_pages": [],
     },
 
     # --- Настройки nfqws ---
