@@ -640,6 +640,22 @@ def create_app(config_dir: str = None) -> Bottle:
 
     @app.hook("before_request")
     def _security_gate():
+        # -1) DNS-rebinding (core/host_guard.py): чужое имя, перепривязанное
+        #     на адрес роутера, делает любой запрос «same-origin». Имя, по
+        #     которому пришли, обязано быть IP, localhost или объявленным в
+        #     gui.allowed_hosts — раньше всех остальных проверок, включая
+        #     врезку MCP-токена и preflight.
+        from core.host_guard import host_allowed
+        if not host_allowed(request.environ.get("HTTP_HOST", ""),
+                            cfg.get("gui", "allowed_hosts", default=[]),
+                            _allowed_origins()):
+            raise HTTPResponse(
+                '{"ok": false, "error": "запрос по неизвестному имени '
+                'хоста отклонён (защита от DNS-rebinding): заходите по IP '
+                'или добавьте имя в gui.allowed_hosts"}',
+                status=403,
+                headers={"Content-Type":
+                         "application/json; charset=utf-8"})
         # OPTIONS (CORS preflight) — без проверок: браузер не шлёт ни
         # креденшелы, ни тело; ответ отдаёт options_handler.
         if request.method == "OPTIONS":

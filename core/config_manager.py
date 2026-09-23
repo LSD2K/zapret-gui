@@ -68,6 +68,11 @@ DEFAULT_CONFIG = {
         # разрешён только same-origin; `*` НЕ используется). Пример:
         # ["https://my.dashboard.example"].
         "cors_origins": [],
+        # Имена, по которым можно заходить в GUI, кроме IP-адресов и
+        # localhost (защита от DNS-rebinding, core/host_guard.py). Пусто
+        # — только по IP. Пример: ["my.keenetic.net"]. "*" — проверку
+        # выключить совсем.
+        "allowed_hosts": [],
     },
 
     # --- Настройки nfqws ---

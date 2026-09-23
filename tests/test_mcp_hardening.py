@@ -22,7 +22,11 @@
 * **``file_write`` пишет туда, где проверил границу**, а ``file_read``
   не виснет на FIFO и устройствах;
 * **``snapshot_id`` самоправки сверяется с форматом**: ``../`` делал
-  чужой ``manifest.json`` снимком со своим ``root``.
+  чужой ``manifest.json`` снимком со своим ``root``;
+* **DNS-rebinding:** чужое имя, перепривязанное на адрес роутера, делало
+  любой запрос «same-origin» — страница злоумышленника читала MCP-токен
+  с панели и раздавала себе разрешения. Имя в ``Host`` обязано быть IP,
+  localhost или объявленным в ``gui.allowed_hosts``.
 """
 
 import json
@@ -341,6 +345,69 @@ class TestSnapshotId(unittest.TestCase):
                     code_editor.snapshot_path(bad)
         self.assertTrue(code_editor.snapshot_path(
             "snap-20260101-000000-2").endswith("snap-20260101-000000-2"))
+
+
+class TestHostGuard(unittest.TestCase):
+
+    def test_ip_and_localhost_pass(self):
+        from core.host_guard import host_allowed
+
+        for host in ("192.168.1.1", "192.168.1.1:8080", "[::1]:8080",
+                     "fe80::1", "localhost:8080", "gui.localhost", ""):
+            with self.subTest(host=host):
+                self.assertTrue(host_allowed(host))
+
+    def test_foreign_name_is_refused(self):
+        from core.host_guard import host_allowed
+
+        for host in ("evil.example", "evil.example:8080",
+                     "my.keenetic.net:8080", "localhost.evil.example"):
+            with self.subTest(host=host):
+                self.assertFalse(host_allowed(host))
+
+    def test_declared_names_pass(self):
+        from core.host_guard import host_allowed
+
+        self.assertTrue(host_allowed("My.Keenetic.Net:8080",
+                                     ["my.keenetic.net"]))
+        self.assertTrue(host_allowed("dash.example",
+                                     cors_origins=["https://dash.example"]))
+        self.assertTrue(host_allowed("anything.example", ["*"]))
+
+
+class TestHostGuardInTheApp(unittest.TestCase):
+    """Гейт приложения целиком: rebinding не доходит ни до панели MCP."""
+
+    @classmethod
+    def setUpClass(cls):
+        import app as app_module
+        from tests._wsgi_client import WSGIClient
+
+        cls.client = WSGIClient(app_module.create_app())
+
+    def tearDown(self):
+        from core.config_manager import get_config_manager
+        get_config_manager().set("gui", "allowed_hosts", [])
+
+    def test_rebound_name_cannot_read_the_panel(self):
+        code, _, _ = self.client.request(
+            "GET", "/api/mcp/ui/token",
+            headers={"Host": "evil.example:8080"})
+        self.assertEqual(code, 403)
+
+    def test_ip_still_works(self):
+        code, _, _ = self.client.request(
+            "GET", "/api/status", headers={"Host": "192.168.1.1:8080"})
+        self.assertEqual(code, 200)
+
+    def test_declared_name_works(self):
+        from core.config_manager import get_config_manager
+
+        get_config_manager().set("gui", "allowed_hosts",
+                                 ["my.keenetic.net"])
+        code, _, _ = self.client.request(
+            "GET", "/api/status", headers={"Host": "my.keenetic.net:8080"})
+        self.assertEqual(code, 200)
 
 
 if __name__ == "__main__":
