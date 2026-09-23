@@ -42,6 +42,9 @@ const McpPage = (() => {
     // ожидаемое состояние, а не ошибка сети.
     let _restarting = false;
 
+    // Открытый черновик issue: текст и ссылка — по клику «Показать».
+    let _issue = null;
+
     // Подписи блоков: перерисовываем только то, что изменилось.
     const _sig = {};
 
@@ -68,6 +71,7 @@ const McpPage = (() => {
         _token = '';
         _tokenVisible = false;
         _restarting = false;
+        _issue = null;
         Object.keys(_sig).forEach(k => delete _sig[k]);
 
         container.innerHTML = `
@@ -118,6 +122,22 @@ const McpPage = (() => {
                 <div id="mcp-shell"></div>
             </div>
 
+            <div class="card" id="mcp-issues-card" style="display:none;">
+                <div class="card-title">Черновики issue</div>
+                <div id="mcp-issues"></div>
+                <div id="mcp-issue-preview" style="display:none;margin-top:10px;">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                        <button class="btn btn-sm btn-primary" data-action="issueOpen">Открыть на GitHub</button>
+                        <button class="btn btn-sm" data-action="issueCopy">Скопировать текст</button>
+                        <button class="btn btn-sm" data-action="issueClose">Скрыть</button>
+                    </div>
+                    <pre id="mcp-issue-text" class="text-mono"
+                         style="padding:10px;border-radius:6px;max-height:420px;overflow:auto;
+                                font-size:12px;white-space:pre-wrap;word-break:break-word;
+                                background:var(--bg-input,rgba(0,0,0,.2));"></pre>
+                </div>
+            </div>
+
             <div class="card" id="mcp-audit-card">
                 <div class="card-title">Журнал вызовов</div>
                 <div id="mcp-audit">${_loading()}</div>
@@ -138,6 +158,7 @@ const McpPage = (() => {
         // settings.json, а в памяти вкладки ему делать нечего.
         _token = '';
         _tokenVisible = false;
+        _issue = null;
     }
 
     // ══════════════════ Опрос ══════════════════
@@ -200,6 +221,15 @@ const McpPage = (() => {
         _block('mcp-shell', _withPerms(state, state.shell,
                                        ['shell_readonly', 'shell_full']),
                _shellHtml);
+
+        // Карточка черновиков видна, когда в ней есть что показать:
+        // пустой блок «модель ничего не сообщала» — шум на каждой
+        // странице.
+        const issues = state.issues || {};
+        _block('mcp-issues', Object.assign({}, issues, {
+            available: !!(issues.available && ((issues.drafts || []).length
+                                               || (issues.crashes || []).length)),
+        }), _issuesHtml);
 
         _section('mcp-audit', _auditHtml(state.audit || {}),
                  [JSON.stringify((state.audit || {}).records || []),
@@ -731,6 +761,74 @@ const McpPage = (() => {
         `;
     }
 
+    // ══════════════════ Черновики issue ══════════════════
+
+    function _issuesHtml(block) {
+        if (block.error) {
+            return `<div class="alert alert-warning">${esc(block.error)}</div>`;
+        }
+        const drafts = block.drafts || [];
+        const crashes = block.crashes || [];
+        const kinds = {
+            crash: 'падение', wrong_result: 'неверный результат',
+            contract: 'не по описанию', docs_mismatch: 'документация',
+            other: 'другое',
+        };
+
+        const rows = drafts.map(d => `
+            <tr>
+                <td class="text-muted" style="white-space:nowrap;">${esc(d.updated || d.time || '')}</td>
+                <td>${esc(d.title || '')}
+                    ${(d.occurrences || 1) > 1 ? `<span class="badge badge-warning">×${d.occurrences}</span>` : ''}
+                </td>
+                <td class="text-muted" style="font-size:12px;">
+                    ${esc(kinds[d.kind] || d.kind || '')}${d.tool ? ' · <span class="text-mono">' + esc(d.tool) + '</span>' : ''}
+                </td>
+                <td>${d.status === 'sent'
+                        ? '<span class="badge badge-success">отправлен</span>'
+                        : '<span class="badge badge-muted">черновик</span>'}</td>
+                <td>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+                        <button class="btn btn-sm" data-action="issueShow"
+                                data-id="${esc(d.id)}">Показать</button>
+                        ${d.status === 'sent' ? '' : `<button class="btn btn-sm" data-action="issueSent"
+                                data-id="${esc(d.id)}">Отправлен</button>`}
+                        <button class="btn btn-sm btn-danger" data-action="issueDelete"
+                                data-id="${esc(d.id)}">Удалить</button>
+                    </div>
+                </td>
+            </tr>`).join('');
+
+        const crashHtml = crashes.length ? `
+            <div class="alert alert-warning" style="margin-top:10px;">
+                Падения инструментов без черновика: ${crashes.length}.
+                Попросите модель составить отчёт (сценарий
+                <span class="text-mono">report_problem</span>) или посмотрите
+                <span class="text-mono">zapret-gui mcp issues crashes</span>.
+                <ul style="margin:6px 0 0 18px;font-size:12px;">
+                    ${crashes.slice(0, 5).map(c => `<li>
+                        <span class="text-mono">${esc(c.tool || '')}</span>:
+                        ${esc(c.error || '')}
+                        <span class="text-muted text-mono">(${esc(c.where || '')})</span>
+                    </li>`).join('')}
+                </ul>
+            </div>` : '';
+
+        return `
+            <p class="text-muted" style="font-size:13px;">${esc(_t('mcp.warn.issues'))}</p>
+            ${drafts.length ? `
+                <div style="overflow:auto;">
+                    <table class="table" style="font-size:13px;">
+                        <thead><tr>
+                            <th>Когда</th><th>Заголовок</th><th>Вид</th>
+                            <th>Статус</th><th></th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>` : ''}
+            ${crashHtml}`;
+    }
+
     // ══════════════════ Блок 8: shell ══════════════════
 
     function _shellHtml(block) {
@@ -890,6 +988,23 @@ const McpPage = (() => {
             await _codePatch();
         } else if (action === 'shellPanic') {
             await _shellPanic();
+        } else if (action === 'issueShow') {
+            await _issueShow(btn.dataset.id);
+        } else if (action === 'issueCopy') {
+            if (_issue) Clipboard.copyWithToast(_issue.markdown || '',
+                                                { okText: 'Текст скопирован' });
+        } else if (action === 'issueOpen') {
+            _issueOpen();
+        } else if (action === 'issueClose') {
+            _issue = null;
+            const box = document.getElementById('mcp-issue-preview');
+            if (box) box.style.display = 'none';
+        } else if (action === 'issueSent') {
+            await _act(() => API.post('/api/mcp/ui/issues/status',
+                                      { id: btn.dataset.id, status: 'sent' }),
+                       'Отмечен отправленным');
+        } else if (action === 'issueDelete') {
+            await _issueDelete(btn.dataset.id);
         } else if (action === 'shellApprove') {
             await _shellDecide(btn.dataset.token, 'approve');
         } else if (action === 'shellReject') {
@@ -1027,6 +1142,53 @@ const McpPage = (() => {
         _restarting = true;
         _banner(_t('mcp.warn.restart'), 'warning');
         await _tick();
+    }
+
+    // ── черновики issue ──
+
+    async function _issueShow(id) {
+        const box = document.getElementById('mcp-issue-preview');
+        const text = document.getElementById('mcp-issue-text');
+        if (!box || !text) return;
+        box.style.display = '';
+        text.textContent = 'Загрузка…';
+        try {
+            const data = await API.get('/api/mcp/ui/issues/draft?id='
+                                       + encodeURIComponent(id));
+            _issue = { id: id, markdown: data.markdown || '',
+                       url: data.open_on_github || '',
+                       shortened: !!data.body_shortened };
+            text.textContent = _issue.markdown;
+        } catch (e) {
+            _issue = null;
+            text.textContent = String(e.message || e);
+        }
+    }
+
+    /** Открыть /issues/new; не влезший в адрес текст — в буфер обмена. */
+    function _issueOpen() {
+        if (!_issue || !_issue.url) return;
+        if (_issue.shortened) {
+            Clipboard.copyWithToast(_issue.markdown, {
+                okText: 'Текст длинный для ссылки — полный скопирован, '
+                        + 'вставьте его в issue' });
+        }
+        window.open(_issue.url, '_blank', 'noopener');
+    }
+
+    async function _issueDelete(id) {
+        const ok = await Confirm.show('Удалить черновик?',
+                                      'Черновик и собранный к нему контекст '
+                                      + 'пропадут с устройства.',
+                                      { danger: true, confirmLabel: 'Удалить' });
+        if (!ok) return;
+        if (_issue && _issue.id === id) {
+            _issue = null;
+            const box = document.getElementById('mcp-issue-preview');
+            if (box) box.style.display = 'none';
+        }
+        await _act(() => API.post('/api/mcp/ui/issues/delete', { id: id }),
+                   'Черновик удалён');
     }
 
     // ── shell ──

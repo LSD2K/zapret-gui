@@ -33,6 +33,7 @@ const i18n_en = {
     "mcp.warn.shell": "Full router access as root — to the whole system, not just the GUI. The model can run any command, rewrite any file (including the GUI's own files — but without the checks, snapshots and auto-rollback that “GUI code editing” provides), install and remove packages, stop services. There is no confirmation that softens this: enable it only knowing what you risk.",
     "mcp.warn.self_edit": "The model can rewrite the GUI itself on the device — only files inside the GUI install directory; this permission does not let it run commands or touch the rest of the system (that is the separate Shell access, and neither one enables the other). Each edit is checked and snapshotted before it is applied; if a restart fails the guard restores the previous files automatically, but a bad edit stays live until the dead-man expires.",
     "mcp.warn.panic": "Both shell permissions will be switched off, running background commands killed, pending confirmations revoked.",
+    "mcp.warn.issues": "The model drafted these when it hit a bug in the GUI itself. Nothing is sent automatically: read the text and open the issue with your own GitHub account. Domains and public addresses are replaced with placeholders.",
 
     "mcp.risk.control": "Can stop and start DPI bypass — clients lose their connection meanwhile.",
     "mcp.risk.strategies_write": "Can edit and delete your strategies, hostlists, ipsets and lua scripts.",
