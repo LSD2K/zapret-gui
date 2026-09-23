@@ -35,10 +35,38 @@ Claude Desktop или Cline, не открывая наружу веб-инте�
    штатный конец, а не сбой.
 5. **Уведомление ответа не порождает.** Диспетчер возвращает ``None`` —
    в stdout не уходит ничего.
+6. **В stdout пишут двое — и только под замком.** Ответы пишет поток,
+   читающий stdin, уведомления — поток-писатель (см. ниже). Две строки,
+   записанные наперегонки, склеиваются в одну нечитаемую, и клиент
+   рвёт сессию.
+
+## Уведомления: подписка на ресурсы и смена инструментов
+
+stdin читается в один поток, и пока он ждёт следующей строки, сказать
+клиенту что-то самому мосту нечем. Поэтому в локальном режиме рядом
+работает **поток-писатель** (:class:`_Notifier`): у моста своя сессия
+(``core/mcp/session.Session``, та же, что у legacy-SSE, но вне общего
+реестра — это отдельный процесс), и писатель делает на ней ровно то,
+что генератор SSE-потока в ``api/mcp.py``:
+
+* сверяет отпечатки ресурсов под подпиской (``resources/subscribe``) и
+  шлёт ``notifications/resources/updated``, когда они разошлись;
+* раз в ``KEEPALIVE_SEC`` сверяет разрешения и шлёт
+  ``notifications/tools/list_changed``, когда пользователь щёлкнул
+  переключатель.
+
+Отсюда же честная capability: диспетчер видит сессию в ``ctx`` и
+отвечает на ``initialize`` ``resources.subscribe: true``. В режиме
+прокси сессии нет — чужая точка stateless, уведомление доставить ей
+некуда, и подписку она отклонит сама.
 """
 
 import json
+import queue
 import sys
+import threading
+import time
+import uuid
 
 
 # Таймаут одного запроса в режиме прокси (сек).
@@ -62,12 +90,22 @@ def serve(stdin=None, stdout=None, stderr=None, *, url: str = "",
     err = stderr if stderr is not None else sys.stderr
 
     timeout = int(timeout or DEFAULT_TIMEOUT_SEC)
-    handle = _proxy(url, token, timeout, err) if url else _local(err)
+    # Один замок на stdout (правило 6): ответы и уведомления пишутся из
+    # разных потоков.
+    lock = threading.Lock()
+    notifier = None
+    if url:
+        handle = _proxy(url, token, timeout, err)
+    else:
+        notifier = _Notifier(out, err, lock)
+        handle = _local(err, notifier.session)
 
     saved_stdout = sys.stdout
     if own_streams:
         # Чужой print() уедет в stderr, а не в протокол.
         sys.stdout = err
+    if notifier is not None:
+        notifier.start()
     try:
         for line in stdin:
             line = (line or "").strip()
@@ -75,13 +113,16 @@ def serve(stdin=None, stdout=None, stderr=None, *, url: str = "",
                 continue
             answer = _handle(line, handle, err)
             if answer is not None:
-                _write(out, answer, err)
+                with lock:
+                    _write(out, answer, err)
     except KeyboardInterrupt:
         return 0
     except (BrokenPipeError, ConnectionResetError):
         # Клиент закрыл канал на полуслове — это конец сессии, не сбой.
         return 0
     finally:
+        if notifier is not None:
+            notifier.stop()
         if own_streams:
             sys.stdout = saved_stdout
     return 0
@@ -110,7 +151,7 @@ def _handle(line: str, handle, err):
                       "мост не смог обработать запрос: %s" % e)
 
 
-def _local(err):
+def _local(err, session=None):
     """Локальный режим: диспетчер напрямую, без HTTP."""
     from core.mcp import auth, server
 
@@ -126,8 +167,94 @@ def _local(err):
             "subject": "stdio",
             "remote_addr": "",
             "transport": "stdio",
+            # Сессия потока-писателя: без неё подписка на ресурсы
+            # отказала бы как на stateless-HTTP.
+            "session": session,
         })
     return handle
+
+
+class _Notifier:
+    """Поток-писатель: уведомления клиенту, пока stdin ждёт строки.
+
+    Повторяет круг SSE-генератора (``api/mcp._sse_stream``) и ходит в
+    те же функции ``core/mcp/session`` — второй реализации опроса нет.
+    Писатель ничего не делает сам, пока нет подписок и не меняются
+    разрешения: круг раз в ``KEEPALIVE_SEC`` стоит одного чтения
+    конфига.
+    """
+
+    def __init__(self, out, err, lock):
+        from core.mcp import session as mcp_session
+
+        self._sessions = mcp_session
+        self.session = mcp_session.Session(uuid.uuid4().hex,
+                                           subject="stdio")
+        self._out = out
+        self._err = err
+        self._lock = lock
+        self._stop = threading.Event()
+        self._thread = None
+        self._perms = None
+        self._perms_checked = 0.0
+
+    def start(self):
+        self._perms = self._sessions.permissions_snapshot()
+        self._perms_checked = time.time()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="mcp-stdio-notifier")
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0):
+        """Остановить и дождаться: после EOF в stdout не пишет никто."""
+        self._stop.set()
+        # Разбудить ожидание очереди: иначе поток досидел бы до конца
+        # своего круга (до KEEPALIVE_SEC) после того, как мост уже ушёл.
+        self.session.put(None)
+        self.session.closed = True
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def _run(self):
+        try:
+            while not self._stop.is_set():
+                try:
+                    message = self.session.get(
+                        timeout=self._sessions.stream_wait(self.session))
+                except queue.Empty:
+                    message = None
+                if self._stop.is_set():
+                    break
+                if message is not None:
+                    self._send(message)
+                    continue
+                self._sessions.poll_resources(targets=[self.session])
+                self._poll_permissions()
+        except (BrokenPipeError, ConnectionResetError, ValueError):
+            # Клиент закрыл канал (или поток stdout уже закрыт): писать
+            # некому — это конец, а не сбой.
+            pass
+        except Exception as e:                  # noqa: BLE001 — граница
+            _note(self._err, "поток уведомлений остановлен: %s: %s"
+                  % (type(e).__name__, e))
+
+    def _poll_permissions(self):
+        if time.time() - self._perms_checked < self._sessions.KEEPALIVE_SEC:
+            return
+        self._perms_checked = time.time()
+        current = self._sessions.permissions_snapshot()
+        if current is None:
+            return
+        if self._perms is not None and current != self._perms:
+            self.session.put(dict(self._sessions.TOOLS_CHANGED))
+        self._perms = current
+
+    def _send(self, message):
+        if self._stop.is_set():
+            return
+        with self._lock:
+            _write(self._out, message, self._err)
+        self.session.sent += 1
 
 
 def _proxy(url: str, token: str, timeout: int, err):

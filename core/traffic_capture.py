@@ -322,33 +322,10 @@ def summary(run) -> dict:
     Считается здесь, а не в инструменте: то же самое понадобится UI,
     когда на странице появится кнопка «посмотреть трафик».
     """
-    items = packets(run)
-    out = {
-        "packets": len(items),
-        "captured_total": (run.report or {}).get("total", 0),
-        "sni": [],
-        "hosts": [],
-        "ttl": {},
-        "flags": {},
-        "protocols": {},
-    }
-    for item in items:
-        name = item.get("sni") or item.get("host")
-        if name:
-            bucket = out["sni"] if item.get("sni") else out["hosts"]
-            if name not in bucket:
-                bucket.append(name)
-        ttl = item.get("ttl")
-        if ttl is not None:
-            key = str(ttl)
-            out["ttl"][key] = out["ttl"].get(key, 0) + 1
-        for flag in item.get("flags") or []:
-            out["flags"][flag] = out["flags"].get(flag, 0) + 1
-        proto = item.get("l7") or item.get("proto")
-        if proto:
-            out["protocols"][proto] = out["protocols"].get(proto, 0) + 1
-    out["sni"] = out["sni"][:20]
-    out["hosts"] = out["hosts"][:20]
+    from core import pcap_reader
+
+    out = pcap_reader.summarize(packets(run))
+    out["captured_total"] = (run.report or {}).get("total", 0)
     return out
 
 

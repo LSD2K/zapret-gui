@@ -138,6 +138,13 @@ VARIANT_SCHEMA = {
                              "description": ("Port to sniff; 443 by "
                                              "default. / Порт для "
                                              "дампа.")},
+            "lua_capture": {"type": "boolean", "default": False,
+                            "description": ("Engine-side pcap (zapret-pcap"
+                                            ".lua + --writable): what each "
+                                            "profile RECEIVED from the "
+                                            "queue. Empty = traffic never "
+                                            "reached the strategy. / "
+                                            "Lua-дамп: что движок получил.")},
         },
         "required": ["variants"],
         "additionalProperties": False,
@@ -162,6 +169,7 @@ def strategy_experiment_start(args: dict) -> dict:
         keep_best=args.get("keep_best"),
         capture=args.get("capture"),
         capture_port=args.get("capture_port"),
+        lua_capture=args.get("lua_capture"),
         source="mcp",
     )
     if not result.get("ok"):
@@ -185,6 +193,11 @@ def strategy_experiment_start(args: dict) -> dict:
         result["hint"] += ("; снифер НЕ включился: %s — %s"
                            % (sniff.get("reason") or "tcpdump недоступен",
                               sniff.get("hint") or "поставьте tcpdump"))
+    dump = result.get("lua_capture") or {}
+    if dump.get("wanted") and not dump.get("available"):
+        result["hint"] += ("; lua-дамп НЕ включился: %s — %s"
+                           % (dump.get("reason") or "нет zapret-pcap.lua",
+                              dump.get("hint") or ""))
     return result
 
 

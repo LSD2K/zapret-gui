@@ -11,11 +11,15 @@ stdio-мост MCP (`core/mcp/stdio.py`).
 * уведомление ответа не порождает;
 * EOF завершает мост нулём;
 * чужой `print()` не попадает в протокол;
-* режим прокси возвращает ответ чужой точки и не падает на её отказах.
+* режим прокси возвращает ответ чужой точки и не падает на её отказах;
+* **уведомления** (подписка на ресурсы, смена инструментов) приходят,
+  пока мост ждёт строки в stdin, — и не рвут строку ответа пополам.
 """
 
 import io
 import json
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -120,7 +124,8 @@ class TestGarbageInStdin(unittest.TestCase):
         def boom(payload):
             raise RuntimeError("диспетчер упал")
 
-        with mock.patch.object(stdio, "_local", lambda err: boom):
+        with mock.patch.object(stdio, "_local",
+                               lambda err, session=None: boom):
             _, out, err = run(['{"jsonrpc":"2.0","id":9,"method":"ping"}',
                                '{"jsonrpc":"2.0","id":10,"method":"ping"}'])
         got = answers(out)
@@ -241,6 +246,195 @@ class TestProxyMode(unittest.TestCase):
                             url="http://router")
         message = answers(out)[0]["error"]["message"]
         self.assertIn("401", message)
+
+
+class _SlowStdin:
+    """stdin, который отдаёт строки по одной и ждёт, когда скажут.
+
+    Мост читает stdin в один поток; уведомление обязано прийти, пока
+    он ЖДЁТ следующей строки, — поэтому тесту нужен вход, который
+    умеет ждать, а не готовый текст.
+    """
+
+    def __init__(self):
+        self._lines = []
+        self._cond = threading.Condition()
+        self._closed = False
+
+    def feed(self, obj):
+        with self._cond:
+            self._lines.append(json.dumps(obj) + "\n")
+            self._cond.notify_all()
+
+    def close(self):
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    def __iter__(self):
+        while True:
+            with self._cond:
+                while not self._lines and not self._closed:
+                    self._cond.wait(0.05)
+                if self._lines:
+                    line = self._lines.pop(0)
+                else:
+                    return
+            yield line
+
+
+class _LockedOut(io.StringIO):
+    """stdout, который замечает запись из двух потоков одновременно."""
+
+    def __init__(self):
+        super().__init__()
+        self.overlaps = 0
+        self._busy = False
+
+    def write(self, text):
+        if self._busy:
+            self.overlaps += 1
+        self._busy = True
+        try:
+            # Пауза расширяет окно гонки: без замка вокруг записи две
+            # строки перемешались бы здесь гарантированно.
+            time.sleep(0.001)
+            return super().write(text)
+        finally:
+            self._busy = False
+
+
+class TestNotificationsOverStdio(unittest.TestCase):
+    """Поток-писатель: подписка и смена инструментов по stdio."""
+
+    URI = "zapret://docs/overview"
+
+    def setUp(self):
+        from core.mcp import resources
+        from core.mcp import session as mcp_session
+
+        self.digest = "v1"
+        self._patch(resources, "digest", lambda uri: self.digest)
+        self._patch(resources, "poll_sec", lambda uri: 0.05)
+        self._patch(mcp_session, "KEEPALIVE_SEC", 0.05)
+        self.perms = {"control": False}
+        self._patch(mcp_session, "permissions_snapshot",
+                    lambda: dict(self.perms))
+
+        self.stdin = _SlowStdin()
+        self.out = _LockedOut()
+        self.err = io.StringIO()
+        self.code = None
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._finish)
+
+    def _patch(self, obj, name, value):
+        patcher = mock.patch.object(obj, name, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _serve(self):
+        self.code = stdio.serve(self.stdin, self.out, self.err)
+
+    def _finish(self):
+        self.stdin.close()
+        self.thread.join(5)
+
+    def lines(self):
+        return answers(self.out.getvalue())
+
+    def wait_for(self, predicate, limit=5.0):
+        deadline = time.time() + limit
+        while time.time() < deadline:
+            found = [m for m in self.lines() if predicate(m)]
+            if found:
+                return found[0]
+            time.sleep(0.02)
+        self.fail("не дождались сообщения; stdout: %r, stderr: %r"
+                  % (self.out.getvalue(), self.err.getvalue()))
+
+    def request(self, request_id, method, params=None):
+        self.stdin.feed({"jsonrpc": "2.0", "id": request_id,
+                         "method": method, "params": params or {}})
+        return self.wait_for(lambda m: m.get("id") == request_id)
+
+    def subscribe(self):
+        answer = self.request(1, "resources/subscribe", {"uri": self.URI})
+        self.assertNotIn("error", answer)
+        # Подписка по спеке ничего не отвечает сверх факта, а сервер
+        # квантует период до секунды — ждём её честно.
+        return answer
+
+    def test_capability_is_promised(self):
+        answer = self.request(7, "initialize")
+        self.assertTrue(
+            answer["result"]["capabilities"]["resources"]["subscribe"])
+        self.assertIn("zapret://state/jobs",
+                      answer["result"]["instructions"])
+
+    def test_subscribe_is_accepted(self):
+        meta = self.subscribe()["result"]["_meta"]["zapret-gui"]
+        self.assertTrue(meta["added"])
+        self.assertEqual(meta["uri"], self.URI)
+
+    def test_change_reaches_the_client_while_stdin_is_silent(self):
+        self.subscribe()
+        self.digest = "v2"
+        notice = self.wait_for(
+            lambda m: m.get("method") == "notifications/resources/updated")
+        self.assertEqual(notice["params"]["uri"], self.URI)
+
+    def test_nothing_changed_means_no_notification(self):
+        self.subscribe()
+        time.sleep(1.5)
+        self.assertFalse([m for m in self.lines() if "method" in m])
+
+    def test_unsubscribe_stops_it(self):
+        self.subscribe()
+        answer = self.request(2, "resources/unsubscribe", {"uri": self.URI})
+        self.assertTrue(answer["result"]["_meta"]["zapret-gui"]["removed"])
+        self.digest = "v2"
+        time.sleep(1.5)
+        self.assertFalse([m for m in self.lines()
+                          if m.get("method") ==
+                          "notifications/resources/updated"])
+
+    def test_permission_change_announces_new_tools(self):
+        self.request(3, "ping")
+        self.perms = {"control": True}
+        self.wait_for(
+            lambda m: m.get("method") == "notifications/tools/list_changed")
+
+    def test_writes_never_interleave(self):
+        # Ответы пишет поток stdin, уведомления — поток-писатель; всё,
+        # что ушло в stdout, обязано разбираться построчно.
+        self.subscribe()
+        for number in range(30):
+            self.digest = "v%d" % number
+            self.stdin.feed({"jsonrpc": "2.0", "id": 100 + number,
+                             "method": "ping"})
+        self.wait_for(lambda m: m.get("id") == 129)
+        self.assertEqual(self.out.overlaps, 0)
+        self.lines()                    # каждая строка — JSON
+
+    def test_eof_stops_the_writer(self):
+        self.request(4, "ping")
+        self.stdin.close()
+        self.thread.join(5)
+        self.assertEqual(self.code, 0)
+        self.assertFalse([t for t in threading.enumerate()
+                          if t.name == "mcp-stdio-notifier"])
+
+
+class TestProxyHasNoWriter(unittest.TestCase):
+
+    def test_proxy_mode_does_not_start_the_writer(self):
+        # Чужая точка stateless: уведомление доставить некуда, и
+        # подписку она отклонит сама — писатель здесь был бы обманом.
+        with mock.patch.object(stdio, "_Notifier") as notifier:
+            run([], url="http://127.0.0.1:1")
+        notifier.assert_not_called()
 
 
 class TestEndpoint(unittest.TestCase):

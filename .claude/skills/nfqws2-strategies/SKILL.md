@@ -140,7 +140,7 @@ nfqws2 **не имеет хардкод-стратегий**. Параметро
 | `zapret-antidpi.lua` | Готовые desync-аналоги nfqws1: `fake`, `multisplit`, `multidisorder`, `fakedsplit`, `fakeddisorder`, `hostfakesplit`, `tcpseg`, `oob`, `wsize`, `wssize`, `syndata`, `rst`, `synack`, `synack_split`, `udplen`, `dht_dn`, `http_*`, `pktmod`, `pass`, `luaexec`. **Без неё `--lua-desync=fake:...` — вызов несуществующей функции: тихий 0%**. |
 | `zapret-auto.lua` | Оркестраторы (`circular`, `repeater`, `condition`, `per_instance_condition`, `stopif`) и iff-функции (`cond_random`, `cond_payload_str`, `cond_lua`, …). |
 | `zapret-obfs.lua` | Обфускаторы: `wgobfs`, `ippxor`, `udp2icmp`, `synhide`. **Надмножество** `zapret-wgobfs.lua` — если грузим `obfs`, то `wgobfs.lua` грузить НЕ надо (двойное определение). |
-| `zapret-pcap.lua` | Запись pcap. Требует `--writable` (до 1.0 — `--writeable`). |
+| `zapret-pcap.lua` | Запись pcap (`--lua-desync=pcap:file=<имя>[:keep]`): пакет, каким его отдала очередь (`raw_packet(ctx)`), не результат десинка. Требует `--writable` (до 1.0 — `--writeable`); наш `compose_command` добавляет `--writable=/tmp/zapret-gui-writable` сам, если в argv есть `pcap`, а своего каталога нет (`core/lua_capture.py`). |
 | `zapret-tests.lua` | Тесты C-функций. |
 
 ### Наши расширения (`import/lua/`, разворачиваются на `lua_path` через `core/asset_importer.py`)

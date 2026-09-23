@@ -393,6 +393,17 @@ class NFQWSManager:
             child_env = dict(os.environ)
             child_env["Z2K_STATE_DIR_OVERRIDE"] = state_dir
 
+            # Каталог --writable (pcap из lua): отдаём пользователю
+            # движка заранее — на существующем каталоге nfqws2 права не
+            # меняет (core/lua_capture.prepare_dir).
+            for arg in full_args:
+                if arg.startswith("--writable="):
+                    from core import lua_capture
+                    lua_capture.prepare_dir(
+                        arg.split("=", 1)[1],
+                        user=cfg.get("nfqws", "user") or "nobody")
+                    break
+
             try:
                 if slave_fd is not None:
                     self._process = subprocess.Popen(
@@ -723,6 +734,7 @@ class NFQWSManager:
         были идентичны (одни и те же base-args, lua-init, blob-декларации).
 
         Порядок: [binary] + base(--user/--fwmark/--qnum[/--bind-fix*]) +
+                 [--writable, если стратегия пишет pcap] +
                  lua-init(core+ext) + strategy_args, с дедупом --lua-init.
 
         Args:
@@ -747,6 +759,14 @@ class NFQWSManager:
         lua_path = cfg.get("zapret", "lua_path") or "/opt/zapret2/lua"
         lua_args = self._build_lua_init_args(strategy_args, lua_path)
 
+        # --writable: каталог для записи из lua. Без него `pcap` из
+        # zapret-pcap.lua пишет относительное имя в текущий каталог
+        # процесса, куда под --user nobody писать нельзя, и обработка
+        # пакета обрывается ошибкой. Глобальная опция инициализации —
+        # ставим до lua-init и до первого --new (core/lua_capture.py).
+        from core import lua_capture
+        writable = lua_capture.writable_args(strategy_args)
+
         # Единый слой (opt-in): --hostlist агрегата nfqws2-маршрутов перед
         # профилями стратегии — стратегия применяется к этим доменам.
         unified_args = []
@@ -757,7 +777,8 @@ class NFQWSManager:
             unified_args = []
 
         return self._dedup_lua_init(
-            [binary] + base_args + lua_args + unified_args + strategy_args
+            [binary] + base_args + writable + lua_args + unified_args
+            + strategy_args
         )
 
     def dry_run(self, strategy_args: list, timeout: float = 8.0) -> dict:
