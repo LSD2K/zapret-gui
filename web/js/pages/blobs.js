@@ -237,8 +237,21 @@ const BlobsPage = (() => {
             const btn = e.target.closest('[data-action]');
             if (!btn) return;
             const action = btn.dataset.action;
-            if (action === 'delete') deleteBlob(btn.dataset.name);
-            if (action === 'copy-hex') copyHex(btn.dataset.target);
+            if (action === 'refresh') { refresh(); return; }
+            if (action === 'openCreate') { openCreate(); return; }
+            if (action === 'closeCreate') { closeCreate(); return; }
+            if (action === 'doCreate') { doCreate(); return; }
+            if (action === 'openGenerate') { openGenerate(); return; }
+            if (action === 'closeGenerate') { closeGenerate(); return; }
+            if (action === 'doGenerate') { doGenerate(); return; }
+            if (action === 'setGenDomain') { setGenDomain(btn.dataset.domain); return; }
+            if (action === 'viewBlob') { viewBlob(btn.dataset.name); return; }
+            if (action === 'closeView') { closeView(); return; }
+            if (action === 'editBlob') { editBlob(btn.dataset.name); return; }
+            if (action === 'closeEdit') { closeEdit(); return; }
+            if (action === 'doEdit') { doEdit(); return; }
+            if (action === 'delete') { deleteBlob(btn.dataset.name); return; }
+            if (action === 'copy-hex') { copyHex(btn.dataset.target); return; }
         });
 
         loadData();
