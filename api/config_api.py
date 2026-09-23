@@ -32,6 +32,9 @@ def register(app):
         # клику на странице MCP (GET /api/mcp/ui/token).
         if "mcp" in data and data["mcp"].get("token"):
             data["mcp"]["token"] = "***"
+        # Пароль API AdGuard Home (маршруты через AdGuard, debian-gw).
+        if "agh_routes" in data and data["agh_routes"].get("agh_password"):
+            data["agh_routes"]["agh_password"] = "***"
 
         return {"ok": True, "config": data}
 
@@ -159,6 +162,8 @@ def register(app):
             data["gui"]["auth_password"] = "***"
         if "mcp" in data and data["mcp"].get("token"):
             data["mcp"]["token"] = "***"
+        if "agh_routes" in data and data["agh_routes"].get("agh_password"):
+            data["agh_routes"]["agh_password"] = "***"
         # Маскируем приватные ключи AWG-конфигов
         for section_key in ("awg", "usque", "tgproxy"):
             sec = data.get(section_key, {})

@@ -300,6 +300,32 @@ DEFAULT_CONFIG = {
         "rules": [],  # [{domain, dns, description, enabled}]
     },
 
+    # --- Маршруты через AdGuard Home (core/agh_routes, debian-gw) ---
+    # Одно место правды «списки доменов → outbound sing-box»: из правил
+    # раскладываются route rules в конфиг sing-box и upstream-строки
+    # [/домены/]<dns_target> в AdGuard Home. Применяется только кнопкой
+    # «Применить» (POST /api/agh-routes/apply); enabled=False + применить
+    # снимает всё поставленное. См. docs/gw/spec-b3-agh-routes.md.
+    "agh_routes": {
+        "enabled": False,
+        "agh_url": "http://127.0.0.1:3000",   # API AdGuard Home
+        "agh_user": "",
+        "agh_password": "",                   # маскируется в /api/config
+        "dns_target": "127.0.0.1:1053",       # куда AdGuard шлёт домены правил
+        "singbox_config": "",                 # имя конфига sing-box (без .json)
+        # [] = глобальные upstream'ы AdGuard; иначе IP/подсети клиентов
+        # AdGuard, которым ставятся поклиентные upstream'ы (поэтапно).
+        "clients": [],
+        # Порядок = приоритет (первое совпадение в sing-box):
+        # {"id", "name", "enabled", "outbound",
+        #  "lists": ["hl:<hostlist>", "geosite:<имя>", "<id named list>"],
+        #  "domains": ["example.org"]}
+        "rules": [],
+        # Служебное: что поставлено последним применением (правила
+        # sing-box для снятия по точному совпадению, цели и клиенты AdGuard).
+        "_applied": {},
+    },
+
     # --- Auto-Remediation ---
     # Автоматический выбор метода обхода по DPI-классификации.
     "auto_remediation": {
