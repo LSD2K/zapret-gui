@@ -15,7 +15,7 @@
 
 **Один роут — один ответ.** ``GET /api/mcp/ui/state`` отдаёт всё, что
 показывает страница: сводку сервера, доступ, журнал, эксперимент,
-правки кода и shell. Собирать это в JS из шести вызовов нельзя —
+правки кода, shell и черновики issue. Собирать это в JS из шести вызовов нельзя —
 на роутере со 128 МБ страница будет мигать (задание S15, «Грабли»).
 
 **Блоки 6–8 задания** (эксперимент, самоправка, shell) показываются
@@ -257,6 +257,43 @@ def register(app):
             reason="откат из веб-интерфейса",
             restart=body.get("restart", True) is not False))
 
+    # ──────────────────────── черновики issue ───────────────────────
+
+    @app.route("/api/mcp/ui/issues/draft")
+    def api_mcp_ui_issues_draft():
+        """Черновик целиком: текст issue и ссылка «открыть на GitHub».
+
+        Текст — по клику, а не в общем состоянии: он собирается из
+        журнала и лога и весит килобайты на черновик.
+        """
+        from core.mcp import issues
+
+        response.content_type = _JSON_CT
+        draft_id = str(request.query.get("id") or "").strip()
+        draft = issues.get(draft_id) if draft_id else None
+        if draft is None:
+            return _bad("Черновика %s нет" % (draft_id or "(без id)"))
+        return _guarded(lambda: dict(issues.describe(draft), ok=True))
+
+    @app.post("/api/mcp/ui/issues/status")
+    def api_mcp_ui_issues_status():
+        """Отметить черновик отправленным (или вернуть в черновики)."""
+        from core.mcp import issues
+
+        response.content_type = _JSON_CT
+        body = _body() or {}
+        return _guarded(lambda: issues.set_status(
+            str(body.get("id") or ""), str(body.get("status") or "")))
+
+    @app.post("/api/mcp/ui/issues/delete")
+    def api_mcp_ui_issues_delete():
+        """Удалить черновик — отправленный или ненужный."""
+        from core.mcp import issues
+
+        response.content_type = _JSON_CT
+        body = _body() or {}
+        return _guarded(lambda: issues.delete(str(body.get("id") or "")))
+
     # ────────────────────────── shell ───────────────────────────────
 
     @app.post("/api/mcp/ui/shell/panic")
@@ -344,6 +381,7 @@ def _state() -> dict:
         "experiment": _experiment_block(),
         "code": _code_block(),
         "shell": _shell_block(),
+        "issues": _issues_block(),
     }
 
 
@@ -444,6 +482,20 @@ def _shell_block() -> dict:
         }
     except Exception as e:                      # noqa: BLE001 — граница
         return {"available": True, "error": str(e)}
+
+
+def _issues_block() -> dict:
+    """Черновики issue от модели и падения инструментов без черновика."""
+    try:
+        from core.mcp import issues
+        return {
+            "available": True,
+            "drafts": [issues.summary(d) for d in issues.list_drafts()],
+            "crashes": issues.crashes_without_draft(),
+        }
+    except Exception as e:                      # noqa: BLE001 — граница
+        return {"available": True, "drafts": [], "crashes": [],
+                "error": str(e)}
 
 
 # ──────────────────────────── частности ─────────────────────────────

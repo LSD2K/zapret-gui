@@ -424,6 +424,7 @@ def _cmd_mcp(args) -> int:
         "stdio": _mcp_stdio,
         "audit": _mcp_audit,
         "code": _mcp_code,
+        "issues": _mcp_issues,
     }.get(action)
     if handler is None:
         _p("Неизвестное действие: %s" % action)
@@ -699,6 +700,85 @@ def _mcp_code(args, rest) -> int:
     return 2
 
 
+def _mcp_issues(args, rest) -> int:
+    """Черновики issue, которые составила модель, и падения инструментов."""
+    from core.mcp import crashes, issues
+
+    action = (rest[0] if rest else "list").lower()
+    draft_id = rest[1] if len(rest) > 1 else ""
+
+    if action == "list":
+        drafts = issues.list_drafts()
+        if not drafts:
+            _p("Черновиков нет")
+        else:
+            _p("%-16s %-19s %-7s %-4s %s" % ("Черновик", "Обновлён",
+                                              "Статус", "Раз", "Заголовок"))
+            _p("-" * 78)
+            for d in drafts:
+                row = issues.summary(d)
+                _p("%-16s %-19s %-7s %-4s %s" % (
+                    row["id"], row["updated"], row["status"],
+                    row.get("occurrences") or 1, _cut(row["title"], 30)))
+        orphan = issues.crashes_without_draft()
+        if orphan:
+            _p("")
+            _p("Падения без черновика: %d (zapret-gui mcp issues crashes)"
+               % len(orphan))
+        return 0
+
+    if action == "crashes":
+        items = crashes.recent(limit=max(1, int(
+            getattr(args, "limit", 20) or 20)))
+        if not items:
+            _p("Падений инструментов не было")
+            return 0
+        for item in items:
+            top = (item.get("frames") or [{}])[-1]
+            _p("%s  %s  %s" % (item.get("crash_id"), item.get("time"),
+                               item.get("tool")))
+            _p("    %s: %s" % (item.get("exc_type"),
+                               _cut(item.get("message", ""), 60)))
+            _p("    %s:%s in %s" % (top.get("file", "?"), top.get("line"),
+                                    top.get("function", "?")))
+        return 0
+
+    if action in ("show", "url", "sent", "delete") and not draft_id:
+        _p("Укажите id черновика: zapret-gui mcp issues %s <id>" % action)
+        return 2
+
+    if action in ("show", "url"):
+        draft = issues.get(draft_id)
+        if draft is None:
+            _p("✗ Черновика «%s» нет" % draft_id)
+            return 1
+        described = issues.describe(draft)
+        # Текст — в stdout как есть: `… > report.md` должен давать
+        # файл, который вставляется в issue без правки.
+        if action == "show":
+            sys.stdout.write(described["markdown"] + "\n")
+        else:
+            sys.stdout.write(described["open_on_github"] + "\n")
+            if described.get("body_shortened"):
+                sys.stderr.write("zapret-gui: текст в ссылке укорочен — "
+                                 "полный: mcp issues show %s\n" % draft_id)
+        return 0
+
+    if action == "sent":
+        result = issues.set_status(draft_id, issues.STATUS_SENT)
+    elif action == "delete":
+        result = issues.delete(draft_id)
+    else:
+        _p("Неизвестное действие: %s (list|show|url|crashes|sent|delete)"
+           % action)
+        return 2
+    if not result.get("ok"):
+        _p("✗ %s" % result.get("error"))
+        return 1
+    _p("✓ Готово")
+    return 0
+
+
 def _mcp_endpoint() -> str:
     """Адрес точки MCP, как его набирать в клиенте."""
     from core.config_manager import get_config_manager
@@ -765,13 +845,15 @@ def build_parser() -> argparse.ArgumentParser:
     pmc = sub.add_parser("mcp", help="MCP-сервер (управление через ИИ)")
     pmc.add_argument("action", nargs="?", default="status",
                      choices=["status", "token", "tools", "call", "stdio",
-                              "audit", "code"],
+                              "audit", "code", "issues"],
                      help="status | token show|rotate | tools | call | "
                           "stdio | audit | code list|diff|rollback|"
-                          "export-patch")
+                          "export-patch | issues list|show|url|crashes|"
+                          "sent|delete")
     pmc.add_argument("rest", nargs="*",
                      help="Аргументы действия (имя инструмента и JSON, "
-                          "под-действие code/token, id снимка)")
+                          "под-действие code/token/issues, id снимка "
+                          "или черновика)")
     # Форма из README MCP-клиентов: `zapret-gui mcp --stdio` без слова
     # stdio. Поддерживаем обе — клиент уже настроен как настроен.
     pmc.add_argument("--stdio", action="store_true",

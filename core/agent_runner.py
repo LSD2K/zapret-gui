@@ -92,7 +92,7 @@ BASE_TOOLS = (
     "docs_get", "strategy_list", "strategy_get", "strategy_memory",
     "firewall_status", "traffic_recent", "job_wait",
     "strategy_experiment_status", "strategy_experiment_rollback",
-    "probe_compare", "hostlist_get",
+    "probe_compare", "hostlist_get", "issue_draft",
 )
 
 # Состояния прогона.

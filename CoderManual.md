@@ -453,11 +453,12 @@ MCP то, что уже умеет менеджер, нельзя: разойд�
 | `mcp/permissions.py` | 12 разрешений (`mcp.permissions`, все по умолчанию `false`), их зависимости, whitelist настроек на запись (`is_writable`). |
 | `mcp/auth.py` | bind → Origin → Bearer-токен → рейт-лимит. Выключенный MCP отдаёт 404, а не 403: наружу не видно даже факта наличия точки. |
 | `mcp/audit.py` | Журнал вызовов (`mcp-audit.jsonl`) и снимки «до» (`mcp-undo.json`) рядом с `settings.json` — откат переживает перезагрузку. |
+| `mcp/crashes.py` / `mcp/issues.py` | Падения инструментов (`mcp-crashes.jsonl`: кадры проекта, `crash_id`) и черновики issue об ошибках GUI (`mcp-issue-drafts.json`): место в коде и команда воспроизведения от сервера, склейка повторов, маскировка доменов, ссылка `/issues/new` — отправляет человек. |
 | `mcp/redact.py` | Маскировка секретов **по ключам, а не по значениям**; `redact_text()` для сырого вывода shell и файлов; переключатель «без маскировки» (`unredacted()`) под разрешением `secrets` и явным `raw: true` в вызове. |
 | `mcp/schema.py` | Мини-валидатор JSON Schema (stdlib, без `jsonschema`). |
 | `mcp/resources.py` / `mcp/config_docs.py` / `mcp/prompts.py` | Справочники `zapret://…` (живой `nfqws2 -?`, карта `--lua-desync`, каталоги), описания настроек, промты-сценарии. |
 | `mcp/session.py` / `mcp/stdio.py` | Сессии legacy-SSE и stdio-мост (`ssh router zapret-gui mcp --stdio`). |
-| `mcp/tools/*.py` | 116 инструментов по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает), `jobs.py` — `job_wait` (ожидание вместо опроса в цикле), `memory.py` — память подбора. |
+| `mcp/tools/*.py` | 118 инструментов по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает), `jobs.py` — `job_wait` (ожидание вместо опроса в цикле), `memory.py` — память подбора, `issues.py` — черновики issue. |
 
 Логика, которую MCP **использует, но не содержит**: `nfqws_control.py`
 (старт/стоп/применение стратегии — общий код для UI, CLI и MCP),

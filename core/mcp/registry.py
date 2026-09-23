@@ -51,6 +51,7 @@ import traceback
 
 from core.log_buffer import log
 from core.mcp import audit
+from core.mcp import crashes
 from core.mcp import permissions as perms_mod
 from core.mcp import redact as redact_mod
 from core.mcp import schema as schema_mod
@@ -396,13 +397,32 @@ def call(name, args=None, perms=None, ctx=None) -> dict:
             result = tool_result(payload, is_error=not ok)
     except Exception as e:                      # noqa: BLE001 — граница
         log.debug(traceback.format_exc(), source="mcp")
+        elapsed = int((time.time() - started) * 1000)
+        # Трассировка — на диск, с crash_id: иначе от падения остаётся
+        # одна строка без файла и номера, и отчёт об ошибке не говорит,
+        # где она (core/mcp/crashes.py).
+        crash = crashes.capture(spec.name, e, args=args,
+                                handler=spec.handler, elapsed_ms=elapsed)
+        crash_id = crash.get("crash_id", "")
+        if crash_id:
+            audit.note(crash_id=crash_id)
         audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
                      args=args, ctx=ctx, status=audit.STATUS_ERROR,
                      ok=False, error="%s: %s" % (type(e).__name__, e),
-                     elapsed_ms=int((time.time() - started) * 1000))
-        return tool_result({"ok": False,
-                            "error": "%s: %s" % (type(e).__name__, e),
-                            "tool": spec.name}, is_error=True)
+                     elapsed_ms=elapsed)
+        failure = {"ok": False,
+                   "error": "%s: %s" % (type(e).__name__, e),
+                   "tool": spec.name}
+        if crash_id:
+            failure["crash_id"] = crash_id
+            top = (crash.get("frames") or [{}])[-1]
+            if top.get("file"):
+                failure["where"] = "%s:%s" % (top["file"], top.get("line"))
+            failure["hint"] = (
+                "это похоже на ошибку в самом GUI, а не в состоянии "
+                "устройства: составьте черновик issue — "
+                "issue_draft(kind=\"crash\", crash_id=\"%s\")" % crash_id)
+        return tool_result(failure, is_error=True)
 
     audit.record(spec.name, scope=spec.scope, mutating=spec.mutating,
                  args=args, ctx=ctx,
