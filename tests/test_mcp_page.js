@@ -364,3 +364,29 @@ test('отсутствие поля transports читается как «вкл�
     assert.ok(!/503/.test(html), 'без поля transports тревоги быть не должно');
     page.destroy();
 });
+
+test('у каждого разрешения из core/mcp/permissions.py есть переключатель', async () => {
+    // Список на странице ведётся руками (PERM_ORDER), и разрешение,
+    // забытое в нём, молча пропадает из интерфейса: так было с
+    // `secrets` — включить его можно было только правкой settings.json.
+    const src = fs.readFileSync(
+        path.join(__dirname, '..', 'core', 'mcp', 'permissions.py'), 'utf8');
+    const block = src.match(/^PERMISSIONS = \(([\s\S]*?)\)/m);
+    assert.ok(block, 'кортеж PERMISSIONS не найден');
+    const keys = [...block[1].matchAll(/"([a-z_]+)"/g)].map(m => m[1]);
+    assert.equal(keys.length, 12);
+
+    const state = fixture();
+    state.info.permissions_info = keys.map(key => ({
+        key, title: key, granted: false, effective: false,
+        requires: [], missing: [],
+    }));
+    const { page, elements } = makeSandbox(state);
+    await page.render(makeElement('page-container'));
+    const html = elements.get('mcp-perms').innerHTML;
+    for (const key of keys) {
+        assert.ok(html.includes('id="mcp-perm-' + key + '"'),
+                  'нет переключателя для ' + key);
+    }
+    page.destroy();
+});
