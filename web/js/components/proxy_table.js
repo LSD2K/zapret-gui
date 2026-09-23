@@ -334,7 +334,7 @@ const ProxyTable = (() => {
         function renderPasteBox() {
             return `
                 <div style="margin-top:10px;">
-                    <label class="form-label">Вставьте ссылки (vless:// / vmess:// / trojan:// / ss:// / hy2:// / tuic://), по одной в строке:</label>
+                    <label class="form-label">Вставьте ссылки (vless:// / vmess:// / trojan:// / ss:// / hy2:// / tuic:// / mierus://), по одной в строке:</label>
                     <textarea id="${opts.bodyId}-paste" class="form-textarea" spellcheck="false"
                               style="width:100%; min-height:90px; font-family:monospace; font-size:12px;"
                               placeholder="vless://...&#10;ss://..."></textarea>
@@ -752,7 +752,7 @@ const ProxyTable = (() => {
             pasteHandler = (e) => {
                 if (isEditable(e.target)) return;      // пусть пастится в поле
                 const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
-                if (text && /(vless|vmess|trojan|ss|hysteria2|hy2|tuic):\/\//i.test(text)) {
+                if (text && /(vless|vmess|trojan|ss|hysteria2|hy2|tuic|mierus?):\/\//i.test(text)) {
                     e.preventDefault();
                     importText(text);
                 }

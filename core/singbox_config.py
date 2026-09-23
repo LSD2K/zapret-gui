@@ -51,12 +51,14 @@ from typing import Any
 # УДАЛЕНЫ в 1.13, но оставлены здесь намеренно: конфиги пользователя
 # читаются и старые, а ругаться на них должен `sing-box check`, который
 # знает версию установленного бинаря (см. §9 скила singbox).
+# `mieru` есть только в форке sing-box-extended (shtorm-7), апстрим его
+# не знает.
 KNOWN_OUTBOUND_TYPES = {
     "direct", "block", "dns", "selector", "urltest",
     "shadowsocks", "vmess", "vless", "trojan",
     "wireguard", "hysteria", "hysteria2", "tuic",
     "shadowtls", "naive", "ssh", "socks", "http",
-    "tor", "anytls", "snell", "bridge",
+    "tor", "anytls", "snell", "bridge", "mieru",
 }
 
 # Известные типы inbound'ов (там же, `inbound.Register[...]`).
@@ -1196,6 +1198,84 @@ def make_tuic_outbound(tag: str, server: str, port: int,
     if alpn_list:
         tls["alpn"] = alpn_list
     out["tls"] = tls
+    return out
+
+
+# ─────── mieru (только sing-box-extended) ───────
+#
+# outbound `mieru` есть только в форке sing-box-extended (shtorm-7),
+# апстримный sing-box его не знает. Декодер там строгий: лишнее поле
+# роняет конфиг («json: unknown field»), поэтому опциональные поля
+# кладём, только если они заданы. Порты идут в `server_ports`, список
+# строк: одиночный порт '9000' или диапазон '9000-9010'.
+
+MIERU_TRANSPORTS = ("TCP", "UDP")
+MIERU_MULTIPLEXING = ("MULTIPLEXING_OFF", "MULTIPLEXING_LOW",
+                      "MULTIPLEXING_MIDDLE", "MULTIPLEXING_HIGH")
+
+_MIERU_PORT_RE = re.compile(r"^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$")
+
+
+def _mieru_server_ports(ports) -> list:
+    """
+    Порты → `server_ports`. Принимает число/строку или список из них,
+    строка может нести несколько элементов через запятую. Дубли убираем,
+    порядок сохраняем. Мусор, порт вне 1..65535, перевёрнутый диапазон
+    или пустой итог → ValueError.
+    """
+    if isinstance(ports, (str, int)):
+        ports = [ports]
+    out = []
+    for item in ports or []:
+        for part in str(item).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            m = _MIERU_PORT_RE.match(part)
+            lo = int(m.group(1)) if m else 0
+            hi = int(m.group(2)) if m and m.group(2) else lo
+            if not (1 <= lo <= hi <= 65535):
+                raise ValueError("mieru: некорректный порт '%s'" % part)
+            norm = "%d-%d" % (lo, hi) if m.group(2) else str(lo)
+            if norm not in out:
+                out.append(norm)
+    if not out:
+        raise ValueError("mieru: нужен хотя бы один порт")
+    return out
+
+
+def make_mieru_outbound(tag: str, server: str, ports, username: str,
+                        password: str, transport: str = "TCP",
+                        multiplexing: str = None, mtu: int = None) -> dict:
+    """
+    Собрать mieru-outbound dict (только sing-box-extended, см. выше).
+
+    ports:         9000 / '9000' / '9000-9010' или список из них
+                   (см. _mieru_server_ports) → `server_ports`
+    transport:     'TCP' | 'UDP' (регистр не важен)
+    multiplexing:  опц., MULTIPLEXING_OFF / _LOW / _MIDDLE / _HIGH
+    mtu:           опц., попадает в outbound, только если задан
+    """
+    if not username or not password:
+        raise ValueError("mieru: нужны username и password")
+    tr = str(transport or "TCP").strip().upper()
+    if tr not in MIERU_TRANSPORTS:
+        raise ValueError("mieru: transport '%s' не поддерживается "
+                         "(только TCP/UDP)" % transport)
+    out = {"type": "mieru", "tag": tag, "server": server,
+           "server_ports": _mieru_server_ports(ports),
+           "transport": tr, "username": username, "password": password}
+    if multiplexing:
+        mux = str(multiplexing).strip().upper()
+        if mux not in MIERU_MULTIPLEXING:
+            raise ValueError("mieru: multiplexing '%s' не поддерживается"
+                             % multiplexing)
+        out["multiplexing"] = mux
+    if mtu not in (None, ""):
+        try:
+            out["mtu"] = int(mtu)
+        except (TypeError, ValueError):
+            raise ValueError("mieru: mtu '%s' не число" % mtu)
     return out
 
 

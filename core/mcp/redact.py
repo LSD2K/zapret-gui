@@ -124,7 +124,8 @@ _TEXT_RULES = (
     # vless://UUID@host, trojan://PASSWORD@host, ss://BASE64@host — в
     # ссылке прокси учётные данные стоят ДО @, и это и есть доступ.
     (re.compile(r"(?i)((?:vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic|"
-                r"socks5?|anytls|wireguard|wg)://)([^\s@/?#]+)(@)"), 2),
+                r"mierus?|socks5?|anytls|wireguard|wg)"
+                r"://)([^\s@/?#]+)(@)"), 2),
 )
 
 # Ключ-значение в JSON (``"password": "…"``) и в YAML/ini-подобном

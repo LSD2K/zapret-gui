@@ -9,6 +9,7 @@
                     и base64(cipher:password)@host:port)
   - hysteria2://   (он же hy2://)
   - tuic://
+  - mierus://      (он же mieru://; outbound только в sing-box-extended)
 
 Расширяет существующий `core/subscription_importer.py` — там
 уже есть `extract_items()` (он распознаёт схемы из mixed-текста)
@@ -31,6 +32,7 @@ from core.singbox_config import (
     make_vless_outbound, make_vmess_outbound, make_trojan_outbound,
     make_shadowsocks_outbound, make_hysteria2_outbound,
     make_tuic_outbound, is_x25519_key, vless_flow_supported,
+    make_mieru_outbound, MIERU_TRANSPORTS,
 )
 
 
@@ -561,6 +563,73 @@ def tuic_to_outbound(uri: str) -> dict:
     return {"ok": True, "tag": tag, "outbound": outbound}
 
 
+# ─────── mieru ───────
+
+def mieru_to_outbound(uri: str) -> dict:
+    """
+    `mierus://<user>:<pass>@<host>?port=<p>&protocol=TCP&profile=<имя>
+    &multiplexing=MULTIPLEXING_LOW&mtu=<n>` (простая ссылка mieru);
+    `mieru://` в том же виде считаем синонимом.
+
+    port (порт или диапазон) и protocol (TCP/UDP, дефолт TCP) могут
+    повторяться и идти через запятую. В ссылке mieru они парные: i-й
+    protocol относится к i-му port. transport у outbound'а один, поэтому
+    берём первый protocol и оставляем только его порты. profile идёт в tag.
+    """
+    try:
+        p = urllib.parse.urlparse(uri)
+    except ValueError as e:
+        return {"ok": False, "error": "URI не распарсился: %s" % e}
+    if p.scheme.lower() not in ("mierus", "mieru"):
+        return {"ok": False, "error": "не mieru-URI"}
+    if not p.username or not p.password:
+        return {"ok": False, "error": "нет username:password в URI"}
+    if not p.hostname:
+        return {"ok": False, "error": "нет host в URI"}
+
+    # _parse_query берёт только первое значение ключа, а port/protocol
+    # повторяются, поэтому собираем все.
+    multi = {}
+    for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True):
+        key = k.lower()
+        if key.startswith("amp;"):
+            key = key[4:]
+        multi.setdefault(key, []).append(v.strip())
+
+    def _split(key):
+        return [x.strip() for v in multi.get(key, [])
+                for x in v.split(",") if x.strip()]
+
+    def _first(key):
+        return (multi.get(key) or [""])[0]
+
+    ports = _split("port") or ([str(p.port)] if p.port else [])
+    protocols = [x.upper() for x in _split("protocol")] or ["TCP"]
+    bad = [x for x in protocols if x not in MIERU_TRANSPORTS]
+    if bad:
+        return {"ok": False,
+                "error": "mieru: protocol '%s' не поддерживается "
+                         "(только TCP/UDP)" % bad[0]}
+    transport = protocols[0]
+    if len(protocols) == len(ports):
+        ports = [pt for pt, pr in zip(ports, protocols) if pr == transport]
+
+    tag = _safe_tag(_first("profile")
+                    or urllib.parse.unquote(p.fragment or "")
+                    or "mieru-%s" % p.hostname)
+    try:
+        outbound = make_mieru_outbound(
+            tag, p.hostname, ports,
+            urllib.parse.unquote(p.username),
+            urllib.parse.unquote(p.password),
+            transport=transport,
+            multiplexing=_first("multiplexing") or None,
+            mtu=_first("mtu") or None)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "tag": tag, "outbound": outbound}
+
+
 # ─────── dispatcher ───────
 
 _HANDLERS = {
@@ -571,6 +640,8 @@ _HANDLERS = {
     "hysteria2": hysteria2_to_outbound,
     "hy2":       hysteria2_to_outbound,
     "tuic":      tuic_to_outbound,
+    "mierus":    mieru_to_outbound,
+    "mieru":     mieru_to_outbound,
 }
 
 

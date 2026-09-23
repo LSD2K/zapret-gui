@@ -47,6 +47,7 @@ USER_AGENT = "zapret-gui/subscription-importer"
 _KNOWN_SCHEMES = (
     "wireguard", "wg",
     "vmess", "vless", "trojan", "ss", "hysteria2", "hy2", "tuic",
+    "mierus", "mieru",
 )
 
 _URI_RE = re.compile(

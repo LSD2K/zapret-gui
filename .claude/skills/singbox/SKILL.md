@@ -189,6 +189,7 @@ debug ушёл. Просмотр лога: `GET /api/singbox/configs/<name>/log?
   `obfs`(`salamander`), всегда TLS (часто `tls.insecure`).
 - **tuic** (`make_tuic_outbound`): `uuid`, `password`,
   `congestion_control`(`bbr`), UDP-over-QUIC.
+- **mieru** (`make_mieru_outbound`, ТОЛЬКО extended-сборка shtorm-7, апстрим не знает): `server_ports` (`["9000-9010"]`), `transport` TCP|UDP, `username`, `password`, опц. `multiplexing`; ссылки `mierus://`/`mieru://`.
 - **direct**, и группы ниже.
 
 Общие поля: `type`, `tag`, `server`, `server_port`. `direct` — валидный тип
