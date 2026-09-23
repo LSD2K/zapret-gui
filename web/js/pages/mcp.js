@@ -105,12 +105,12 @@ const McpPage = (() => {
             </div>
 
             <div class="card" id="mcp-code-card" style="display:none;">
-                <div class="card-title">Правка кода GUI (self-edit)</div>
+                <div class="card-title">Правка кода GUI (self-edit): только файлы GUI</div>
                 <div id="mcp-code"></div>
             </div>
 
             <div class="card" id="mcp-shell-card" style="display:none;">
-                <div class="card-title">Shell-доступ</div>
+                <div class="card-title">Shell-доступ: вся система от root</div>
                 <div id="mcp-shell"></div>
             </div>
 
