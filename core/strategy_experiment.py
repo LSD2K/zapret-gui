@@ -269,6 +269,21 @@ HINT_RULES = (
                  "тип пейлоада)"),
         "ref": "скил nfqws2-strategies, раздел про multisplit/multidisorder",
     },
+    # ── дополнено: lua-дамп движка (`lua_capture=true`) ──
+    #
+    # Отвечает на вопрос, которого tcpdump не различает: пакет не дошёл
+    # до стратегии или дошёл, а приём не справился.
+    {
+        "id": "lua_capture_empty",
+        "when": "metric",
+        "rule": "lua_capture_empty",
+        "hint": ("движок поднят, пробы прошли, а lua-дамп пуст: ни один "
+                 "профиль не получил ни пакета — трафик не доходит до "
+                 "стратегии. Чините не приём, а фильтр: --filter-*/"
+                 "--hostlist профиля, правила NFQUEUE (firewall_status) "
+                 "и traffic_recent"),
+        "ref": "скил nfqws2-strategies, раздел про фильтры профиля",
+    },
 )
 
 
@@ -311,6 +326,13 @@ def _metric_capture_ttl_too_low(m: dict) -> bool:
     return len(ttls) > 1 and min(ttls) <= 2
 
 
+def _metric_lua_capture_empty(m: dict) -> bool:
+    """Движок поднят, пробы прошли, а ни один профиль не получил пакета."""
+    dump = m.get("lua_capture") or {}
+    return (bool(dump.get("measured")) and not dump.get("packets")
+            and bool(m.get("started_nfqws")) and bool(m.get("target_count")))
+
+
 def _metric_capture_sni_in_clear(m: dict) -> bool:
     """Имя ушло открытым текстом, а цель так и не открылась."""
     capture = m.get("capture") or {}
@@ -325,6 +347,7 @@ _METRIC_RULES = {
     "capture_empty": _metric_capture_empty,
     "capture_ttl_too_low": _metric_capture_ttl_too_low,
     "capture_sni_in_clear": _metric_capture_sni_in_clear,
+    "lua_capture_empty": _metric_lua_capture_empty,
 }
 
 
@@ -420,7 +443,8 @@ class ExperimentRunner:
 
     def start(self, variants, targets=None, probes=None, repeats=None,
               baseline: bool = True, ttl_sec=None, keep_best=None,
-              capture=None, capture_port=None, source: str = SOURCE) -> dict:
+              capture=None, capture_port=None, lua_capture=None,
+              source: str = SOURCE) -> dict:
         """Запустить эксперимент; ответ — ``run_id``, сразу.
 
         Прогон идёт минутами, а клиент рвёт HTTP-запрос через десятки
@@ -468,6 +492,9 @@ class ExperimentRunner:
         # это лишний процесс на каждый замер и заметный провайдеру след,
         # и просить его надо осознанно.
         sniff = _capture_plan(bool(capture), capture_port)
+        # Lua-дамп движка (zapret-pcap.lua): что nfqws2 ПОЛУЧИЛ из
+        # очереди — пара к tcpdump, который видит, что ушло в сеть.
+        lua_dump = _lua_capture_plan(bool(lua_capture))
 
         run_id = "exp-%s" % time.strftime("%Y%m%d-%H%M%S")
         plan = {
@@ -484,6 +511,7 @@ class ExperimentRunner:
             "keep_best": keep,
             "stabilize_sec": cfg["stabilize_sec"],
             "capture": sniff,
+            "lua_capture": lua_dump,
             "source": source,
         }
 
@@ -529,6 +557,7 @@ class ExperimentRunner:
             "rejected": rejected + dropped,
             "probes_unsupported": unsupported,
             "capture": dict(sniff),
+            "lua_capture": dict(lua_dump),
             "async": True,
         }
 
@@ -792,8 +821,24 @@ class ExperimentRunner:
             out["hints"] = hints_for([], _metrics(out, 0, 0))
             return out
 
+        # Lua-дамп: `pcap` встаёт перед первым приёмом каждого профиля.
+        # В отчёт и в commit уходят args БЕЗ него — это инструмент
+        # замера, а не часть стратегии.
+        run_args, lua_files = list(variant["args"]), []
+        lua_plan = plan.get("lua_capture") or {}
+        if lua_plan.get("wanted") and lua_plan.get("available"):
+            from core import lua_capture
+            run_args, lua_files = lua_capture.inject(run_args,
+                                                     variant["label"])
+            lua_capture.clear(lua_files)
+            if not lua_files:
+                out["lua_capture"] = {
+                    "measured": False,
+                    "reason": "в argv нет ни одного --lua-desync: пакеты "
+                              "идут мимо lua, писать нечего"}
+
         window_start = time.time()
-        applied = nfqws_control.restart(list(variant["args"]), source=SOURCE)
+        applied = nfqws_control.restart(run_args, source=SOURCE)
         out["applied"] = True
         out["started_nfqws"] = bool(applied.get("ok"))
         if not applied.get("ok"):
@@ -811,6 +856,8 @@ class ExperimentRunner:
             # Снятое по окну ИМЕННО этого варианта: что ушло в сеть
             # после движка, а не что собирались отправить.
             out["capture"] = measured["capture"]
+        if lua_files:
+            out["lua_capture"] = _lua_capture_end(lua_files)
 
         # Хвост лога режем ПО ОКНУ ВАРИАНТА: иначе в отчёт уезжает лог
         # предыдущего варианта, и модель чинит не то, что сломано.
@@ -1585,6 +1632,51 @@ def _capture_end(handle) -> dict:
     return out
 
 
+# ───────────────── lua-дамп движка (zapret-pcap.lua) ─────────────────
+#
+# Пара к сниферу: tcpdump видит, что ушло в сеть ПОСЛЕ движка, а
+# `pcap` из zapret-pcap.lua — что движок ПОЛУЧИЛ из очереди. Рамки и
+# место вставки — в core/lua_capture.py. Правило то же, что у снифера:
+# дамп не ломает прогон — нет скрипта, не разобрался файл, в отчёт
+# уезжает строчка «почему».
+
+def _lua_capture_plan(wanted: bool) -> dict:
+    """Что делать с lua-дампом в этом прогоне (часть плана)."""
+    out = {"wanted": bool(wanted)}
+    if not wanted:
+        return out
+    from core import lua_capture
+
+    try:
+        from core.config_manager import get_config_manager
+        lua_path = (get_config_manager().get("zapret", "lua_path")
+                    or "/opt/zapret2/lua")
+    except Exception:                           # noqa: BLE001 — граница
+        lua_path = "/opt/zapret2/lua"
+    script = os.path.join(lua_path, lua_capture.PCAP_LUA_FILE)
+    out["available"] = os.path.isfile(script)
+    out["dir"] = lua_capture.writable_dir()
+    if not out["available"]:
+        out["reason"] = "нет %s" % script
+        out["hint"] = ("скрипт входит в релиз zapret2 и в поставку GUI "
+                       "(import/lua): переустановка GUI или zapret2 "
+                       "вернёт его на место")
+    return out
+
+
+def _lua_capture_end(files) -> dict:
+    """Прочитать lua-дамп варианта; сбой разбора прогон не роняет."""
+    from core import lua_capture
+
+    try:
+        return lua_capture.collect(files)
+    except Exception as e:                      # noqa: BLE001 — граница
+        log.debug("Разбор lua-дампа не удался: %s: %s"
+                  % (type(e).__name__, e), source=SOURCE)
+        lua_capture.clear(files)
+        return {"measured": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
 def _log_window(start: float, end: float) -> list:
     """Хвост лога движка ровно за окно варианта."""
     try:
@@ -1649,6 +1741,9 @@ def _metrics(variant: dict, fixed: int, broken: int) -> dict:
         # Сводка дампа, если снифер просили (S18): без неё три правила
         # про TTL, SNI и пустой дамп просто не срабатывают.
         "capture": variant.get("capture") or {},
+        # Lua-дамп движка: пустой при поднятом движке — пакеты не дошли
+        # до стратегии, и чинить надо фильтр, а не приём.
+        "lua_capture": variant.get("lua_capture") or {},
     }
 
 

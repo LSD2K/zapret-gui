@@ -341,8 +341,8 @@ def info_payload() -> dict:
             "max_sessions": mcp_session.max_sessions(),
             "keepalive_sec": mcp_session.KEEPALIVE_SEC,
             "idle_timeout_sec": mcp_session.IDLE_TIMEOUT_SEC,
-            # Подписка на ресурсы (S18) существует только здесь: у
-            # stateless-HTTP канала для уведомлений нет.
+            # Подписка на ресурсы (S18) существует здесь и на
+            # stdio-мосте: у stateless-HTTP канала для уведомлений нет.
             "subscribe": True,
             "max_subscriptions": mcp_session.MAX_SUBSCRIPTIONS,
         },

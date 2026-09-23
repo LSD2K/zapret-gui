@@ -367,6 +367,22 @@ def tunnel_config_get(args: dict) -> dict:
 )
 def tunnel_config_save(args: dict) -> dict:
     """Переписать конфиг целиком, сохранив прежний в снимок для отката."""
+    from core.mcp import redact
+
+    text = args.get("text", "")
+    if redact.MASK in text:
+        try:
+            current = control_mod.config_get(args.get("engine", ""),
+                                             args.get("name", "")).get("text")
+        except Exception:                       # noqa: BLE001 — граница
+            current = None
+        if redact.mask_written_back(text, current):
+            return {"ok": False,
+                    "error": "конфиг содержит маску секретов «%s»"
+                             % redact.MASK,
+                    "engine": args.get("engine", ""),
+                    "name": args.get("name", ""),
+                    "hint": redact.MASK_WRITE_HINT}
     try:
         result = control_mod.config_save(args.get("engine", ""),
                                          args.get("name", ""),

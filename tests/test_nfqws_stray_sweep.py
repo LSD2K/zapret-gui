@@ -149,6 +149,39 @@ class TestDryRun(unittest.TestCase):
         cfg.get.return_value = "/opt/zapret2/nfq2/nfqws2"
         return cfg, completed
 
+    def _dry_argv(self, euid):
+        """argv, с которым dry_run зовёт nfqws2 при данном euid."""
+        cfg, completed = self._patched_run(0, b"all ok")
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            return completed
+
+        with mock.patch("core.config_manager.get_config_manager",
+                        return_value=cfg), \
+             mock.patch("core.nfqws_manager.os.geteuid",
+                        return_value=euid), \
+             mock.patch("core.nfqws_manager.os.path.isfile",
+                        return_value=True), \
+             mock.patch("core.nfqws_manager.os.access", return_value=True), \
+             mock.patch.object(self.mgr, "compose_command",
+                               return_value=["/opt/zapret2/nfq2/nfqws2",
+                                             "--user=nobody", "--qnum=300",
+                                             "--filter-tcp=443"]), \
+             mock.patch("core.nfqws_manager.subprocess.run",
+                        side_effect=fake_run):
+            self.mgr.dry_run(["--filter-tcp=443"])
+        return seen["argv"]
+
+    def test_root_keeps_the_privilege_drop(self):
+        # От root сброс прав обязателен: без него lua-init стратегии
+        # (io.open) исполнялся бы от root, и «проверка» была бы записью
+        # в любой файл роутера.
+        self.assertIn("--user=nobody", self._dry_argv(0))
+        # Без root setuid падает не по делу — там его и нечем сбрасывать.
+        self.assertNotIn("--user=nobody", self._dry_argv(1000))
+
     def test_appends_intercept0_and_strips_user(self):
         cfg, completed = self._patched_run(0, b"all ok")
         seen = {}
@@ -159,6 +192,7 @@ class TestDryRun(unittest.TestCase):
 
         with mock.patch("core.config_manager.get_config_manager",
                         return_value=cfg), \
+             mock.patch("core.nfqws_manager.os.geteuid", return_value=1000), \
              mock.patch("core.nfqws_manager.os.path.isfile",
                         return_value=True), \
              mock.patch("core.nfqws_manager.os.access", return_value=True), \

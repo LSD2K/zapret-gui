@@ -28,6 +28,8 @@
 **что от него ждут**, чтобы следующий вызов был исправлен без догадок.
 """
 
+import copy
+import math
 import re
 
 
@@ -108,7 +110,7 @@ def validate(value, schema, field: str = "args"):
 
     if "enum" in schema:
         allowed = schema["enum"]
-        if isinstance(allowed, list) and value not in allowed:
+        if isinstance(allowed, list) and not _enum_has(allowed, value):
             listed = ", ".join(_short(v) for v in allowed)
             raise SchemaError(
                 "поле '%s': допустимые значения — %s (получено %s)"
@@ -234,8 +236,25 @@ def _check_object(value, schema, field):
         if key in out:
             out[key] = validate(out[key], sub, "%s.%s" % (field, key))
         elif "default" in sub:
-            out[key] = sub["default"]
+            # Копия, а не сам объект схемы: обработчик, дописавший в
+            # список по умолчанию, иначе поменял бы дефолт для всех
+            # следующих вызовов — и в tools/list заодно.
+            out[key] = copy.deepcopy(sub["default"])
     return out
+
+
+def _enum_has(allowed, value) -> bool:
+    """``value in allowed`` без путаницы ``True == 1``.
+
+    В Python ``True in [1]`` истинно: флаг прошёл бы там, где ждут
+    число, и наоборот — ровно то, что валидатор не пускает по типам.
+    """
+    for item in allowed:
+        if isinstance(item, bool) != isinstance(value, bool):
+            continue
+        if item == value:
+            return True
+    return False
 
 
 def _type_matches(value, type_name: str) -> bool:
@@ -251,7 +270,12 @@ def _type_matches(value, type_name: str) -> bool:
         # bool — подтип int, но True не является целым аргументом.
         return isinstance(value, int) and not isinstance(value, bool)
     if type_name == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        # json.loads принимает NaN и Infinity. NaN не меньше минимума и
+        # не больше максимума — он проходит любой диапазон и доезжает до
+        # движка; бесконечность в числовом аргументе тоже не значит
+        # ничего осмысленного.
+        return (isinstance(value, (int, float))
+                and not isinstance(value, bool) and math.isfinite(value))
     if type_name == "null":
         return value is None
     return False
@@ -266,7 +290,7 @@ def _type_name(value) -> str:
     if isinstance(value, int):
         return "integer"
     if isinstance(value, float):
-        return "number"
+        return "number" if math.isfinite(value) else "%r (не число)" % value
     if isinstance(value, str):
         return "string"
     if isinstance(value, list):

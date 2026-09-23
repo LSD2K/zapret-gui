@@ -181,7 +181,7 @@ def check(*, method: str, remote_addr: str, headers, auth_pair=None,
             return _deny(401, "MCP-токен не задан: сгенерируйте его в "
                               "настройках MCP", reason="no-token",
                          headers=_www_authenticate())
-        if not hmac.compare_digest(presented, expected):
+        if not secret_equal(presented, expected):
             return _deny(401, "неверный MCP-токен", reason="bad-token",
                          headers=_www_authenticate())
         subject = "token"
@@ -232,7 +232,23 @@ def token_is_valid(authorization: str) -> bool:
     authorization = (authorization or "").strip()
     if not expected or authorization[:7].lower() != "bearer ":
         return False
-    return hmac.compare_digest(authorization[7:].strip(), expected)
+    return secret_equal(authorization[7:].strip(), expected)
+
+
+def secret_equal(given, expected) -> bool:
+    """Сравнение секрета за постоянное время — по БАЙТАМ, а не по str.
+
+    ``hmac.compare_digest`` на строках принимает только ASCII и на любом
+    другом символе бросает ``TypeError``. Здесь это не теория: пароль
+    GUI бывает кириллическим, а в заголовок ``Authorization`` кто угодно
+    пришлёт что угодно (битые байты ``_Headers`` превращает в U+FFFD).
+    Исключение вместо ``False`` — это 500 вместо честного 401, а для
+    кириллического пароля — вход, который не работает никогда.
+    """
+    def _raw(value) -> bytes:
+        return str("" if value is None else value).encode("utf-8",
+                                                          "surrogatepass")
+    return hmac.compare_digest(_raw(given), _raw(expected))
 
 
 def is_local_address(addr: str) -> bool:
@@ -360,8 +376,8 @@ def _gui_auth_ok(auth_pair) -> bool:
         given_user, given_pass = auth_pair
     except (TypeError, ValueError):
         return False
-    return (hmac.compare_digest(str(given_user), str(user))
-            and hmac.compare_digest(str(given_pass), str(password)))
+    return (secret_equal(given_user, user)
+            and secret_equal(given_pass, password))
 
 
 def _deep_merge(base: dict, override: dict):

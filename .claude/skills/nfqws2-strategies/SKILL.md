@@ -140,7 +140,7 @@ nfqws2 **не имеет хардкод-стратегий**. Параметро
 | `zapret-antidpi.lua` | Готовые desync-аналоги nfqws1: `fake`, `multisplit`, `multidisorder`, `fakedsplit`, `fakeddisorder`, `hostfakesplit`, `tcpseg`, `oob`, `wsize`, `wssize`, `syndata`, `rst`, `synack`, `synack_split`, `udplen`, `dht_dn`, `http_*`, `pktmod`, `pass`, `luaexec`. **Без неё `--lua-desync=fake:...` — вызов несуществующей функции: тихий 0%**. |
 | `zapret-auto.lua` | Оркестраторы (`circular`, `repeater`, `condition`, `per_instance_condition`, `stopif`) и iff-функции (`cond_random`, `cond_payload_str`, `cond_lua`, …). |
 | `zapret-obfs.lua` | Обфускаторы: `wgobfs`, `ippxor`, `udp2icmp`, `synhide`. **Надмножество** `zapret-wgobfs.lua` — если грузим `obfs`, то `wgobfs.lua` грузить НЕ надо (двойное определение). |
-| `zapret-pcap.lua` | Запись pcap. Требует `--writable` (до 1.0 — `--writeable`). |
+| `zapret-pcap.lua` | Запись pcap (`--lua-desync=pcap:file=<имя>[:keep]`): пакет, каким его отдала очередь (`raw_packet(ctx)`), не результат десинка. Требует `--writable` (до 1.0 — `--writeable`); наш `compose_command` добавляет `--writable=/tmp/zapret-gui-writable` сам, если в argv есть `pcap`, а своего каталога нет (`core/lua_capture.py`). |
 | `zapret-tests.lua` | Тесты C-функций. |
 
 ### Наши расширения (`import/lua/`, разворачиваются на `lua_path` через `core/asset_importer.py`)
@@ -291,6 +291,16 @@ execution plan ещё до входа в Lua** (раньше падало вну
 | `--filter-ssid=ssid1[,…]` | Wi-Fi SSID-фильтр (Linux). |
 | `--filter-ssid-neg[=0\|1]` | **1.0.5+.** Инверсия SSID-фильтра профиля: профиль работает во всех сетях, КРОМЕ перечисленных. |
 | `--filter-mark=mark[/mask]` | **1.0.5+.** Фильтр профиля по mark пакета (десятичный или `0xHEX`, с необязательной маской). Позволяет включать профиль только для трафика, уже промаркированного firewall'ом. ⚠️ Не путать с `--fwmark` (это anti-loop мarker самого nfqws2) и с нашими MARK_PROCESSED / MARK_EXCLUDE (`core/firewall.py`): те стоят в правилах NFQUEUE, а `--filter-mark` разбирает mark **внутри** профиля. |
+
+> **Что стратегии не положено (наша сборка).** `compose_command`
+> вырезает из аргументов стратегии `--user`/`--uid`/`--qnum`/`--fwmark`
+> (задаёт GUI), `--pidfile`/`--daemon`/`--intercept`/`--dry-run`,
+> `--writable` (nfqws2 делает `chown` каталога от root, и существующего
+> тоже — `make_writable_dir`, nfq2/darkmagic.c), `--debug=@файл`
+> (`fopen("wt")` от root на разборе опций) и `--hostlist-auto*=` вне
+> каталогов списков (`ensure_file_access` → `chown`). Список —
+> `strategy_lint.ENGINE_OWNED_OPTIONS`, линтер называет это кодом
+> `engine_owned_option`.
 
 ### 3.2 DESYNC ENGINE INIT
 

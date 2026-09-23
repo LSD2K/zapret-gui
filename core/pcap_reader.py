@@ -115,6 +115,43 @@ def read_bytes(data: bytes, limit: int = MAX_PACKETS) -> dict:
     }
 
 
+def summarize(items) -> dict:
+    """Сводка по разобранным пакетам: по чему видно, что происходило.
+
+    Одна на два источника — дамп tcpdump (что ушло в сеть ПОСЛЕ
+    движка, ``core/traffic_capture.py``) и lua-дамп самого движка (что
+    он получил из очереди, ``core/lua_capture.py``). Разойдись они
+    формой, сравнить «до» и «после» можно было бы только глазами.
+    """
+    out = {
+        "packets": 0,
+        "sni": [],
+        "hosts": [],
+        "ttl": {},
+        "flags": {},
+        "protocols": {},
+    }
+    for item in items or []:
+        out["packets"] += 1
+        name = item.get("sni") or item.get("host")
+        if name:
+            bucket = out["sni"] if item.get("sni") else out["hosts"]
+            if name not in bucket:
+                bucket.append(name)
+        ttl = item.get("ttl")
+        if ttl is not None:
+            key = str(ttl)
+            out["ttl"][key] = out["ttl"].get(key, 0) + 1
+        for flag in item.get("flags") or []:
+            out["flags"][flag] = out["flags"].get(flag, 0) + 1
+        proto = item.get("l7") or item.get("proto")
+        if proto:
+            out["protocols"][proto] = out["protocols"].get(proto, 0) + 1
+    out["sni"] = out["sni"][:20]
+    out["hosts"] = out["hosts"][:20]
+    return out
+
+
 # ─────────────────────────── один пакет ─────────────────────────────
 
 def _packet(raw: bytes, linktype: int) -> dict:

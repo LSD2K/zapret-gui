@@ -217,9 +217,10 @@ def _m_initialize(params, ctx):
         "capabilities": {
             "tools": {"listChanged": True},
             # Подписка обещается только там, где есть чем доставить
-            # уведомление (S18): на stateless-HTTP канала «сервер →
-            # клиент» нет по построению, и объявить её там значило бы
-            # пообещать то, чего мы не сделаем.
+            # уведомление (S18): legacy-SSE и локальный stdio-мост. На
+            # stateless-HTTP канала «сервер → клиент» нет по построению,
+            # и объявить её там значило бы пообещать то, чего мы не
+            # сделаем.
             "resources": {"listChanged": True,
                           "subscribe": _can_notify(ctx)},
             "prompts": {"listChanged": False},
@@ -424,7 +425,8 @@ def _m_resources_subscribe(params, ctx):
             INVALID_REQUEST,
             "подписка на ресурсы работает только на транспорте с каналом "
             "уведомлений: откройте GET /api/mcp/sse (включается "
-            "mcp.transports.sse) и шлите запросы на его адрес. На "
+            "mcp.transports.sse) и шлите запросы на его адрес, либо "
+            "подключитесь stdio-мостом (zapret-gui mcp --stdio). На "
             "stateless-HTTP уведомление доставить некуда",
             {"uri": uri, "transport": ctx.get("transport", "http"),
              "endpoint": "/api/mcp/sse"})

@@ -393,6 +393,16 @@ def poll_permissions() -> bool:
     return True
 
 
+def permissions_snapshot():
+    """Текущие разрешения для сравнения «было/стало» (``None`` — не прочли).
+
+    Нужна stdio-мосту: у него сессия своя, вне общего реестра, и снимок
+    разрешений он держит сам (:func:`poll_permissions` работает по
+    реестру сессий этого процесса).
+    """
+    return _read_permissions()
+
+
 def _read_permissions():
     try:
         from core.mcp import auth
@@ -431,17 +441,20 @@ def subscribe(session, uri: str) -> dict:
             "subscriptions": len(session.subscriptions())}
 
 
-def poll_resources(now: float = 0.0) -> int:
-    """Сверить подписки всех сессий и разослать, что изменилось.
+def poll_resources(now: float = 0.0, targets=None) -> int:
+    """Сверить подписки сессий и разослать, что изменилось.
 
-    Зовётся с круга потока (``api/mcp.py``). Возвращает, сколько
-    уведомлений ушло.
+    Зовётся с круга потока (``api/mcp.py``) — тогда по всем сессиям
+    реестра — и из потока-писателя stdio-моста, у которого сессия своя
+    и в реестр не входит (``targets``). Возвращает, сколько уведомлений
+    ушло.
     """
     from core.mcp import resources
 
     now = now or time.time()
-    with _lock:
-        targets = list(_sessions.values())
+    if targets is None:
+        with _lock:
+            targets = list(_sessions.values())
 
     # Отпечаток считается ОДИН раз на URI, даже если на него подписаны
     # три сессии: рендер ресурса — самая дорогая часть круга.
