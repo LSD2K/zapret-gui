@@ -28,6 +28,7 @@ import json
 
 from core.mcp import audit
 from core.mcp import permissions as perms_mod
+from core.mcp import redact
 from core.mcp.registry import tool
 from core.mcp.tools import _paging
 
@@ -287,6 +288,15 @@ def config_set(args: dict) -> dict:
                     "настройки — config_describe(path=\"%s\")"
                     % (expected, path),
         }
+
+    if value == redact.MASK and redact.is_secret_key(parts[-1]):
+        # Маска из ответа config_get, отправленная обратно, — не пароль
+        # «***», а стёртый пароль.
+        return {"ok": False,
+                "error": "«%s»: передана маска «%s», а не значение"
+                         % (path, redact.MASK),
+                "path": path,
+                "hint": redact.MASK_WRITE_HINT}
 
     allowed_values = perms_mod.ENUMS.get(path)
     if allowed_values and value not in allowed_values:

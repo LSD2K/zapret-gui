@@ -109,6 +109,15 @@ def file_read(args: dict) -> dict:
                 "exists": False,
                 "hint": "проверьте путь: file_list(path=\"%s\")"
                         % (os.path.dirname(path) or "/")}
+    blocking = _blocking_reason(path)
+    if blocking:
+        # FIFO, устройство, /proc/kmsg: open() или read() на них ждут
+        # данных без конца — и поток сервера висит вместе с вызовом.
+        return {"ok": False, "error": "«%s» — %s, так не читается"
+                                      % (path, blocking),
+                "path": path,
+                "hint": "обычные файлы и /proc/* читаются; поток ядра — "
+                        "logs_tail или shell_exec(\"dmesg\")"}
 
     limit = max(1, min(int(args.get("limit_kb") or READ_KB_DEFAULT),
                        READ_KB_MAX)) * 1024
@@ -295,6 +304,12 @@ def file_write(args: dict) -> dict:
     allowed, refusal = _writable(path)
     if refusal:
         return refusal
+    # Пишем туда, где проверили границу. os.replace в атомарной записи
+    # подменяет САМ симлинк, а не его цель: граница, проверенная по
+    # realpath, и место записи иначе расходились бы — ссылка вне
+    # разрешённых каталогов на файл внутри них превращалась бы в запись
+    # вне их.
+    path = os.path.realpath(path)
 
     data = str(args.get("content") or "").encode("utf-8")
     if len(data) > MAX_WRITE_BYTES:
@@ -305,6 +320,14 @@ def file_write(args: dict) -> dict:
     before, refusal = _backup(path)
     if refusal:
         return refusal
+    if before.get("existed") and redact.mask_written_back(
+            str(args.get("content") or ""),
+            _decode_backup(before).decode("utf-8", "replace")):
+        return {"ok": False,
+                "error": "в новом содержимом «%s» есть маска секретов"
+                         % path,
+                "path": path,
+                "hint": redact.MASK_WRITE_HINT}
 
     parent = os.path.dirname(path)
     if not os.path.isdir(parent):
@@ -400,7 +423,11 @@ def _bad_path(value) -> dict:
 def _writable(path: str):
     """``(корень, отказ)``: можно ли писать в этот путь."""
     roots = shell.limits()["allow_write_paths"]
-    if os.path.basename(path) in PROTECTED_NAMES:
+    # Имя проверяем и у ссылки, и у её цели: симлинк с безобидным
+    # именем на settings.json — та же запись в settings.json.
+    real = os.path.realpath(path)
+    if (os.path.basename(path) in PROTECTED_NAMES
+            or os.path.basename(real) in PROTECTED_NAMES):
         return "", {
             "ok": False,
             "error": "«%s» — собственный файл GUI и через MCP не "
@@ -410,7 +437,6 @@ def _writable(path: str):
         }
     # Резолвим ДО проверки: симлинк /tmp/x → /etc/init.d иначе провёл бы
     # запись мимо границы.
-    real = os.path.realpath(path)
     for root in roots:
         root_real = os.path.realpath(root)
         if real == root_real or real.startswith(root_real.rstrip("/") + "/"):
@@ -469,6 +495,29 @@ def _decode_backup(before: dict) -> bytes:
         import base64
         return base64.b64decode(content)
     return str(content).encode("utf-8")
+
+
+# Файлы, которые выглядят обычными, но читаются бесконечно: ядро отдаёт
+# их содержимое по мере появления и держит read(), пока его нет.
+_BLOCKING_FILES = ("/proc/kmsg",)
+
+
+def _blocking_reason(path: str) -> str:
+    """Почему этот файл нельзя читать через ``read()`` (``""`` — можно)."""
+    real = os.path.realpath(path)
+    if real in _BLOCKING_FILES:
+        return "поток сообщений ядра"
+    try:
+        mode = os.stat(real).st_mode
+    except OSError:
+        return ""
+    if stat.S_ISFIFO(mode):
+        return "именованный канал (FIFO)"
+    if stat.S_ISSOCK(mode):
+        return "сокет"
+    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+        return "устройство"
+    return ""
 
 
 def _mode_of(path: str):

@@ -349,7 +349,7 @@ class NFQWSManager:
             # Гарантируем существование всех --hostlist*/--ipset* файлов из
             # команды: иначе zapret2 падает «failed to register hostlist» с
             # exit 1 ещё до открытия NFQUEUE (см. _ensure_list_files).
-            self._ensure_list_files(full_args)
+            self._ensure_list_files(full_args, self._write_roots(cfg))
 
             log.info("Запуск nfqws2...", source="nfqws")
             log.debug("Команда: %s" % " ".join(full_args), source="nfqws")
@@ -753,7 +753,8 @@ class NFQWSManager:
         if binary is None:
             binary = resolve_binary(cfg)
 
-        strategy_args = list(strategy_args or [])
+        strategy_args = self._strip_engine_owned(list(strategy_args or []),
+                                                 cfg)
         base_args = self._build_base_args(cfg)
 
         lua_path = cfg.get("zapret", "lua_path") or "/opt/zapret2/lua"
@@ -827,10 +828,14 @@ class NFQWSManager:
 
         argv = self.compose_command(list(strategy_args or []),
                                     binary=binary, cfg=cfg)
-        # Без setuid (нет root в рантайме валидации) и без любых уже
-        # присутствующих intercept/dry-run флагов — задаём свой --intercept=0.
+        # Без любых уже присутствующих intercept/dry-run флагов — задаём
+        # свой --intercept=0. --user убираем ТОЛЬКО без root: иначе setuid
+        # падает не по делу (dev-машина). С root сброс прав обязателен —
+        # без него lua-init стратегии (с io.open) исполнялся бы от root, и
+        # «проверка» стратегии была бы записью в любой файл роутера.
+        is_root = hasattr(os, "geteuid") and os.geteuid() == 0
         argv = [a for a in argv
-                if not a.startswith("--user=")
+                if (is_root or not a.startswith("--user="))
                 and not a.startswith("--intercept")
                 and a != "--dry-run"]
         argv.append("--intercept=0")
@@ -839,7 +844,7 @@ class NFQWSManager:
         # валидация (--intercept=0 тоже разбирает опции и регистрирует
         # hostlist'ы) ложно упала бы «failed to register hostlist» на файлах,
         # которые реальный start() всё равно создаёт (см. _ensure_list_files).
-        self._ensure_list_files(argv)
+        self._ensure_list_files(argv, self._write_roots(cfg))
 
         try:
             proc = subprocess.run(
@@ -873,7 +878,78 @@ class NFQWSManager:
     # ─────────────────────── internal helpers ───────────────────────
 
     @staticmethod
-    def _ensure_list_files(argv: list) -> None:
+    def _write_roots(cfg) -> list:
+        """Каталоги, где движку (и нам от его имени) можно создавать файлы.
+
+        Всё, что nfqws2 делает с файлами на разборе опций, он делает от
+        root: создаёт автохостлист и отдаёт его пользователю движка,
+        создаёт недостающий список (``_ensure_list_files``). Путь из
+        стратегии поэтому обязан лежать там, где живут наши списки.
+        """
+        roots = []
+        for key in ("base_path", "lists_path", "ipset_path", "lua_path"):
+            try:
+                value = cfg.get("zapret", key)
+            except Exception:                   # noqa: BLE001 — граница
+                value = None
+            if isinstance(value, str) and value:
+                roots.append(value)
+        try:
+            from core import platform_dirs
+            roots.append(platform_dirs.config_dir())
+        except Exception:                       # noqa: BLE001 — граница
+            pass
+        import tempfile
+        roots.append(tempfile.gettempdir())
+        return [os.path.realpath(r) for r in roots
+                if isinstance(r, str) and r]
+
+    @staticmethod
+    def _under_roots(path: str, roots) -> bool:
+        real = os.path.realpath(path)
+        return any(real == root or real.startswith(root.rstrip("/") + "/")
+                   for root in roots)
+
+    def _strip_engine_owned(self, strategy_args: list, cfg) -> list:
+        """Вырезать из аргументов стратегии то, чем владеет GUI.
+
+        Стратегия приходит из редактора, из каталога, из MCP — и идёт в
+        argv ПОСЛЕ базовых аргументов, где последнее значение побеждает.
+        ``--qnum``/``--fwmark``/``--user`` в ней ломают перехват или
+        отменяют сброс прав, а ``--pidfile``/``--writable``/
+        ``--debug=@файл``/``--hostlist-auto=<чужой путь>`` — это запись
+        и ``chown`` от root по любому пути ещё до запуска (в том числе в
+        dry-run). Список — ``strategy_lint.ENGINE_OWNED_OPTIONS``: линтер
+        называет то же самое модели и странице стратегий.
+        """
+        from core import strategy_lint
+
+        drop = {item["index"]: item["reason"]
+                for item in strategy_lint.engine_owned(strategy_args)}
+        roots = None
+        for index, arg in enumerate(strategy_args):
+            if index in drop or not isinstance(arg, str):
+                continue
+            for flag in ("--hostlist-auto=", "--hostlist-auto-debug="):
+                if arg.startswith(flag):
+                    if roots is None:
+                        roots = self._write_roots(cfg)
+                    if not self._under_roots(arg[len(flag):], roots):
+                        drop[index] = ("%s вне каталогов списков: nfqws2 "
+                                       "создаёт этот файл от root и отдаёт "
+                                       "его пользователю движка"
+                                       % flag.rstrip("="))
+        if not drop:
+            return strategy_args
+        for index in sorted(drop):
+            log.warning("Аргумент стратегии %s не передан движку: %s"
+                        % (strategy_args[index], drop[index]),
+                        source="nfqws")
+        return [arg for index, arg in enumerate(strategy_args)
+                if index not in drop]
+
+    @staticmethod
+    def _ensure_list_files(argv: list, roots=None) -> None:
         """Создать пустые файлы для отсутствующих --hostlist*/--ipset* из argv.
 
         Движок nfqws2 (bol-van/zapret2) на этапе разбора опций stat()-ит
@@ -895,6 +971,11 @@ class NFQWSManager:
         ошибку создания только логируем, запуск не блокируем — если файл
         действительно не создать (read-only FS и т.п.), поведение остаётся
         прежним (nfqws2 сам сообщит причину).
+
+        ``roots`` — где создавать можно (``_write_roots``). Создание идёт
+        от root, а путь приходит из стратегии: пустой ``/etc/nologin``,
+        «созданный как список», закрыл бы вход в систему. Вне каталогов
+        списков файл не создаём — движок сам скажет, чего ему не хватает.
         """
         seen = set()
         for arg in argv:
@@ -909,6 +990,13 @@ class NFQWSManager:
                     seen.add(path)
                     if os.path.exists(path):
                         NFQWSManager._fix_epoch_mtime(path)
+                        break
+                    if roots is not None and \
+                            not NFQWSManager._under_roots(path, roots):
+                        log.warning(
+                            "Список '%s' отсутствует и лежит вне каталогов "
+                            "списков — не создаём его" % path,
+                            source="nfqws")
                         break
                     try:
                         parent = os.path.dirname(path)

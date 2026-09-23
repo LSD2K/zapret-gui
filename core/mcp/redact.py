@@ -121,7 +121,29 @@ _TEXT_RULES = (
                 r"access[_-]?key)=)([^&\s]+)"), 2),
     # https://user:password@host
     (re.compile(r"(?i)(https?://[^\s:/@]+:)([^\s@/]+)(@)"), 2),
+    # vless://UUID@host, trojan://PASSWORD@host, ss://BASE64@host — в
+    # ссылке прокси учётные данные стоят ДО @, и это и есть доступ.
+    (re.compile(r"(?i)((?:vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic|"
+                r"socks5?|anytls|wireguard|wg)://)([^\s@/?#]+)(@)"), 2),
 )
+
+# Ключ-значение в JSON (``"password": "…"``) и в YAML/ini-подобном
+# тексте (``uuid: …``). Правила выше смотрят на фиксированный список
+# слов перед ``=``/``:``, и кавычка между именем и двоеточием их
+# ломает: ``cat settings.json`` отдавал токен MCP и пароль GUI
+# открытым текстом. Здесь имя ключа проверяется ТЕМ ЖЕ правилом, что у
+# структурной маски (:func:`_is_secret_key`), — поэтому текст и dict
+# маскируются одинаково, включая исключение ``confirm_token``.
+_JSON_PAIR_RE = re.compile(
+    r'("([^"\\\n]{1,64})"\s*:\s*")((?:[^"\\\n]|\\.)*)(")')
+_YAML_PAIR_RE = re.compile(
+    r"(?m)^(\s*(?:-\s+)?([A-Za-z0-9_.\-]{1,64})\s*:[ \t]+)"
+    r"([\"']?)([^\s\"'#][^\n#]*?)(\3[ \t]*(?:#.*)?)$")
+
+# Значения, которые маскировать незачем: флаги и числа секретом не
+# являются, как и у структурной маски (``auth_enabled: true``).
+_PLAIN_VALUE_RE = re.compile(
+    r"(?i)^(?:true|false|yes|no|on|off|null|none|~|-?\d+(?:\.\d+)?)$")
 
 
 # Режим «отдать как есть» — на время одного вызова, в его потоке.
@@ -211,6 +233,8 @@ def redact_text(text: str, force: bool = False) -> str:
         return text
     for pattern, index in _TEXT_RULES:
         text = pattern.sub(lambda m, i=index: _join_masked(m, i), text)
+    text = _JSON_PAIR_RE.sub(_mask_json_pair, text)
+    text = _YAML_PAIR_RE.sub(_mask_yaml_pair, text)
     return text
 
 
@@ -238,6 +262,28 @@ def shorten_url(value: str, force: bool = False) -> str:
     if len(rest) <= len(host):
         return "%s://%s" % (scheme, host)
     return "%s://%s/…" % (scheme, host)
+
+
+def mask_written_back(new_text, old_text=None) -> bool:
+    """Похоже ли, что запись несёт обратно нашу же маску.
+
+    Модель читает конфиг с ``***`` вместо ключа, правит соседнюю строку
+    и сохраняет текст целиком — ключ уничтожен, а в ответе «сохранено».
+    Подсказка в ответе чтения это не останавливает: её можно не
+    прочесть. Поэтому пишущие инструменты спрашивают здесь: маска
+    появилась там, где её раньше не было, — значит, это не содержимое,
+    а след маскировки.
+    """
+    if not isinstance(new_text, str) or MASK not in new_text:
+        return False
+    return not (isinstance(old_text, str) and MASK in old_text)
+
+
+MASK_WRITE_HINT = ("в записываемом тексте есть «%s» — это маска секретов "
+                   "из ответа чтения, а не значение: записав её, вы "
+                   "уничтожите настоящие ключи и пароли. Прочитайте "
+                   "содержимое с raw=true (разрешение «secrets») и "
+                   "пишите полный текст" % MASK)
 
 
 def is_secret_key(name: str) -> bool:
@@ -271,6 +317,24 @@ def _mask_value(item):
     if isinstance(item, str):
         return MASK if item else item
     return MASK
+
+
+def _mask_json_pair(match) -> str:
+    """``"имя": "значение"`` — маска, если имя секретное."""
+    head, name, value, tail = match.group(1, 2, 3, 4)
+    if not value or value == MASK or not _is_secret_key(name):
+        return match.group(0)
+    return head + MASK + tail
+
+
+def _mask_yaml_pair(match) -> str:
+    """``имя: значение`` в начале строки — маска, если имя секретное."""
+    head, name, quote, value, tail = match.group(1, 2, 3, 4, 5)
+    value = value.rstrip()
+    if (not value or value == MASK or _PLAIN_VALUE_RE.match(value)
+            or not _is_secret_key(name)):
+        return match.group(0)
+    return head + quote + MASK + tail
 
 
 def _join_masked(match, index: int) -> str:

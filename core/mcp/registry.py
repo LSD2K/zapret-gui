@@ -45,6 +45,7 @@ import importlib
 import json
 import pkgutil
 import re
+import threading
 import time
 import traceback
 
@@ -68,6 +69,12 @@ PAGE_SIZE = 50
 # Отличаем «не передали» от «передали None»: scope=None — это законное
 # значение (чтение), а отсутствие scope — ошибка объявления.
 _MISSING = object()
+
+# Сколько символов строки верхнего уровня оставляем в ответе «слишком
+# много». Длиннее — это и есть содержимое (текст конфига, файла, вывод
+# команды), из-за которого ответ не влез: оставить его — значит отдать
+# тот же самый ответ под видом обрезанного.
+TRUNCATED_STR_MAX = 300
 
 # Имя аргумента, которым вызов просит ответ без маскировки секретов.
 # Одно на все инструменты: разные имена («full», «plain», «no_redact»)
@@ -110,11 +117,14 @@ class ToolSpec:
         if self.title:
             item["title"] = self.title
         # Подсказки клиенту: read-only инструмент можно звать без
-        # подтверждения, мутирующий — спросив пользователя.
+        # подтверждения, мутирующий — спросив пользователя. У мутирующих
+        # destructiveHint истинен: по спеке `false` значит «только
+        # добавляет», и клиент вправе не спрашивать подтверждения — а
+        # среди них перезагрузка, удаление пакета и перезапись файла.
         item["annotations"] = {
             "title": self.title or self.name,
             "readOnlyHint": not self.mutating,
-            "destructiveHint": False,
+            "destructiveHint": self.mutating,
             "openWorldHint": False,
         }
         meta = {"scope": self.scope or perms_mod.READ_SCOPE,
@@ -126,9 +136,14 @@ class ToolSpec:
 # Реестр: имя → ToolSpec.
 _REGISTRY = {}
 
-# Состояние автозагрузки модулей инструментов.
+# Состояние автозагрузки модулей инструментов. Замок — повторно
+# входимый: модуль инструмента, обратившийся к реестру на своём импорте,
+# не должен запереть сам себя, а ЧУЖОЙ поток обязан дождаться конца
+# загрузки, а не получить полреестра («инструмент не найден» на первом
+# же запросе, пришедшем одновременно с другим).
 _loaded = False
 _loading = False
+_load_lock = threading.RLock()
 
 
 # ───────────────────────────── объявление ───────────────────────────
@@ -247,23 +262,26 @@ def load_tools(force: bool = False):
     только тестам и CLI, которым реестр нужен без вызова методов MCP.
     """
     global _loaded, _loading
-    if (_loaded and not force) or _loading:
+    if _loaded and not force:
         return
-    _loading = True
-    try:
-        if force:
-            # Модуль, положенный в пакет уже после старта процесса,
-            # иначе не виден: список каталога у импортёра закеширован.
-            importlib.invalidate_caches()
-        package = importlib.import_module("core.mcp.tools")
-        for info in sorted(pkgutil.iter_modules(package.__path__),
-                           key=lambda m: m.name):
-            if info.name.startswith("_"):
-                continue
-            importlib.import_module("core.mcp.tools.%s" % info.name)
-        _loaded = True
-    finally:
-        _loading = False
+    with _load_lock:
+        if (_loaded and not force) or _loading:
+            return
+        _loading = True
+        try:
+            if force:
+                # Модуль, положенный в пакет уже после старта процесса,
+                # иначе не виден: список каталога у импортёра закеширован.
+                importlib.invalidate_caches()
+            package = importlib.import_module("core.mcp.tools")
+            for info in sorted(pkgutil.iter_modules(package.__path__),
+                               key=lambda m: m.name):
+                if info.name.startswith("_"):
+                    continue
+                importlib.import_module("core.mcp.tools.%s" % info.name)
+            _loaded = True
+        finally:
+            _loading = False
 
 
 def get_tool(name):
@@ -459,7 +477,9 @@ def _truncated(payload: dict, limit: int):
     """
     size = len(_dumps(payload).encode("utf-8"))
     keep = {k: v for k, v in payload.items()
-            if isinstance(v, (bool, int, float, str)) or v is None}
+            if isinstance(v, (bool, int, float)) or v is None
+            or (isinstance(v, str) and len(v) <= TRUNCATED_STR_MAX)}
+    dropped = sorted(k for k in payload if k not in keep)
     short = {
         "ok": payload.get("ok", True),
         "truncated": True,
@@ -468,8 +488,11 @@ def _truncated(payload: dict, limit: int):
         "hint": "ответ больше лимита mcp.limits.response_kb — сузьте "
                 "запрос (фильтр, limit, пагинация)",
     }
-    # Скаляры верхнего уровня оставляем: по ним видно, что вообще
-    # произошло, и они заведомо короткие.
+    # Короткие скаляры верхнего уровня оставляем: по ним видно, что
+    # вообще произошло. Длинные строки — нет (TRUNCATED_STR_MAX), зато
+    # называем, какие поля выброшены: модель должна знать, ЧТО сужать.
+    if dropped:
+        short["dropped_fields"] = dropped[:20]
     for key, value in keep.items():
         if key not in short and len(short) < 24:
             short[key] = value

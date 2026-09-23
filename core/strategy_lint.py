@@ -57,6 +57,29 @@ CODE_BLOB_LATE_DECL = "blob_declared_after_new"
 CODE_LUA_INIT_ORDER = "lua_init_order"
 CODE_L7_WITHOUT_PORTS = "l7_filter_without_ports"
 CODE_NO_DESYNC = "no_desync_action"
+CODE_ENGINE_OPTION = "engine_owned_option"
+
+# Опции nfqws2, которыми владеет GUI, а не стратегия. Первые четыре —
+# базовые аргументы (``NFQWSManager._build_base_args``): стратегия идёт
+# ПОСЛЕ них, и последнее значение побеждает — ``--qnum``/``--fwmark``
+# ломают перехват и собственный трафик GUI (те же поля закрыты на запись
+# в ``config_set``), ``--user``/``--uid`` отменяют сброс прав, и lua
+# стратегии исполняется от root. Остальные — операции с файлами,
+# которые движок делает от root ещё на разборе опций: ``--pidfile``
+# пишет куда скажут, ``--writable`` делает ``chown`` каталога
+# пользователю движка (и существующего тоже — ``make_writable_dir``,
+# nfq2/darkmagic.c), ``--daemon`` уводит процесс из-под присмотра GUI,
+# ``--intercept``/``--dry-run`` превращают запуск в проверку.
+ENGINE_OWNED_OPTIONS = (
+    "--user", "--uid", "--qnum", "--fwmark",
+    "--daemon", "--pidfile", "--writable", "--writeable",
+    "--intercept", "--dry-run",
+)
+
+# ``--debug=@<файл>``: nfqws2 открывает файл на запись (``"wt"`` —
+# обнуляет) от root и отдаёт его пользователю движка. Остальные формы
+# ``--debug`` (вывод в наш лог, syslog) безвредны и нужны.
+_DEBUG_FILE_PREFIX = "--debug=@"
 
 # Таблица правил: данные, а не цепочка `if`. `section` — адрес в
 # справочнике, а не пересказ его своими словами: подсказка без адреса
@@ -110,6 +133,13 @@ RULES = (
         "severity": SEVERITY_WARNING,
         "title": "в стратегии нет ни одного --lua-desync",
         "section": "скил nfqws2-strategies §12 (сборка argv)",
+    },
+    {
+        "code": CODE_ENGINE_OPTION,
+        "severity": SEVERITY_ERROR,
+        "title": "опция, которой владеет GUI, а не стратегия",
+        "section": "скил nfqws2-strategies §3.1–3.2 (глобальные опции) и "
+                   "скил mcp, «Аргументы стратегии: чем владеет GUI»",
     },
 )
 
@@ -344,6 +374,35 @@ def _check_l7_without_ports(profiles) -> list:
     return out
 
 
+def engine_owned(argv) -> list:
+    """Аргументы стратегии, которые движку от неё передавать нельзя.
+
+    ``[{index, arg, reason}]``. Сборщик (``NFQWSManager.compose_command``)
+    их вырезает, линтер — называет: модель должна знать, почему её
+    ``--qnum`` не доехал до движка.
+    """
+    out = []
+    for index, arg in enumerate(argv or []):
+        text = str(arg)
+        name = text.split("=", 1)[0]
+        if name in ENGINE_OWNED_OPTIONS:
+            out.append({"index": index, "arg": text,
+                        "reason": "%s задаёт GUI, а не стратегия" % name})
+        elif text.startswith(_DEBUG_FILE_PREFIX):
+            out.append({"index": index, "arg": text,
+                        "reason": "--debug в файл: nfqws2 обнуляет его от "
+                                  "root; лог движка и так приходит в "
+                                  "журнал GUI"})
+    return out
+
+
+def _check_engine_owned(argv) -> list:
+    return [_finding(CODE_ENGINE_OPTION,
+                     "%s — сборщик её вырежет" % item["reason"],
+                     where=item["arg"])
+            for item in engine_owned(argv)]
+
+
 def _check_has_desync(argv) -> list:
     """argv без единого ``--lua-desync`` — это выключенный обход."""
     if any(_LUA_DESYNC_RE.match(str(a)) for a in argv):
@@ -382,6 +441,7 @@ def lint(argv, known_functions=None, known_blobs=None) -> list:
     profiles = split_profiles(argv)
 
     findings = []
+    findings.extend(_check_engine_owned(argv))
     findings.extend(_check_has_desync(argv))
     findings.extend(_check_lua_functions(profiles, known_functions))
     findings.extend(_check_blobs(profiles, known_blobs))

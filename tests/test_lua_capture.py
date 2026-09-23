@@ -7,9 +7,9 @@ Lua-дамп движка: ``--writable`` + ``zapret-pcap.lua``.
 * **``--writable`` выдаётся сам**, как только в стратегии есть
   ``pcap``, — и только тогда. Без него ``pcap`` с относительным именем
   пишет в текущий каталог nfqws2, куда под ``--user nobody`` писать
-  нельзя, и обработка пакета обрывается ошибкой lua. Каталог,
-  заданный самой стратегией (в т.ч. старым именем ``--writeable``),
-  главнее нашего;
+  нельзя, и обработка пакета обрывается ошибкой lua. Свой каталог
+  стратегии не положен: nfqws2 делает его ``chown`` от root, и сборщик
+  заменяет его нашим;
 * **``pcap`` встаёт перед первым приёмом профиля** и больше ничего в
   argv не меняет: ``--payload``/``--out-range`` действуют на следующие
   инстансы, и поставь мы его раньше со своими диапазонами — мерили бы
@@ -60,12 +60,50 @@ class TestWritable(unittest.TestCase):
         self.assertFalse(lua_capture.uses_pcap(
             ["--lua-desync=pcap_write:file=x"]))
 
-    def test_strategy_choice_wins(self):
+    def test_explicit_dir_is_not_doubled(self):
+        # Страховка для argv в обход сборщика: второй --writable не
+        # добавляем (сам сборщик чужой вырезает раньше — тест ниже).
         for own in ("--writable=/data/dump", "--writable",
                     "--writeable=/old"):
             with self.subTest(flag=own):
                 self.assertEqual(
                     lua_capture.writable_args(self.PCAP + [own]), [])
+
+    def test_compose_replaces_the_strategy_dir_with_ours(self):
+        # nfqws2 делает chown каталога --writable от root — и
+        # существующего тоже: чужой каталог в стратегии — это «отдай
+        # /etc пользователю nobody».
+        argv = self._compose(self.PCAP + ["--writable=/etc"])
+        self.assertEqual([a for a in argv if a.startswith("--writ")],
+                         ["--writable=%s" % lua_capture.writable_dir()])
+
+    def test_symlink_in_place_of_the_dir_is_replaced(self):
+        base = tempfile.mkdtemp(prefix="lua-w-")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        victim = os.path.join(base, "victim")
+        os.makedirs(victim)
+        link = os.path.join(base, "writable")
+        os.symlink(victim, link)
+        lua_capture.prepare_dir(link)
+        self.assertFalse(os.path.islink(link))
+        self.assertTrue(os.path.isdir(link))
+
+    def _compose(self, strategy):
+        from core.nfqws_manager import NFQWSManager
+
+        lua_dir = tempfile.mkdtemp(prefix="lua-")
+        self.addCleanup(shutil.rmtree, lua_dir, ignore_errors=True)
+
+        class Cfg:
+            def get(self, section, key=None, default=None):
+                if (section, key) == ("zapret", "lua_path"):
+                    return lua_dir
+                if (section, key) == ("interfaces", "wan"):
+                    return "eth0"
+                return default
+
+        mgr = NFQWSManager.__new__(NFQWSManager)
+        return mgr.compose_command(strategy, binary="/bin/nfqws2", cfg=Cfg())
 
     def test_compose_command_puts_it_before_lua_init(self):
         from core.nfqws_manager import NFQWSManager

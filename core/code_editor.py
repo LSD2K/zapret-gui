@@ -996,6 +996,17 @@ def _snapshot_order(snapshot_id: str):
 
 
 def snapshot_path(snapshot_id: str) -> str:
+    """Каталог снимка. Идентификатор сверяется с форматом — всегда.
+
+    Он приходит из аргументов модели и из query страницы MCP.
+    ``../../<каталог>`` превратил бы чужой ``manifest.json`` в снимок —
+    со своим ``root`` и своим списком файлов, — и ``code_rollback``
+    восстановил бы по нему что угодно, включая защищённое ядро без
+    ``self_edit_core``.
+    """
+    if not _ID_RE.match(str(snapshot_id or "")):
+        raise ValueError("неверный идентификатор снимка: %r"
+                         % (snapshot_id,))
     return os.path.join(snapshots_dir(), snapshot_id)
 
 
@@ -1447,11 +1458,11 @@ def history(limit: int = 20) -> list:
 
 def snapshot_bytes(snapshot_id: str, rel: str):
     """Содержимое файла ИЗ снимка (``None`` — файла в снимке нет)."""
-    path = os.path.join(snapshot_path(snapshot_id), "files", rel)
     try:
+        path = os.path.join(snapshot_path(snapshot_id), "files", rel)
         with open(path, "rb") as f:
             return f.read()
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 

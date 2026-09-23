@@ -596,7 +596,6 @@ def create_app(config_dir: str = None) -> Bottle:
     log.info(f"Zapret path: {cfg.get('zapret', 'base_path')}", source="app")
 
     # --- Безопасность: аутентификация + CORS/CSRF ---
-    import hmac
     import urllib.parse as _urlparse
     from bottle import HTTPResponse
 
@@ -676,9 +675,12 @@ def create_app(config_dir: str = None) -> Bottle:
             if password:
                 user = cfg.get("gui", "auth_user", default="admin") or "admin"
                 auth = request.auth  # (user, pass) | None — парсит Basic
+                # Сравнение по байтам: compare_digest на str с не-ASCII
+                # (кириллический пароль) бросает TypeError → 500.
+                from core.mcp.auth import secret_equal
                 ok = (auth is not None
-                      and hmac.compare_digest(auth[0], user)
-                      and hmac.compare_digest(auth[1], password))
+                      and secret_equal(auth[0], user)
+                      and secret_equal(auth[1], password))
                 if not ok:
                     raise HTTPResponse(
                         "401 Unauthorized", status=401,
