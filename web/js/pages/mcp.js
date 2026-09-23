@@ -46,11 +46,15 @@ const McpPage = (() => {
     const _sig = {};
 
     // Разрешения в том порядке, в котором их читает человек: сначала
-    // безобидные, ниже — те, после которых роутер уже не ваш.
+    // безобидные, ниже — те, после которых роутер уже не ваш. Порядок —
+    // как PERMISSIONS в core/mcp/permissions.py: разрешение, забытое
+    // здесь, не получает переключателя вовсе (так было с `secrets`),
+    // поэтому полноту списка сторожит tests/test_mcp_page.js.
     const PERM_ORDER = [
         'control', 'strategies_write', 'config_write', 'probes',
         'experiments', 'tunnels_write', 'dangerous',
         'shell_readonly', 'shell_full', 'self_edit', 'self_edit_core',
+        'secrets',
     ];
 
     // Разрешения, у которых своя рамка и своё предупреждение.
@@ -392,7 +396,7 @@ const McpPage = (() => {
         const key = item.key;
         const blocked = item.granted && (item.missing || []).length > 0;
         const risky = PERM_SHELL.indexOf(key) >= 0 || PERM_CODE.indexOf(key) >= 0
-                      || key === 'dangerous';
+                      || key === 'dangerous' || key === 'secrets';
 
         let note = '';
         if (blocked) {
