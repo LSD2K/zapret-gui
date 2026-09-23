@@ -255,7 +255,18 @@ class SingboxManager:
     # mode=dns-only (его переподнимает штатный --apply-singbox-transparent).
 
     def _config_dns_in_port(self, name: str) -> int:
-        """Порт dns-in inbound'а конфига (FakeIP-перехват), иначе 0."""
+        """Порт dns-in inbound'а конфига (FakeIP-перехват), иначе 0.
+
+        Конфиг FakeIP с внешним фронт-DNS (settings.json →
+        singbox.fakeip_front) тоже несёт dns-in, но это upstream для AdGuard
+        Home, а не цель REDIRECT :53 — для него 0: ни перехвата на up, ни
+        снятия чужого перехвата на down."""
+        try:
+            from core.singbox_fakeip import is_external_front
+            if is_external_front(name):
+                return 0
+        except Exception:
+            pass
         try:
             cfg = self.get_config(name).get("parsed") or {}
             for ib in cfg.get("inbounds") or []:
@@ -444,10 +455,22 @@ class SingboxManager:
         try:
             os.remove(path)
         except FileNotFoundError:
+            self._forget_fakeip_front(name)
             return {"ok": True, "name": name, "noop": True}
         except OSError as e:
             return {"ok": False, "error": "rm: %s" % e}
+        self._forget_fakeip_front(name)
         return {"ok": True, "name": name}
+
+    @staticmethod
+    def _forget_fakeip_front(name: str):
+        """Отметка «фронт-DNS внешний» живёт в settings.json рядом с
+        конфигом — уходит вместе с ним."""
+        try:
+            from core.singbox_fakeip import forget_front
+            forget_front(name)
+        except Exception:
+            pass
 
     # ─────── validate via binary ───────
 

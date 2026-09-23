@@ -790,14 +790,20 @@ def register(app):
 
     @app.route("/api/singbox/fakeip/options")
     def singbox_fakeip_options():
-        """Данные для формы FakeIP: версия, hostlist'ы, конфиги, nft."""
+        """Данные для формы FakeIP: версия, hostlist'ы, конфиги, nft,
+        дефолты фронт-DNS (engine_defaults / external_defaults)."""
         response.content_type = "application/json; charset=utf-8"
         from core.singbox_fakeip import build_options
         return build_options()
 
     @app.route("/api/singbox/fakeip/build", method="POST")
     def singbox_fakeip_build():
-        """Собрать и сохранить FakeIP-конфиг (проверяется `sing-box check`)."""
+        """
+        Собрать и сохранить FakeIP-конфиг (проверяется `sing-box check`).
+        body: proxy_link|proxy_config, hostlists, domains, cidrs, direct_dns,
+        route_all, capture_dns, dns_port, stack, tun_iface, name,
+        front_dns=engine|external, dns_listen, tun_address.
+        """
         response.content_type = "application/json; charset=utf-8"
         from core.singbox_fakeip import build_and_save
         try:
@@ -812,6 +818,20 @@ def register(app):
                 return [s.strip() for s in re.split(r"[\s,]+", v) if s.strip()]
             return []
 
+        # Фронт-DNS: engine (как раньше) | external (AdGuard Home впереди).
+        # Дефолты порта/прямого DNS у режимов разные (1153/local и
+        # 1053/https://1.1.1.1/dns-query), поэтому подставляем по режиму.
+        from core.singbox_config import (
+            EXTERNAL_DNS_LISTEN, EXTERNAL_DNS_PORT, EXTERNAL_DIRECT_DNS)
+        front = str(body.get("front_dns") or "engine").strip().lower()
+        external = front == "external"
+        try:
+            dns_port = int(body.get("dns_port") or
+                           (EXTERNAL_DNS_PORT if external else 1153))
+        except (TypeError, ValueError):
+            response.status = 400
+            return {"ok": False, "error": "dns_port: нужно число"}
+
         res = build_and_save(
             name=(body.get("name") or "fakeip"),
             proxy_link=(body.get("proxy_link") or ""),
@@ -819,12 +839,16 @@ def register(app):
             hostlists=_list(body.get("hostlists")),
             domains=_list(body.get("domains")),
             cidrs=_list(body.get("cidrs")),
-            direct_dns=(body.get("direct_dns") or "local"),
+            direct_dns=(body.get("direct_dns") or
+                        (EXTERNAL_DIRECT_DNS if external else "local")),
             route_all=bool(body.get("route_all")),
             tun_iface=(body.get("tun_iface") or "singbox-tun"),
             stack=(body.get("stack") or "system"),
             capture_dns=bool(body.get("capture_dns", True)),
-            dns_port=int(body.get("dns_port") or 1153),
+            dns_port=dns_port,
+            front_dns=front,
+            dns_listen=(body.get("dns_listen") or EXTERNAL_DNS_LISTEN),
+            tun_address=(body.get("tun_address") or ""),
         )
         if not res.get("ok"):
             response.status = 400

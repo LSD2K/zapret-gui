@@ -767,6 +767,17 @@ def find_tun_interface(cfg: dict) -> str:
 FAKEIP_INET4 = "198.18.0.0/15"
 FAKEIP_INET6 = "fc00::/18"
 
+# Кто фронт-DNS LAN: sing-box сам (engine) или внешний резолвер впереди
+# (external: AdGuard Home шлёт в sing-box только домены из списка).
+FAKEIP_FRONT_MODES = ("engine", "external")
+
+# Дефолты режима external (docs/gw/spec-b2-fakeip-front.md).
+EXTERNAL_DNS_LISTEN = "127.0.0.1"
+EXTERNAL_DNS_PORT = 1053
+EXTERNAL_DIRECT_DNS = "https://1.1.1.1/dns-query"
+EXTERNAL_TUN_ADDRESS = "172.19.0.1/30"
+EXTERNAL_CACHE_PATH = "/var/lib/sing-box/cache.db"
+
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
@@ -953,7 +964,12 @@ def build_fakeip_config(*, proxy_outbound: dict,
                         auto_redirect: bool = False,
                         typed_dns: bool = False,
                         capture_dns: bool = False,
-                        dns_port: int = 1153) -> dict:
+                        dns_port: int = None,
+                        front_dns: str = "engine",
+                        dns_listen: str = "127.0.0.1",
+                        cache_path: str = "",
+                        proxy_outbounds=None,
+                        proxy_endpoints=None) -> dict:
     """
     Собрать полный sing-box-конфиг FakeIP-роутинга.
 
@@ -961,7 +977,29 @@ def build_fakeip_config(*, proxy_outbound: dict,
     принудительно = 'proxy-out'. route_all=True → весь трафик в прокси
     (FakeIP не нужен, DNS прямой). Иначе — выбранные домены/подсети в прокси,
     остальное напрямую, домены через FakeIP.
+
+    front_dns='engine' (по умолчанию) — sing-box сам DNS всей LAN (всё выше).
+    front_dns='external' — впереди внешний DNS (AdGuard Home), см.
+    build_fakeip_external_config; там же смысл dns_listen/cache_path/
+    proxy_outbounds/proxy_endpoints. dns_port по умолчанию: 1153 для engine,
+    1053 для external.
     """
+    if front_dns not in FAKEIP_FRONT_MODES:
+        raise ValueError("front_dns: ожидается %s"
+                         % " | ".join(FAKEIP_FRONT_MODES))
+    if front_dns == "external":
+        obs = proxy_outbounds
+        if obs is None:
+            obs = [proxy_outbound] if proxy_outbound else []
+        return build_fakeip_external_config(
+            proxy_outbounds=obs, proxy_endpoints=proxy_endpoints,
+            direct_dns=direct_dns, dns_listen=dns_listen,
+            dns_port=EXTERNAL_DNS_PORT if dns_port is None else dns_port,
+            tun_iface=tun_iface, tun_address=tun_address, stack=stack,
+            cache_path=cache_path)
+    if dns_port is None:
+        dns_port = 1153
+
     if not isinstance(proxy_outbound, dict) or not proxy_outbound.get("type"):
         raise ValueError("proxy_outbound должен быть dict с полем type")
 
@@ -1018,6 +1056,139 @@ def build_fakeip_config(*, proxy_outbound: dict,
                            "path": "cache.db"},
         },
     }
+
+
+# Не прокси: служебные выходы и группы (группы в selector добавляем отдельно).
+_NON_PROXY_OUTBOUND_TYPES = ("direct", "block", "dns", "selector", "urltest")
+
+
+def fakeip_external_outbounds(outbounds, endpoints=None):
+    """
+    Набор выходов для режима external (п.3 спеки): (outbounds, endpoints).
+
+    Outbound'ы и endpoint'ы берутся как есть. Если тега `proxy-out` среди них
+    нет — добавляется `selector` proxy-out из всех прокси: сначала группы
+    (selector/urltest, их выбрал пользователь), потом одиночные серверы и
+    endpoint'ы; по умолчанию первый. `direct` добавляется, если такого тега
+    нет. Outbound без тега получает `proxy`/`proxy-2`/….
+    """
+    obs = [json.loads(json.dumps(o)) for o in (outbounds or [])
+           if isinstance(o, dict) and o.get("type")]
+    eps = [json.loads(json.dumps(e)) for e in (endpoints or [])
+           if isinstance(e, dict) and e.get("type")]
+    taken = {o.get("tag") for o in obs + eps if o.get("tag")}
+    n = 1
+    for o in obs + eps:
+        if not o.get("tag"):
+            while ("proxy" if n == 1 else "proxy-%d" % n) in taken:
+                n += 1
+            o["tag"] = "proxy" if n == 1 else "proxy-%d" % n
+            taken.add(o["tag"])
+    if "proxy-out" not in taken:
+        groups = [o["tag"] for o in obs
+                  if o.get("type") in ("selector", "urltest")]
+        leaves = [o["tag"] for o in obs
+                  if o.get("type") not in _NON_PROXY_OUTBOUND_TYPES]
+        members = groups + leaves + [e["tag"] for e in eps]
+        if not members:
+            raise ValueError("нет ни одного прокси-outbound'а")
+        # Сразу за последним прокси/группой, перед служебными выходами.
+        at = max([i + 1 for i, o in enumerate(obs)
+                  if o.get("type") not in ("direct", "block", "dns")] or [0])
+        obs.insert(at, {"type": "selector", "tag": "proxy-out",
+                        "outbounds": members, "default": members[0]})
+    if "direct" not in taken:
+        obs.append({"type": "direct", "tag": "direct"})
+    return obs, eps
+
+
+def build_fakeip_external_config(*, proxy_outbounds, proxy_endpoints=None,
+                                 direct_dns: str = EXTERNAL_DIRECT_DNS,
+                                 dns_listen: str = EXTERNAL_DNS_LISTEN,
+                                 dns_port: int = EXTERNAL_DNS_PORT,
+                                 tun_iface: str = "singbox-tun",
+                                 tun_address=None,
+                                 stack: str = "system",
+                                 cache_path: str = "") -> dict:
+    """
+    FakeIP за внешним фронт-DNS (AdGuard Home впереди, п.1 спеки B2).
+
+    AdGuard шлёт домены из списка на upstream `dns_listen:dns_port`
+    (inbound dns-in, только UDP, всегда, без перехвата :53). sing-box
+    отвечает fakeip на A и пустым NOERROR на AAAA (IPv6 в сети нет);
+    остальные типы запросов и имена для самого движка резолвит прямой DNS
+    (typed-формат, 1.12+). Маршрут на 198.18.0.0/15 в TUN ставится снаружи,
+    поэтому TUN без auto_route/strict_route/auto_redirect; всё, что пришло
+    из TUN, идёт в proxy-out, остальное в direct.
+
+    Намеренно НЕТ: domain_suffix-правил для fakeip (домены отбирает AdGuard),
+    `ip_is_private → direct` (fakeip-диапазон приватный, правило утянуло бы
+    всё в direct), mtu у TUN (форма проверена на sing-box 1.14.1 как есть).
+    Доменные правила `domain_suffix → <outbound>` добавляет отдельный модуль
+    через insert_route_rule_after_managed(): они встают после sniff/
+    hijack-dns и перед правилом `inbound: tun-in`.
+
+    `default_domain_resolver` = dns-direct всегда: без него 1.14 не
+    стартует (домены прокси-серверов в dial-полях). `cache_file.path`
+    абсолютный (у sing-box под systemd рабочий каталог не наш).
+    """
+    servers = make_direct_dns_servers(direct_dns)
+    if servers is None:
+        raise ValueError("прямой DNS не распознан: %r (ожидается local, IP, "
+                         "IP:порт, udp://, tls:// или https://)" % direct_dns)
+    obs, eps = fakeip_external_outbounds(proxy_outbounds, proxy_endpoints)
+
+    if isinstance(tun_address, str):
+        tun_address = [tun_address] if tun_address.strip() else None
+    tun = {
+        "type": "tun",
+        "tag": _TUN_TAG,
+        "interface_name": tun_iface or "singbox-tun",
+        "address": list(tun_address) if tun_address
+        else [EXTERNAL_TUN_ADDRESS],
+        "auto_route": False,
+        "strict_route": False,
+        "stack": stack or "system",
+    }
+    dns_in = {"type": "direct", "tag": "dns-in",
+              "listen": dns_listen or EXTERNAL_DNS_LISTEN,
+              "listen_port": int(dns_port), "network": "udp"}
+
+    cfg = {
+        "log": {"level": "info"},
+        "dns": {
+            "servers": [servers[0],
+                        {"type": "fakeip", "tag": "dns-fakeip",
+                         "inet4_range": FAKEIP_INET4,
+                         "inet6_range": FAKEIP_INET6}] + servers[1:],
+            "rules": [
+                {"query_type": ["AAAA"], "action": "predefined",
+                 "rcode": "NOERROR"},
+                {"query_type": ["A"], "server": "dns-fakeip"},
+            ],
+            "final": "dns-direct",
+        },
+        "inbounds": [dns_in, tun],
+        "outbounds": obs,
+    }
+    if eps:
+        cfg["endpoints"] = eps
+    cfg["route"] = {
+        "rules": [
+            make_sniff_rule(),
+            make_hijack_dns_rule(),
+            {"inbound": [_TUN_TAG], "outbound": "proxy-out"},
+        ],
+        "final": "direct",
+        "auto_detect_interface": True,
+        "default_domain_resolver": "dns-direct",
+    }
+    cfg["experimental"] = {
+        "cache_file": {"enabled": True,
+                       "path": cache_path or EXTERNAL_CACHE_PATH,
+                       "store_fakeip": True},
+    }
+    return cfg
 
 
 def _norm_src_cidr(s: str) -> str:

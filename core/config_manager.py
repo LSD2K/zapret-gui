@@ -195,6 +195,18 @@ DEFAULT_CONFIG = {
         "allow_hooks":        False,
     },
 
+    # --- sing-box ---
+    # Остальные ключи секции (transparent, debug_log, subscriptions, …)
+    # появляются по мере использования, дефолты у их читателей.
+    "singbox": {
+        # FakeIP за внешним фронт-DNS (AdGuard Home): имя конфига →
+        # {"front_dns": "external", "dns_listen": "127.0.0.1",
+        #  "dns_port": 1053}. Такой конфиг несёт dns-in, но это upstream
+        # для AdGuard: менеджер НЕ ставит для него REDIRECT :53 и не
+        # трогает прозрачное проксирование (core/singbox_fakeip).
+        "fakeip_front": {},
+    },
+
     # --- BlockCheck ---
     "blockcheck": {
         "default_mode": "quick",
