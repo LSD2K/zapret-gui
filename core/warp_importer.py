@@ -1,7 +1,8 @@
 # core/warp_importer.py
 """
 Импорт готовых AmneziaWG-WARP конфигов, сгенерированных сторонними
-сервисами (например, https://warp-generator.github.io).
+сервисами (например, https://warp-generation.github.io
+или https://proton-generation.github.io).
 
 Принципы:
   * Парсинг и валидация — через core.awg_config (без дублирования логики).
@@ -194,7 +195,8 @@ def import_from_text(text: str, name: str = None) -> dict:
     warnings = []
     if not detection["is_warp"]:
         warnings.append(
-            "Конфиг не похож на WARP. " +
+            "Конфиг не похож на WARP (для других провайдеров, например "
+            "Proton VPN, это нормально — туннель импортирован). " +
             "; ".join(detection.get("reasons") or [])
         )
 

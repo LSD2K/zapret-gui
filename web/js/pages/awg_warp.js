@@ -111,12 +111,13 @@ const AwgWarpPage = (() => {
     function renderImportTab(box) {
         box.innerHTML = `
             <p class="text-muted" style="margin: 0 0 12px 0;">
-                Вставьте содержимое .conf, сгенерированного на стороннем сервисе
-                (например,
-                <a href="https://warp-generator.github.io" target="_blank" rel="noopener">
-                    warp-generator.github.io
-                </a>),
+                Вставьте содержимое .conf, сгенерированного на стороннем сервисе,
                 или загрузите файл. Конфиг будет сохранён как обычный AWG-туннель.
+                Генераторы конфигов:
+                <a href="https://warp-generation.github.io" target="_blank" rel="noopener">warp-generation.github.io</a>
+                (Cloudflare WARP),
+                <a href="https://proton-generation.github.io" target="_blank" rel="noopener">proton-generation.github.io</a>
+                (Proton VPN).
             </p>
 
             <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">

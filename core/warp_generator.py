@@ -3,7 +3,7 @@
 Нативная генерация AmneziaWG-WARP конфигов.
 
 Логика повторяет то, что делают сторонние WARP-генераторы
-(warp-generator.github.io и т. п.):
+(warp-generation.github.io и т. п.):
   1) сгенерировать пару X25519 ключей;
   2) зарегистрировать аккаунт через неофициальный API
      Cloudflare (api.cloudflareclient.com /v0a2483/reg);
