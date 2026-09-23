@@ -1,0 +1,39 @@
+{
+  "id": "keenetic_vidnoe",
+  "name": "Keenetic (Vidnoe) — перенос nfqws2-keenetic",
+  "description": "Стратегии и списки, снятые с Keenetic 21.09.2026 (дамп nfqws2-keenetic, провайдер Vidnoe). Режим list: домены из lists/keenetic.txt и IP из ipset-keenetic. circular auto с retrans, fake TLS sni=fonts.google.com, multisplit midsld, hostfakesplit ozon.ru, QUIC fake repeats=11, UDP wireguard/stun/discord/mtproto.",
+  "type": "combined",
+  "version": 1,
+  "profiles": [
+    {
+      "id": "udp_misc",
+      "name": "UDP: WireGuard / STUN / Discord / MTProto / unknown",
+      "enabled": true,
+      "args": "--filter-udp=590-600,1400,3478-3481,5349,19294-19344,49152-65535 --filter-l7=wireguard,stun,discord,mtproto,unknown --out-range=<n2 --payload=wireguard_initiation,wireguard_response,wireguard_cookie,stun,discord_ip_discovery,mtproto_initial,unknown --lua-desync=circular:fails=2:time=300:retrans=3:nld=2 --lua-desync=fake:repeats=6:strategy=2 --lua-desync=fake:blob=quic_google:repeats=6:strategy=1"
+    },
+    {
+      "id": "quic_ipset",
+      "name": "QUIC 443 по IP-списку (ipset-keenetic)",
+      "enabled": true,
+      "args": "--filter-udp=443 --filter-l7=quic --ipset=lists/ipset-keenetic.txt --ipset-exclude=lists/ipset-keenetic-exclude.txt --payload=quic_initial --lua-desync=fake:blob=quic_google:repeats=11"
+    },
+    {
+      "id": "quic_hostlist",
+      "name": "QUIC 443 по доменам (keenetic.txt)",
+      "enabled": true,
+      "args": "--filter-udp=443 --filter-l7=quic --hostlist=lists/keenetic.txt --payload=quic_initial --lua-desync=fake:blob=quic_google:repeats=11"
+    },
+    {
+      "id": "tcp_ipset",
+      "name": "TCP 443/80/1984/5222 по IP-списку (ipset-keenetic)",
+      "enabled": true,
+      "args": "--filter-tcp=443,80,1984,5222 --filter-l7=http,tls,mtproto --ipset=lists/ipset-keenetic.txt --ipset-exclude=lists/ipset-keenetic-exclude.txt --payload=tls_client_hello,mtproto_initial --lua-desync=circular:fails=2:time=300:retrans=3:nld=2 --lua-desync=fake:blob=tls_google:tls_mod=rnd,dupsid,sni=fonts.google.com:tcp_seq=10000:strategy=1 --lua-desync=multisplit:pos=1,midsld:seqovl=1:seqovl_pattern=tls_google:tcp_ts_up:strategy=1 --lua-desync=fake:blob=0x00000000:tcp_ack=-66000:tls_mod=rnd,dupsid,sni=www.google.com:repeats=2:strategy=2 --lua-desync=multisplit:pos=1,midsld:strategy=2 --lua-desync=hostfakesplit:host=ozon.ru:midhost=host-2:seqovl=sniext+3:seqovl_pattern=tls_google:badsum:tcp_md5:tcp_ts_up:strategy=3 --lua-desync=hostfakesplit:tcp_md5:tcp_ts_up:strategy=3 --payload=http_req --lua-desync=http_methodeol:badsum"
+    },
+    {
+      "id": "tcp_hostlist",
+      "name": "TCP 443/80/1984/5222 по доменам (keenetic.txt)",
+      "enabled": true,
+      "args": "--filter-tcp=443,80,1984,5222 --filter-l7=http,tls,mtproto --hostlist=lists/keenetic.txt --payload=tls_client_hello,mtproto_initial --lua-desync=circular:fails=2:time=300:retrans=3:nld=2 --lua-desync=fake:blob=tls_google:tls_mod=rnd,dupsid,sni=fonts.google.com:tcp_seq=10000:strategy=1 --lua-desync=multisplit:pos=1,midsld:seqovl=1:seqovl_pattern=tls_google:tcp_ts_up:strategy=1 --lua-desync=fake:blob=0x00000000:tcp_ack=-66000:tls_mod=rnd,dupsid,sni=www.google.com:repeats=2:strategy=2 --lua-desync=multisplit:pos=1,midsld:strategy=2 --lua-desync=hostfakesplit:host=ozon.ru:midhost=host-2:seqovl=sniext+3:seqovl_pattern=tls_google:badsum:tcp_md5:tcp_ts_up:strategy=3 --lua-desync=hostfakesplit:tcp_md5:tcp_ts_up:strategy=3 --payload=http_req --lua-desync=http_methodeol:badsum"
+    }
+  ]
+}
