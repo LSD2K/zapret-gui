@@ -292,6 +292,16 @@ execution plan ещё до входа в Lua** (раньше падало вну
 | `--filter-ssid-neg[=0\|1]` | **1.0.5+.** Инверсия SSID-фильтра профиля: профиль работает во всех сетях, КРОМЕ перечисленных. |
 | `--filter-mark=mark[/mask]` | **1.0.5+.** Фильтр профиля по mark пакета (десятичный или `0xHEX`, с необязательной маской). Позволяет включать профиль только для трафика, уже промаркированного firewall'ом. ⚠️ Не путать с `--fwmark` (это anti-loop мarker самого nfqws2) и с нашими MARK_PROCESSED / MARK_EXCLUDE (`core/firewall.py`): те стоят в правилах NFQUEUE, а `--filter-mark` разбирает mark **внутри** профиля. |
 
+> **Что стратегии не положено (наша сборка).** `compose_command`
+> вырезает из аргументов стратегии `--user`/`--uid`/`--qnum`/`--fwmark`
+> (задаёт GUI), `--pidfile`/`--daemon`/`--intercept`/`--dry-run`,
+> `--writable` (nfqws2 делает `chown` каталога от root, и существующего
+> тоже — `make_writable_dir`, nfq2/darkmagic.c), `--debug=@файл`
+> (`fopen("wt")` от root на разборе опций) и `--hostlist-auto*=` вне
+> каталогов списков (`ensure_file_access` → `chown`). Список —
+> `strategy_lint.ENGINE_OWNED_OPTIONS`, линтер называет это кодом
+> `engine_owned_option`.
+
 ### 3.2 DESYNC ENGINE INIT
 
 | Опция | Назначение |
