@@ -48,6 +48,8 @@ const Sidebar = (() => {
             items: [
                 { id: 'control',     label: 'Управление', icon: 'play' },
                 { id: 'strategies',  label: 'Стратегии',  icon: 'strategy' },
+                // debian-gw: правила «домены → outbound» для sing-box и AdGuard Home.
+                { id: 'agh-routes',  label: 'Домены → outbound', icon: 'globe' },
                 // Вкладки: официальный blockcheck2.sh + перебор по нашему каталогу.
                 { id: 'scan',        label: 'Подбор стратегий', icon: 'scan' },
             ]

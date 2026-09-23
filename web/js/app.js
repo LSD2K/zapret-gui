@@ -11,6 +11,8 @@ const App = (() => {
         dashboard:   DashboardPage,
         control:     ControlPage,
         strategies:  StrategiesPage,
+        // debian-gw: домены → outbound sing-box + upstream'ы AdGuard Home
+        'agh-routes': AghRoutesPage,
         hostlists:   HostlistsPage,
         ipsets:      IPSetsPage,
         lua:         LuaScriptsPage,
