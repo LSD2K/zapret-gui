@@ -30,8 +30,8 @@ const i18n_en = {
     "mcp.warn.loopback": "The GUI listens on loopback only (127.0.0.1) — MCP is reachable from the router itself: over an ssh tunnel or through the stdio bridge.",
     "mcp.warn.rotate": "The old token stops working immediately: connected clients will drop and have to be reconfigured.",
     "mcp.warn.restart": "The GUI is restarting, waiting… Losing the connection here is expected: if the GUI does not come back or the edit is not confirmed, the guard restores the previous files by itself.",
-    "mcp.warn.shell": "Full router access as root. The model can run any command, rewrite any file, install and remove packages, stop services. There is no confirmation that softens this: enable it only knowing what you risk.",
-    "mcp.warn.self_edit": "The model can rewrite the GUI itself on the device. If a restart fails the guard restores the previous files automatically, but a bad edit stays live until the dead-man expires.",
+    "mcp.warn.shell": "Full router access as root — to the whole system, not just the GUI. The model can run any command, rewrite any file (including the GUI's own files — but without the checks, snapshots and auto-rollback that “GUI code editing” provides), install and remove packages, stop services. There is no confirmation that softens this: enable it only knowing what you risk.",
+    "mcp.warn.self_edit": "The model can rewrite the GUI itself on the device — only files inside the GUI install directory; this permission does not let it run commands or touch the rest of the system (that is the separate Shell access, and neither one enables the other). Each edit is checked and snapshotted before it is applied; if a restart fails the guard restores the previous files automatically, but a bad edit stays live until the dead-man expires.",
     "mcp.warn.panic": "Both shell permissions will be switched off, running background commands killed, pending confirmations revoked.",
 
     "mcp.risk.control": "Can stop and start DPI bypass — clients lose their connection meanwhile.",
@@ -42,8 +42,8 @@ const i18n_en = {
     "mcp.risk.tunnels_write": "Can edit tunnel configs and bring them up — traffic will go through the server it picks.",
     "mcp.risk.dangerous": "Installs binaries, changes autostart and rules, can reboot the router.",
     "mcp.risk.shell_readonly": "Safe command list and file reads only. Files may contain secrets.",
-    "mcp.risk.shell_full": "Arbitrary command as root, file writes, packages and services. This is full router access.",
-    "mcp.risk.self_edit": "Reads and edits GUI modules on the device and restarts it under the guard.",
+    "mcp.risk.shell_full": "Arbitrary command as root, file writes, packages and services — across the whole system. This is full router access: GUI files can be rewritten too, but without the checks and auto-rollback that self_edit provides.",
+    "mcp.risk.self_edit": "GUI's own files only (install directory): edits are syntax- and import-checked, snapshotted and applied by a guarded restart with auto-rollback. Runs no commands, never leaves the GUI; independent of the shell permissions.",
     "mcp.risk.self_edit_core": "Additionally the protected core: auth, permissions, guard, config. The model can lift its own limits.",
     "mcp.risk.secrets": "Opens no tools of its own: it drops the masking from answers where a call explicitly asks for them as-is (keys, tokens, passwords, subscription URLs) and allows writing secret-looking settings. The call journal is still masked."
 };
