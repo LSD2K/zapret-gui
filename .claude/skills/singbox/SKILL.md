@@ -560,6 +560,31 @@ TUN, sing-box по fake-IP восстанавливает домен и прок
   (`capture_dns`, по умолчанию вкл); `build_and_save` возвращает `dns_capture`
   ∈ {auto_redirect, iptables-redirect, manual}.
 
+**Внешний фронт-DNS (`front_dns="external"`, форк debian-gw,
+`docs/gw/spec-b2-fakeip-front.md`)** — впереди AdGuard Home, он шлёт в
+sing-box только домены из списка (upstream `[/домен/]127.0.0.1:1053`):
+- `build_fakeip_external_config()`: `dns-in` (direct, udp) на
+  `dns_listen:dns_port`, TUN без auto_route/strict_route/auto_redirect
+  (маршрут `198.18.0.0/15` ставится снаружи), DNS: AAAA → `predefined`
+  NOERROR, A → fakeip, остальное → прямой DNS; route: sniff, hijack-dns,
+  `inbound tun-in → proxy-out`, final direct, `default_domain_resolver`
+  всегда; `cache_file.path` абсолютный (`platform.data_dir`,
+  у Linux `/var/lib/sing-box`). Без `ip_is_private → direct` (fakeip-диапазон
+  приватный) и без domain_suffix-правил fakeip.
+- Несколько прокси из `proxy_config`: все outbounds/endpoints как есть,
+  без тега `proxy-out` достраивается selector (`fakeip_external_outbounds`).
+- Режим хранится в `settings.json → singbox.fakeip_front[<имя>]`; для таких
+  конфигов `_config_dns_in_port` = 0 → никакого REDIRECT :53.
+- Только typed-DNS (1.12+).
+
+> ⚠️ **typed DNS-сервер + `detour` на пустой `direct`-outbound**:
+> `sing-box check` молчит, а `run` падает FATAL «detour to an empty direct
+> outbound makes no sense» (проверено на 1.14.1). Прямой typed-сервер
+> пишем БЕЗ detour — он и так ходит напрямую, мимо `route.final`
+> (`parse_direct_dns`). И ещё: DNS-сервер с именем вместо IP не берёт
+> `route.default_domain_resolver` («missing domain resolver for domain
+> server address») — ему нужен свой `domain_resolver` (у нас local-bootstrap).
+
 ---
 
 ## 14. Layout (где что)
