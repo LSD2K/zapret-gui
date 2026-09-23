@@ -37,7 +37,11 @@ const SingboxDashboardPage = (() => {
         name: 'fakeip', source: 'link', proxy_link: '', proxy_config: '',
         route_all: false, hostlists: {}, domains: '', cidrs: '',
         direct_dns: 'local', stack: 'system', capture_dns: true,
+        // Фронт-DNS: engine — sing-box сам DNS LAN (перехват :53);
+        // external — впереди AdGuard Home, sing-box его upstream.
+        front_dns: 'engine', dns_listen: '127.0.0.1', dns_port: '1053',
     };
+    let fakeipResult = null;         // последняя сборка external (подсказка для AdGuard)
     let liteForm = {                 // форма маршрутизации на kernel-стеке
         name: 'lite-route', proxy_link: '', proxy_config: '',
         source_ips: '', route_all: false, reject_quic: false,
@@ -795,6 +799,10 @@ const SingboxDashboardPage = (() => {
         const autoNote = o.nft
             ? 'Платформа nftables: DNS и трафик LAN-клиентов забираются автоматически (auto_redirect TUN).'
             : 'Платформа iptables (Keenetic): при включённом перехвате правило REDIRECT :53 ставится автоматически на время работы конфига (снимается при остановке). LAN-клиенты должны ходить через роутер как шлюз.';
+        const ext = f.front_dns === 'external';
+        const engineOnly = ext ? 'display:none;' : '';
+        const externalOnly = ext ? '' : 'display:none;';
+        const extDef = o.external_defaults || {};
 
         body.innerHTML = `
             <p class="text-muted" style="font-size:12.5px; margin-top:0;">
@@ -824,15 +832,48 @@ const SingboxDashboardPage = (() => {
                     </div>
                 </div>
 
-                <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
-                    <input type="checkbox" ${f.route_all ? 'checked' : ''}
-                           onchange="SingboxDashboardPage.setFakeip('route_all', this.checked)">
-                    Проксировать <strong>весь</strong> трафик (иначе — только выбранное ниже)
-                </label>
+                <div>
+                    <div style="font-size:12px; margin-bottom:3px;">Фронт-DNS</div>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                        <input type="radio" name="sb-fi-front" value="engine" ${ext ? '' : 'checked'}
+                               onchange="SingboxDashboardPage.setFakeipFront('engine')">
+                        sing-box (перехват LAN)
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                        <input type="radio" name="sb-fi-front" value="external" ${ext ? 'checked' : ''}
+                               onchange="SingboxDashboardPage.setFakeipFront('external')">
+                        внешний (AdGuard Home, слушать ${escapeHtml(extDef.dns_listen || '127.0.0.1')}:${escapeHtml(String(extDef.dns_port || 1053))})
+                    </label>
+                    <div class="sb-fi-external" style="margin:6px 0 0 22px; font-size:12px; ${externalOnly}">
+                        Адрес
+                        <input type="text" value="${escapeAttr(f.dns_listen)}" style="width:130px;"
+                               oninput="SingboxDashboardPage.setFakeip('dns_listen', this.value)">
+                        порт
+                        <input type="number" min="1" max="65535" value="${escapeAttr(f.dns_port)}" style="width:80px;"
+                               oninput="SingboxDashboardPage.setFakeip('dns_port', this.value)">
+                        <div class="text-muted" style="font-size:11px; margin-top:3px;">
+                            AdGuard Home остаётся DNS всей сети и шлёт сюда только домены из списка;
+                            sing-box отвечает FakeIP. Перехвата :53 нет. Маршрут
+                            ${escapeHtml(o.fakeip_range || '198.18.0.0/15')} в TUN
+                            (${escapeHtml(extDef.tun_address || '172.19.0.1/30')}) настраивается вне панели.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sb-fi-engine" style="${engineOnly}">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                        <input type="checkbox" ${f.route_all ? 'checked' : ''}
+                               onchange="SingboxDashboardPage.setFakeip('route_all', this.checked)">
+                        Проксировать <strong>весь</strong> трафик (иначе — только выбранное ниже)
+                    </label>
+                </div>
 
                 <div>
                     <div style="font-size:12px; margin-bottom:3px;">Заворачивать списки доменов:</div>
                     <div>${hostlistChecks}</div>
+                    <div class="sb-fi-external text-muted" style="font-size:11px; margin-top:3px; ${externalOnly}">
+                        При внешнем DNS домены в конфиг не пишутся: по ним панель соберёт строку upstream для AdGuard.
+                    </div>
                 </div>
 
                 <label style="font-size:12px;">Доп. домены (по одному в строке)
@@ -840,24 +881,31 @@ const SingboxDashboardPage = (() => {
                               oninput="SingboxDashboardPage.setFakeip('domains', this.value)">${escapeHtml(f.domains)}</textarea>
                 </label>
 
-                <label style="font-size:12px;">Доп. подсети / IP (CIDR, по одному в строке)
-                    <textarea rows="2" placeholder="203.0.113.0/24" style="width:100%; font-size:12px;"
-                              oninput="SingboxDashboardPage.setFakeip('cidrs', this.value)">${escapeHtml(f.cidrs)}</textarea>
-                </label>
+                <div class="sb-fi-engine" style="${engineOnly}">
+                    <label style="font-size:12px;">Доп. подсети / IP (CIDR, по одному в строке)
+                        <textarea rows="2" placeholder="203.0.113.0/24" style="width:100%; font-size:12px;"
+                                  oninput="SingboxDashboardPage.setFakeip('cidrs', this.value)">${escapeHtml(f.cidrs)}</textarea>
+                    </label>
+                </div>
 
                 <label style="font-size:12px;">Прямой DNS (для остального трафика)
-                    <input type="text" value="${escapeAttr(f.direct_dns)}" style="width:220px;"
+                    <input type="text" id="sb-fi-direct-dns" value="${escapeAttr(f.direct_dns)}" style="width:240px;"
+                           placeholder="${escapeAttr(extDef.direct_dns || 'https://1.1.1.1/dns-query')}"
                            oninput="SingboxDashboardPage.setFakeip('direct_dns', this.value)">
-                    <span class="text-muted" style="font-size:11px;">local = системный резолвер; или IP, напр. 77.88.8.8</span>
+                    <span class="text-muted" style="font-size:11px;">
+                        local = системный резолвер; IP, IP:порт, udp://, tls:// или https://, напр.
+                        ${escapeHtml(extDef.direct_dns || 'https://1.1.1.1/dns-query')}
+                    </span>
                 </label>
 
-                <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
-                    <input type="checkbox" ${f.capture_dns ? 'checked' : ''}
-                           onchange="SingboxDashboardPage.setFakeip('capture_dns', this.checked)">
-                    Перехватывать DNS LAN-клиентов автоматически (нужно для FakeIP)
-                </label>
-
-                <div class="text-muted" style="font-size:11px;">${escapeHtml(autoNote)}</div>
+                <div class="sb-fi-engine" style="${engineOnly}">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                        <input type="checkbox" ${f.capture_dns ? 'checked' : ''}
+                               onchange="SingboxDashboardPage.setFakeip('capture_dns', this.checked)">
+                        Перехватывать DNS LAN-клиентов автоматически (нужно для FakeIP)
+                    </label>
+                    <div class="text-muted" style="font-size:11px; margin-top:10px;">${escapeHtml(autoNote)}</div>
+                </div>
 
                 <div>
                     <button class="btn btn-primary btn-sm" id="sb-fakeip-create"
@@ -865,7 +913,54 @@ const SingboxDashboardPage = (() => {
                         Создать конфиг
                     </button>
                 </div>
+
+                <div id="sb-fi-result"></div>
             </div>`;
+        renderFakeipResult();
+    }
+
+    // Подсказка после сборки external: какой upstream прописать в AdGuard.
+    // Автоматически это делает модуль маршрутов через AdGuard (B3), здесь —
+    // для ручной настройки.
+    function renderFakeipResult() {
+        const box = document.getElementById('sb-fi-result');
+        if (!box) return;
+        const r = fakeipResult;
+        if (!r || r.front_dns !== 'external') { box.innerHTML = ''; return; }
+        const line = r.adguard_upstream
+            || `[/домен/]${r.dns_listen || '127.0.0.1'}:${r.dns_port || 1053}`;
+        const warns = [].concat(r.warning ? [r.warning] : [], r.warnings || []);
+        box.innerHTML = `
+            <div style="padding:8px 10px; border-radius:6px; font-size:12px;
+                        background:rgba(60,140,220,.10); border:1px solid rgba(60,140,220,.35);">
+                Конфиг «${escapeHtml(r.name)}» создан. В AdGuard добавьте upstream
+                <code>[/домен/]${escapeHtml(r.dns_listen || '127.0.0.1')}:${escapeHtml(String(r.dns_port || 1053))}</code>
+                для доменов из списка:
+                <textarea readonly rows="${line.length > 120 ? 3 : 1}"
+                          style="width:100%; margin-top:6px; font-family:monospace; font-size:11px;"
+                          onclick="this.select()">${escapeHtml(line)}</textarea>
+                ${warns.map(w => `<div style="color:#fb8; margin-top:4px;">${escapeHtml(w)}</div>`).join('')}
+            </div>`;
+    }
+
+    function setFakeipFront(mode) {
+        const f = fakeipForm;
+        const def = (fakeipOpts && fakeipOpts.external_defaults) || {};
+        const extDns = def.direct_dns || 'https://1.1.1.1/dns-query';
+        f.front_dns = mode === 'external' ? 'external' : 'engine';
+        // Прямой DNS: у режимов разные дефолты (local петлит через AdGuard).
+        if (f.front_dns === 'external' && (!f.direct_dns.trim() || f.direct_dns.trim() === 'local')) {
+            f.direct_dns = extDns;
+        } else if (f.front_dns === 'engine' && f.direct_dns.trim() === extDns) {
+            f.direct_dns = 'local';
+        }
+        const input = document.getElementById('sb-fi-direct-dns');
+        if (input) input.value = f.direct_dns;
+        const body = document.getElementById('sb-fakeip-body');
+        if (!body) return;
+        const ext = f.front_dns === 'external';
+        body.querySelectorAll('.sb-fi-external').forEach(el => { el.style.display = ext ? '' : 'none'; });
+        body.querySelectorAll('.sb-fi-engine').forEach(el => { el.style.display = ext ? 'none' : ''; });
     }
 
     function setFakeip(key, val) {
@@ -894,13 +989,28 @@ const SingboxDashboardPage = (() => {
             domains: f.domains, cidrs: f.cidrs,
             direct_dns: f.direct_dns.trim() || 'local',
             stack: f.stack, capture_dns: f.capture_dns,
+            front_dns: f.front_dns,
         };
+        const ext = f.front_dns === 'external';
+        if (ext) {
+            const def = (fakeipOpts && fakeipOpts.external_defaults) || {};
+            payload.direct_dns = f.direct_dns.trim() || def.direct_dns || 'https://1.1.1.1/dns-query';
+            payload.dns_listen = f.dns_listen.trim() || def.dns_listen || '127.0.0.1';
+            payload.dns_port = parseInt(f.dns_port, 10) || def.dns_port || 1053;
+        }
         fakeipBusy = true;
         const btn = document.getElementById('sb-fakeip-create');
         if (btn) { btn.disabled = true; btn.textContent = 'Создаю…'; }
         try {
             const r = await API.post('/api/singbox/fakeip/build', payload);
-            if (r && r.ok) {
+            if (r && r.ok && r.front_dns === 'external') {
+                fakeipResult = r;
+                renderFakeipResult();
+                Toast.success(`Конфиг «${r.name}» создан (внешний DNS, ${r.dns_listen}:${r.dns_port}). Запустите его в списке выше.`);
+                await refresh();
+            } else if (r && r.ok) {
+                fakeipResult = null;
+                renderFakeipResult();
                 const mode = r.route_all ? 'весь трафик'
                     : `${r.domains} доменов${r.cidrs ? ', ' + r.cidrs + ' подсетей' : ''}`;
                 Toast.success(`Конфиг «${r.name}» создан (${mode}, DNS=${r.dns_format}). Запустите его в списке выше.`);
@@ -1096,7 +1206,7 @@ const SingboxDashboardPage = (() => {
         render, destroy, refresh,
         up, down, restart,
         toggleDebug, showLog, copyLog,
-        setFakeip, toggleFakeipHostlist, createFakeip,
+        setFakeip, setFakeipFront, toggleFakeipHostlist, createFakeip,
         setLite, createLiteRoute,
         setTp, applyTransparent, removeTransparent, injectInbounds,
         setTun, createTunInbound,
