@@ -249,7 +249,8 @@ def job_wait(args: dict) -> dict:
          "инструментом (*_result / *_results)" if done else
          "бюджет ожидания (%d с) вышел, операция ЕЩЁ ИДЁТ: позовите "
          "job_wait ещё раз — это дешевле, чем опрашивать статус в "
-         "цикле" % budget)) if x)
+         "цикле. Нужен живой прогресс, а не конец — подпишитесь на "
+         "zapret://state/jobs (resources/subscribe)" % budget)) if x)
     return result
 
 

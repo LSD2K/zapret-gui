@@ -371,6 +371,53 @@ def register(app):
         validation = get_nfqws_manager().dry_run(args)
         return {"ok": True, "validation": validation}
 
+    @app.post("/api/strategies/<sid>/export-catalog")
+    def api_strategies_export_catalog(sid):
+        """Собрать из стратегии секцию каталога `catalogs/*.txt`.
+
+        Ничего не пишет: `catalogs/` перезаписывает установщик GUI, и
+        локальная правка там потерялась бы при первом же обновлении.
+        Отдаём текст — человек кладёт его в git и шлёт pull request.
+
+        Body (всё опционально): `section_id`, `author`, `label`,
+        `description`, `protocol`.
+        """
+        response.content_type = "application/json; charset=utf-8"
+
+        from core import catalog_export
+        from core.strategy_builder import get_strategy_manager
+
+        body = {}
+        try:
+            body = request.json or {}
+        except Exception:
+            body = {}
+
+        sm = get_strategy_manager()
+        strategy = sm.get_strategy(sid)
+        if not strategy:
+            response.status = 404
+            return {"ok": False, "error": "Стратегия не найдена: %s" % sid}
+
+        args = sm.build_nfqws_args(strategy)
+        if not args:
+            response.status = 400
+            return {"ok": False,
+                    "error": "Нет включённых профилей в стратегии"}
+        try:
+            return catalog_export.export(
+                args,
+                section_id=body.get("section_id", ""),
+                name=body.get("name") or strategy.get("name") or sid,
+                author=body.get("author", ""),
+                label=body.get("label", ""),
+                description=body.get("description")
+                or strategy.get("description", ""),
+                protocol=body.get("protocol", ""))
+        except catalog_export.ExportError as e:
+            response.status = 400
+            return {"ok": False, "error": str(e)}
+
     # ═══════════════════ Autocircular state (state.tsv) ═══════════════════
 
     @app.route("/api/strategies/state")

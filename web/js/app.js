@@ -50,6 +50,7 @@ const App = (() => {
         lists:       ListsPage,
         routing:     RoutingUnifiedPage,
         mcp:         McpPage,
+        agent:       AgentPage,
         settings:    SettingsPage,
     };
 

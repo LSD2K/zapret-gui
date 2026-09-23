@@ -39,6 +39,7 @@ from core.mcp import prompts
 from core.mcp import registry
 from core.mcp import resources
 from core.mcp import schema as schema_mod
+from core.mcp import session as mcp_session
 from core.version import GUI_VERSION
 
 
@@ -215,7 +216,12 @@ def _m_initialize(params, ctx):
         "protocolVersion": negotiated,
         "capabilities": {
             "tools": {"listChanged": True},
-            "resources": {"listChanged": True, "subscribe": False},
+            # Подписка обещается только там, где есть чем доставить
+            # уведомление (S18): на stateless-HTTP канала «сервер →
+            # клиент» нет по построению, и объявить её там значило бы
+            # пообещать то, чего мы не сделаем.
+            "resources": {"listChanged": True,
+                          "subscribe": _can_notify(ctx)},
             "prompts": {"listChanged": False},
             "logging": {},
         },
@@ -224,7 +230,8 @@ def _m_initialize(params, ctx):
             "title": "Zapret GUI",
             "version": GUI_VERSION,
         },
-        "instructions": _instructions(granted, tools_count),
+        "instructions": _instructions(granted, tools_count,
+                                      _can_notify(ctx)),
         # Разрешения — машиночитаемо, чтобы клиент мог их показать, и
         # текстом в instructions, чтобы их увидела сама модель.
         "_meta": {
@@ -237,7 +244,7 @@ def _m_initialize(params, ctx):
     }
 
 
-def _instructions(granted, tools_count) -> str:
+def _instructions(granted, tools_count, can_subscribe=False) -> str:
     """Врезка для модели: что за сервер и что ей здесь можно.
 
     Разрешения сообщаем сразу, чтобы модель говорила «вот что я бы
@@ -283,6 +290,18 @@ def _instructions(granted, tools_count) -> str:
             "previous files. / Разрыв соединения после code_apply — "
             "норма: подождите, проверьте system_status и подтвердите "
             "code_commit.")
+    if can_subscribe:
+        # Подписка обещается только там, где её можно исполнить, и
+        # сказать о ней надо словами: клиент видит capability, а модель
+        # читает инструкции — без этой строки она продолжит опрашивать
+        # статус вручную, ради чего всё и затевалось.
+        lines.append(
+            "Long operations: subscribe to zapret://state/jobs "
+            "(resources/subscribe) instead of polling *_status — the "
+            "server pushes notifications/resources/updated when the "
+            "numbers change. To wait for the END of one operation, one "
+            "job_wait(kind=…) is still cheaper. / Подпишитесь на "
+            "zapret://state/jobs вместо опроса.")
     lines += [
         "",
         # Без справочника модель сочиняет флаги: неизвестную опцию nfqws2
@@ -389,6 +408,75 @@ def _m_resources_read(params, ctx):
                             {"uri": uri, "available": resources.uris()})
 
 
+def _m_resources_subscribe(params, ctx):
+    """Подписать клиента на изменения ресурса (S18).
+
+    Подписка — это перенос опроса с модели на сервер, и жива она ровно
+    столько, сколько открыт поток, через который придёт уведомление.
+    Поэтому на транспорте без канала отказ честный и с адресом: тихое
+    «принято» обернулось бы клиентом, который ждёт уведомлений и не
+    дождётся ни одного.
+    """
+    uri = _uri_param(params)
+    session = _session_of(ctx)
+    if session is None:
+        raise _JsonRpcError(
+            INVALID_REQUEST,
+            "подписка на ресурсы работает только на транспорте с каналом "
+            "уведомлений: откройте GET /api/mcp/sse (включается "
+            "mcp.transports.sse) и шлите запросы на его адрес. На "
+            "stateless-HTTP уведомление доставить некуда",
+            {"uri": uri, "transport": ctx.get("transport", "http"),
+             "endpoint": "/api/mcp/sse"})
+    if not resources.exists(uri):
+        raise _JsonRpcError(RESOURCE_NOT_FOUND,
+                            "ресурс %s не найден; доступны: %s"
+                            % (uri, ", ".join(resources.uris())),
+                            {"uri": uri, "available": resources.uris()})
+    try:
+        info = mcp_session.subscribe(session, uri)
+    except mcp_session.TooManySubscriptions as e:
+        limit = e.args[0] if e.args else mcp_session.MAX_SUBSCRIPTIONS
+        raise _JsonRpcError(
+            INVALID_REQUEST,
+            "подписок уже %s — больше одна сессия не держит; отпишитесь "
+            "от ненужного (resources/unsubscribe)" % limit,
+            {"uri": uri, "max_subscriptions": limit,
+             "subscribed": session.subscriptions()})
+    # Результат по спеке пустой; своё кладём в _meta — клиенту оно не
+    # мешает, а человеку в логе видно, с каким периодом сервер смотрит.
+    return {"_meta": {"zapret-gui": info}}
+
+
+def _m_resources_unsubscribe(params, ctx):
+    """Отписаться. Отписка от того, чего не было, — не ошибка."""
+    uri = _uri_param(params)
+    session = _session_of(ctx)
+    removed = bool(session and session.unsubscribe(uri))
+    return {"_meta": {"zapret-gui": {"uri": uri, "removed": removed}}}
+
+
+def _uri_param(params) -> str:
+    uri = params.get("uri")
+    if not isinstance(uri, str) or not uri.strip():
+        raise _JsonRpcError(INVALID_PARAMS,
+                            "поле 'uri': нужен адрес ресурса (%s)"
+                            % ", ".join(resources.uris()[:3]),
+                            {"field": "uri"})
+    return uri.strip()
+
+
+def _session_of(ctx):
+    """Сессия потока, если вызов пришёл по транспорту с каналом."""
+    session = ctx.get("session") if isinstance(ctx, dict) else None
+    return session if hasattr(session, "subscribe") else None
+
+
+def _can_notify(ctx) -> bool:
+    """Есть ли куда слать уведомления этому клиенту."""
+    return _session_of(ctx) is not None
+
+
 def _m_prompts_list(params, ctx):
     return {"prompts": prompts.list_prompts()}
 
@@ -468,6 +556,8 @@ _METHODS = {
     "resources/list": _m_resources_list,
     "resources/templates/list": _m_resource_templates_list,
     "resources/read": _m_resources_read,
+    "resources/subscribe": _m_resources_subscribe,
+    "resources/unsubscribe": _m_resources_unsubscribe,
     "prompts/list": _m_prompts_list,
     "prompts/get": _m_prompts_get,
     "completion/complete": _m_completion_complete,

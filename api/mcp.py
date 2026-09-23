@@ -36,6 +36,7 @@ After), но не трогает ни страницу MCP (``/api/mcp/ui/*`` �
 
 import json
 import queue
+import time
 import uuid
 
 from bottle import request, response
@@ -255,6 +256,10 @@ def register(app):
             "remote_addr": request.environ.get("REMOTE_ADDR", ""),
             "protocol_version": version or server.PROTOCOL_VERSION,
             "transport": "sse",
+            # Сам объект сессии, а не только её id: подписка на ресурсы
+            # (S18) живёт в очереди этого потока, и диспетчеру нужен
+            # именно он — id пришлось бы искать обратно по реестру.
+            "session": sess,
         })
         return _deliver(sess, answer)
 
@@ -336,6 +341,10 @@ def info_payload() -> dict:
             "max_sessions": mcp_session.max_sessions(),
             "keepalive_sec": mcp_session.KEEPALIVE_SEC,
             "idle_timeout_sec": mcp_session.IDLE_TIMEOUT_SEC,
+            # Подписка на ресурсы (S18) существует только здесь: у
+            # stateless-HTTP канала для уведомлений нет.
+            "subscribe": True,
+            "max_subscriptions": mcp_session.MAX_SUBSCRIPTIONS,
         },
     }
 
@@ -355,16 +364,26 @@ def _sse_stream(sess):
         # смысл первой половины схемы: клиент узнаёт его отсюда.
         yield _sse_event("%s?session=%s" % (MESSAGES_PATH, sess.id),
                          event="endpoint", raw=True)
+        last_ping = time.time()
         while True:
             sess.touch()
             # Смена разрешений = смена набора инструментов. Опрос на
             # круге keep-alive ловит и config_set, и правку в UI, и
             # ручную правку settings.json.
             mcp_session.poll_permissions()
+            # Подписки на ресурсы (S18): сверяем отпечатки тех, чей
+            # период истёк, и шлём notifications/resources/updated.
+            mcp_session.poll_resources()
             try:
-                message = sess.get(timeout=mcp_session.KEEPALIVE_SEC)
+                message = sess.get(
+                    timeout=mcp_session.stream_wait(sess))
             except queue.Empty:
-                yield ": keep-alive\n\n"
+                # С подпиской круг учащается, а пинг — нет: он нужен
+                # прокси по дороге, а не клиенту.
+                now = time.time()
+                if now - last_ping >= mcp_session.KEEPALIVE_SEC:
+                    last_ping = now
+                    yield ": keep-alive\n\n"
                 continue
             sess.sent += 1
             yield _sse_event(message, event="message")

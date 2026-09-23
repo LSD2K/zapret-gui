@@ -43,6 +43,29 @@
 ``settings.json`` — крючок пришлось бы вешать в каждую из этих точек,
 а опрос на круге keep-alive ловит их все и стоит одного чтения конфига
 раз в 15 секунд.
+
+## Подписка на ресурсы (S18)
+
+Та же машинка, но про содержимое: клиент говорит
+``resources/subscribe(uri)``, сервер запоминает **отпечаток** ресурса и
+на каждом круге потока сверяет его заново (:func:`poll_resources`).
+Разошёлся — уходит ``notifications/resources/updated``.
+
+Зачем это нужно, видно на ``zapret://state/jobs``: ``job_wait`` умеет
+дождаться КОНЦА операции, а живого «проверено 12 из 40» не даёт по
+построению, и модель возвращается к опросу. Подписка переносит опрос на
+сервер: там он стоит чтения полей в памяти процесса, а не вызова
+инструмента с рейт-лимитом, журналом и контекстом.
+
+Три ограничения, без которых это стало бы утечкой на роутере со 128 МБ:
+
+* **опрашиваем не чаще, чем стоит ресурс** — период задаёт сам ресурс
+  (``resources.poll_sec``): две секунды для полей в памяти, две минуты
+  для справочника на 90 КБ;
+* **не больше** :data:`MAX_SUBSCRIPTIONS` подписок на сессию;
+* подписки живут **вместе с потоком**: закрылся — забыты. Хранить их
+  дольше негде и незачем, стейт сессии и так существует только ради
+  доставки.
 """
 
 import copy
@@ -67,6 +90,12 @@ QUEUE_MAXSIZE = 100
 # Сколько сессий держим, если в настройках ничего не сказано.
 DEFAULT_MAX_SESSIONS = 4
 
+# Сколько ресурсов разрешаем держать под подпиской одной сессии.
+# Подписка — это работа сервера на каждом круге потока; клиент,
+# подписавшийся на два десятка справочников, оплачивает её чужой
+# памятью.
+MAX_SUBSCRIPTIONS = 8
+
 # Уведомление о смене набора инструментов (спека MCP).
 TOOLS_CHANGED = {"jsonrpc": "2.0",
                  "method": "notifications/tools/list_changed"}
@@ -76,11 +105,15 @@ class TooManySessions(RuntimeError):
     """Открытых потоков уже ``mcp.limits.max_sessions``."""
 
 
+class TooManySubscriptions(RuntimeError):
+    """Подписок у сессии уже ``MAX_SUBSCRIPTIONS``."""
+
+
 class Session:
     """Один открытый SSE-поток: очередь ответов и отметка живости."""
 
     __slots__ = ("id", "created", "last_tick", "subject", "remote_addr",
-                 "sent", "closed", "_queue")
+                 "sent", "closed", "_queue", "_subs", "_subs_lock")
 
     def __init__(self, session_id: str, subject: str = "",
                  remote_addr: str = ""):
@@ -92,6 +125,13 @@ class Session:
         self.sent = 0
         self.closed = False
         self._queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
+        # uri → {digest, interval, checked}. Правится из потока
+        # генератора (опрос) и из потока POST-запроса (подписка) —
+        # поэтому под своим замком, а не под общим ``_lock`` модуля:
+        # опрос ресурса идёт секунды, и держать на нём весь реестр
+        # сессий нельзя.
+        self._subs = {}
+        self._subs_lock = threading.Lock()
 
     # ─── поток ───
 
@@ -127,6 +167,60 @@ class Session:
     def idle_sec(self) -> float:
         return max(0.0, time.time() - self.last_tick)
 
+    # ─── подписки (S18) ───
+
+    def subscribe(self, uri: str, digest: str, interval: float) -> bool:
+        """Запомнить подписку и её отпечаток. ``False`` — уже была.
+
+        Отпечаток берётся СЕЙЧАС и снаружи (звать рендер под замком
+        незачем): без него первый же опрос счёл бы «ничего → что-то»
+        изменением и прислал бы уведомление на пустом месте.
+        """
+        with self._subs_lock:
+            known = uri in self._subs
+            if not known and len(self._subs) >= MAX_SUBSCRIPTIONS:
+                raise TooManySubscriptions(MAX_SUBSCRIPTIONS)
+            self._subs[uri] = {"digest": digest,
+                               "interval": max(1.0, float(interval)),
+                               "checked": time.time()}
+        return not known
+
+    def unsubscribe(self, uri: str) -> bool:
+        with self._subs_lock:
+            return self._subs.pop(uri, None) is not None
+
+    def subscriptions(self) -> list:
+        with self._subs_lock:
+            return sorted(self._subs)
+
+    def due(self, now: float = 0.0) -> list:
+        """URI, которые пора проверить (период истёк)."""
+        now = now or time.time()
+        with self._subs_lock:
+            return [uri for uri, entry in self._subs.items()
+                    if now - entry["checked"] >= entry["interval"]]
+
+    def mark(self, uri: str, digest: str, now: float = 0.0) -> bool:
+        """Запомнить новый отпечаток; ``True`` — он изменился."""
+        now = now or time.time()
+        with self._subs_lock:
+            entry = self._subs.get(uri)
+            if entry is None:
+                return False            # отписались, пока мы считали
+            changed = entry["digest"] != digest
+            entry["digest"] = digest
+            entry["checked"] = now
+        return changed
+
+    def next_check_sec(self, now: float = 0.0) -> float:
+        """Через сколько секунд ближайшая проверка (``0`` — подписок нет)."""
+        now = now or time.time()
+        with self._subs_lock:
+            if not self._subs:
+                return 0.0
+            return max(0.0, min(entry["checked"] + entry["interval"] - now
+                                for entry in self._subs.values()))
+
     def to_dict(self) -> dict:
         """Вид сессии для ``/api/mcp/info`` — без содержимого сообщений."""
         return {
@@ -138,6 +232,7 @@ class Session:
             "remote_addr": self.remote_addr,
             "pending": self.pending(),
             "sent": self.sent,
+            "subscriptions": self.subscriptions(),
         }
 
 
@@ -304,3 +399,78 @@ def _read_permissions():
         return auth.permissions()
     except Exception:                           # noqa: BLE001 — граница
         return None
+
+
+# ─────────────────────── подписка на ресурсы ────────────────────────
+
+def resource_updated(uri: str) -> dict:
+    """Уведомление спеки MCP: содержимое ресурса изменилось."""
+    return {"jsonrpc": "2.0", "method": "notifications/resources/updated",
+            "params": {"uri": uri}}
+
+
+def subscribe(session, uri: str) -> dict:
+    """Подписать сессию на ресурс, запомнив его текущий отпечаток.
+
+    Возвращает то, что увидит вызывающий метод протокола: подписка —
+    операция без результата, но факт «уже была» и период опроса стоят
+    того, чтобы их показать.
+    """
+    from core.mcp import resources
+
+    interval = resources.poll_sec(uri)
+    try:
+        digest = resources.digest(uri)
+    except Exception:                           # noqa: BLE001 — граница
+        # Ресурс сейчас не читается (нет бинарника, нет файла). Это не
+        # повод отказать: он может появиться — подпишемся на пустой
+        # отпечаток, и первое же удачное чтение станет изменением.
+        digest = ""
+    added = session.subscribe(uri, digest, interval)
+    return {"uri": uri, "added": added, "poll_sec": interval,
+            "subscriptions": len(session.subscriptions())}
+
+
+def poll_resources(now: float = 0.0) -> int:
+    """Сверить подписки всех сессий и разослать, что изменилось.
+
+    Зовётся с круга потока (``api/mcp.py``). Возвращает, сколько
+    уведомлений ушло.
+    """
+    from core.mcp import resources
+
+    now = now or time.time()
+    with _lock:
+        targets = list(_sessions.values())
+
+    # Отпечаток считается ОДИН раз на URI, даже если на него подписаны
+    # три сессии: рендер ресурса — самая дорогая часть круга.
+    cache = {}
+    sent = 0
+    for session in targets:
+        for uri in session.due(now):
+            if uri not in cache:
+                try:
+                    cache[uri] = resources.digest(uri)
+                except Exception:               # noqa: BLE001 — граница
+                    cache[uri] = ""
+            if session.mark(uri, cache[uri], now) and session.put(
+                    resource_updated(uri)):
+                sent += 1
+    return sent
+
+
+def stream_wait(session) -> float:
+    """Сколько поток может ждать сообщения, не проспав проверку подписки.
+
+    Без подписок это ``KEEPALIVE_SEC`` — как было. С подпиской круг
+    учащается ровно настолько, насколько просит самый частый из
+    подписанных ресурсов, и ни на такт больше.
+    """
+    wait = float(KEEPALIVE_SEC)
+    nearest = session.next_check_sec()
+    if nearest:
+        wait = min(wait, max(0.05, nearest))
+    elif session.subscriptions():
+        wait = min(wait, 0.05)
+    return wait

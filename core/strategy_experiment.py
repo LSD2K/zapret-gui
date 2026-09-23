@@ -235,6 +235,40 @@ HINT_RULES = (
                  "что работало — сравните его args с вариантом-соседом"),
         "ref": "скил nfqws2-strategies, раздел про инварианты фильтров",
     },
+    # ── дополнено S18: подсказки по дампу (`capture=true`) ──
+    #
+    # Ровно ради них снифер и позвали внутрь эксперимента: «вариант B
+    # хуже» — это цифра, а «у варианта B fake ушёл с TTL 1» — это
+    # следующий шаг.
+    {
+        "id": "capture_empty",
+        "when": "metric",
+        "rule": "capture_empty",
+        "hint": ("дамп снят, но в нём НИ ОДНОГО пакета: трафик пробы не "
+                 "прошёл через интерфейс, на котором мы слушали — "
+                 "проверьте capture.iface (по умолчанию это интерфейс "
+                 "default route) и capture.filter"),
+        "ref": "скил mcp, раздел про traffic_capture_*",
+    },
+    {
+        "id": "capture_ttl_too_low",
+        "when": "metric",
+        "rule": "capture_ttl_too_low",
+        "hint": ("в дампе есть пакеты с TTL ≤ 2: поддельный пакет "
+                 "умирает на первом же хопе и до DPI не доезжает — "
+                 "поднимите ttl/autottl в параметрах fake"),
+        "ref": "скил nfqws2-strategies, раздел про fake и TTL",
+    },
+    {
+        "id": "capture_sni_in_clear",
+        "when": "metric",
+        "rule": "capture_sni_in_clear",
+        "hint": ("в дампе SNI виден целиком, и цель не открылась: "
+                 "ClientHello ушёл неразрезанным — приём десинка не "
+                 "применился к этому соединению (проверьте --filter-* и "
+                 "тип пейлоада)"),
+        "ref": "скил nfqws2-strategies, раздел про multisplit/multidisorder",
+    },
 )
 
 
@@ -258,11 +292,39 @@ def _metric_worse_than_baseline(m: dict) -> bool:
     return bool(m.get("broken_count"))
 
 
+def _metric_capture_empty(m: dict) -> bool:
+    capture = m.get("capture") or {}
+    return bool(capture.get("measured")) and not capture.get("packets")
+
+
+def _metric_capture_ttl_too_low(m: dict) -> bool:
+    """Fake ушёл с TTL, которого не хватит и на первый хоп.
+
+    Смысл десинка в том, чтобы поддельный пакет умер ПОСЛЕ DPI и ДО
+    сервера. TTL 1–2 означает, что он умирает на домашнем роутере или
+    первом хопе провайдера: DPI его не увидит, и стратегия работает
+    вхолостую — при том что в логе движка всё чисто.
+    """
+    capture = m.get("capture") or {}
+    ttls = [int(value) for value in (capture.get("ttl") or {})
+            if str(value).isdigit()]
+    return len(ttls) > 1 and min(ttls) <= 2
+
+
+def _metric_capture_sni_in_clear(m: dict) -> bool:
+    """Имя ушло открытым текстом, а цель так и не открылась."""
+    capture = m.get("capture") or {}
+    return bool(capture.get("sni")) and not m.get("ok_count")
+
+
 _METRIC_RULES = {
     "zero_success_valid_dry_run": _metric_zero_success_valid_dry_run,
     "engine_did_not_start": _metric_engine_did_not_start,
     "dry_run_failed": _metric_dry_run_failed,
     "worse_than_baseline": _metric_worse_than_baseline,
+    "capture_empty": _metric_capture_empty,
+    "capture_ttl_too_low": _metric_capture_ttl_too_low,
+    "capture_sni_in_clear": _metric_capture_sni_in_clear,
 }
 
 
@@ -358,7 +420,7 @@ class ExperimentRunner:
 
     def start(self, variants, targets=None, probes=None, repeats=None,
               baseline: bool = True, ttl_sec=None, keep_best=None,
-              source: str = SOURCE) -> dict:
+              capture=None, capture_port=None, source: str = SOURCE) -> dict:
         """Запустить эксперимент; ответ — ``run_id``, сразу.
 
         Прогон идёт минутами, а клиент рвёт HTTP-запрос через десятки
@@ -402,6 +464,10 @@ class ExperimentRunner:
         ttl = _bounded(ttl_sec, cfg["default_ttl_sec"], 30, 3600)
         keep = (cfg["keep_best_default"] if keep_best is None
                 else bool(keep_best))
+        # Снифер по окну каждого варианта (S18). Выключен по умолчанию:
+        # это лишний процесс на каждый замер и заметный провайдеру след,
+        # и просить его надо осознанно.
+        sniff = _capture_plan(bool(capture), capture_port)
 
         run_id = "exp-%s" % time.strftime("%Y%m%d-%H%M%S")
         plan = {
@@ -417,6 +483,7 @@ class ExperimentRunner:
             "ttl_sec": ttl,
             "keep_best": keep,
             "stabilize_sec": cfg["stabilize_sec"],
+            "capture": sniff,
             "source": source,
         }
 
@@ -461,6 +528,7 @@ class ExperimentRunner:
             "keep_best": keep,
             "rejected": rejected + dropped,
             "probes_unsupported": unsupported,
+            "capture": dict(sniff),
             "async": True,
         }
 
@@ -683,6 +751,11 @@ class ExperimentRunner:
                 self._run_variant(plan, variant, open_targets))
 
         self._rank(report)
+        # Память подбора (S18): отчёт живёт в памяти процесса и умрёт с
+        # ним, а «что сработало на этом домене» должно пережить
+        # перезапуск — иначе следующая модель гоняет те же варианты по
+        # второму кругу.
+        _memory_write(report)
         self._await_decision(plan, session, snapshot)
 
     def _run_variant(self, plan: dict, variant: dict,
@@ -734,6 +807,10 @@ class ExperimentRunner:
         out["success_rate"] = measured["success_rate"]
         out["avg_latency_ms"] = measured["avg_latency_ms"]
         out["avg_kbps"] = measured["avg_kbps"]
+        if measured.get("capture"):
+            # Снятое по окну ИМЕННО этого варианта: что ушло в сеть
+            # после движка, а не что собирались отправить.
+            out["capture"] = measured["capture"]
 
         # Хвост лога режем ПО ОКНУ ВАРИАНТА: иначе в отчёт уезжает лог
         # предыдущего варианта, и модель чинит не то, что сломано.
@@ -755,25 +832,45 @@ class ExperimentRunner:
         return out
 
     def _measure(self, plan: dict, note: str = "") -> dict:
-        """Пробы по всем целям одним проходом, медиана по повторам."""
+        """Пробы по всем целям одним проходом, медиана по повторам.
+
+        Снифер (S18) включается ровно на это окно: он должен видеть
+        пакеты ЭТОГО варианта и ничьи больше. Дамп идёт параллельно
+        пробам и глушится сразу после них — иначе в отчёт уехали бы
+        пакеты следующего варианта, и вывод «у B фейк с TTL 1» оказался
+        бы про C.
+        """
         from core import probe_runner
 
-        timeout = probe_runner.limits()["timeout_sec"]
-        rows, latencies, kbps_all, ok_count = [], [], [], 0
-        for target in plan["targets"]:
-            if self._stop_flag.is_set():
-                break
-            row = probe_runner.probe_target(
-                target, timeout=timeout, repeats=plan["repeats"],
-                latency=probe_runner.MEDIAN)
-            row["kbps"] = _kbps(row)
-            rows.append(_compact_probe(row))
-            if row.get("ok"):
-                ok_count += 1
-                latencies.append(float(row.get("latency_ms") or 0.0))
-                kbps_all.append(row["kbps"])
+        capture = _capture_begin(plan)
+        try:
+            timeout = probe_runner.limits()["timeout_sec"]
+            rows, latencies, kbps_all, ok_count = [], [], [], 0
+            for target in plan["targets"]:
+                if self._stop_flag.is_set():
+                    break
+                row = probe_runner.probe_target(
+                    target, timeout=timeout, repeats=plan["repeats"],
+                    latency=probe_runner.MEDIAN)
+                row["kbps"] = _kbps(row)
+                rows.append(_compact_probe(row))
+                if row.get("ok"):
+                    ok_count += 1
+                    latencies.append(float(row.get("latency_ms") or 0.0))
+                    kbps_all.append(row["kbps"])
+        finally:
+            # Снифер не имеет права испортить замер — в том числе своим
+            # падением: исключение из `finally` заменило бы собой
+            # настоящую ошибку прогона, и в отчёте оказалось бы не то.
+            try:
+                sniffed = _capture_end(capture)
+            except Exception as e:              # noqa: BLE001 — граница
+                log.debug("Разбор дампа не удался: %s: %s"
+                          % (type(e).__name__, e), source=SOURCE)
+                sniffed = {"measured": False,
+                           "error": "%s: %s" % (type(e).__name__, e)}
         total = len(rows) or 1
-        return {
+        out = {
             "measured": bool(rows),
             "note": note,
             "per_target": rows,
@@ -784,6 +881,9 @@ class ExperimentRunner:
             "avg_kbps": round(sum(kbps_all) / len(kbps_all), 1)
                         if kbps_all else 0.0,
         }
+        if sniffed:
+            out["capture"] = sniffed
+        return out
 
     def _delta(self, rows, open_targets) -> dict:
         """Что вариант починил, что сломал, а что не изменил.
@@ -966,6 +1066,10 @@ class ExperimentRunner:
             self._committed = True
         report["committed"] = True
         report["commit"] = out
+        # Память подбора (S18): «померили» и «оставили работать» — разное
+        # знание, и следующая модель должна их различать.
+        if variant:
+            _memory_commit(variant.get("args") or [], plan.get("targets"))
         log.success("Эксперимент %s: вариант %s подтверждён"
                     % (plan["run_id"], label), source=SOURCE)
         return out
@@ -1336,6 +1440,151 @@ def _validate(argv) -> dict:
     }
 
 
+# ──────────────────── память подбора (S18) ──────────────────────────
+#
+# Запись в память никогда не должна ронять прогон: она полезна, но
+# эксперимент ценен и без неё. Отсюда одинаковая обёртка на оба вызова.
+
+def _memory_write(report: dict) -> None:
+    """Сложить вклад вариантов в ``core/strategy_memory``."""
+    try:
+        from core import strategy_memory
+        written = strategy_memory.remember_report(report)
+    except Exception as e:                      # noqa: BLE001 — граница
+        log.debug("Память подбора не записана: %s: %s"
+                  % (type(e).__name__, e), source=SOURCE)
+        return
+    if written.get("written"):
+        report["memory"] = {"written": written["written"],
+                            "records": written.get("records", 0),
+                            "network": written.get("network", "")}
+
+
+def _memory_commit(args, targets) -> None:
+    """Отметить в памяти, что вариант оставили работать."""
+    try:
+        from core import strategy_memory
+        strategy_memory.mark_committed(args, targets)
+    except Exception as e:                      # noqa: BLE001 — граница
+        log.debug("Память подбора не отмечена: %s: %s"
+                  % (type(e).__name__, e), source=SOURCE)
+
+
+# ─────────────────── снифер по окну варианта (S18) ──────────────────
+#
+# Зачем он здесь, если есть отдельные `traffic_capture_*`. Отдельным
+# инструментом дамп снимается «когда-нибудь»: модель должна догадаться
+# запустить его, успеть выпустить трафик и связать увиденное с
+# вариантом. Здесь окно совпадает с замером по построению — и «вариант
+# B хуже» превращается в «у варианта B fake ушёл с TTL 1 и не дожил до
+# первого хопа».
+#
+# Рамки те же, что у инструмента (`core/traffic_capture.py`): argv
+# фиксирован, потолки из `mcp.capture`, файл удаляется после разбора.
+# Плюс два своих правила:
+#
+# * **по умолчанию выключено.** Это лишний процесс на каждый замер и
+#   заметный провайдеру след; просить его надо осознанно;
+# * **дамп не ломает прогон.** Нет tcpdump, занят другой дамп, не
+#   разобрался файл — в отчёт уезжает строчка «почему», а замер идёт
+#   как шёл. Эксперимент меряет стратегию, а не снифер.
+
+# По какому порту снимаем, если не сказано иное. 443 — там, где
+# происходит десинк TLS и куда смотрит проба.
+CAPTURE_PORT_DEFAULT = 443
+
+# Сколько ждём разбора дампа после остановки (сек). Разбор идёт в
+# фоновом потоке снифера; не дождавшись, мы отдали бы пустую сводку.
+CAPTURE_PARSE_WAIT_SEC = 6
+
+
+def _capture_plan(wanted: bool, port) -> dict:
+    """Что делать со снифером в этом прогоне (часть плана)."""
+    out = {"wanted": bool(wanted),
+           "port": _bounded(port, CAPTURE_PORT_DEFAULT, 1, 65535)}
+    if not wanted:
+        return out
+    from core import traffic_capture
+
+    info = traffic_capture.available()
+    out["available"] = bool(info.get("available"))
+    if not out["available"]:
+        # Отказываться от прогона незачем: без дампа эксперимент
+        # остаётся ровно тем же экспериментом, просто без картинки.
+        out["reason"] = info.get("reason", "")
+        out["hint"] = info.get("hint", "")
+    return out
+
+
+def _capture_begin(plan: dict):
+    """Запустить дамп на окно замера. Вернуть ярлык прогона или ``None``."""
+    sniff = plan.get("capture") or {}
+    if not sniff.get("wanted") or not sniff.get("available"):
+        return None
+    from core import traffic_capture
+
+    try:
+        state = traffic_capture.start(port=sniff.get("port"), proto="tcp")
+    except traffic_capture.CaptureError as e:
+        log.debug("Снифер эксперимента не стартовал: %s" % e, source=SOURCE)
+        return {"error": str(e)}
+    except Exception as e:                      # noqa: BLE001 — граница
+        log.debug("Снифер эксперимента упал: %s: %s"
+                  % (type(e).__name__, e), source=SOURCE)
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+    return {"run_id": state.get("run_id", ""),
+            "params": dict(state.get("params") or {})}
+
+
+def _capture_end(handle) -> dict:
+    """Остановить дамп и свернуть его в сводку для отчёта."""
+    if not handle:
+        return {}
+    if handle.get("error"):
+        return {"measured": False, "error": handle["error"]}
+    from core import traffic_capture
+
+    run = traffic_capture.get(handle.get("run_id", ""))
+    # Глушим только СВОЙ прогон: наш мог кончиться сам (упёрся в
+    # потолок пакетов), и к этому времени снифер мог запустить кто-то
+    # ещё — `stop()` прибивает последний, а не наш.
+    if run is not None and run.running:
+        try:
+            traffic_capture.stop()
+        except traffic_capture.CaptureError:
+            pass                                # уже кончился сам
+        except Exception as e:                  # noqa: BLE001 — граница
+            log.debug("Снифер не остановился: %s: %s"
+                      % (type(e).__name__, e), source=SOURCE)
+
+    if run is None:
+        return {"measured": False,
+                "error": "прогон снифера потерян (перезапуск GUI?)"}
+    deadline = time.time() + CAPTURE_PARSE_WAIT_SEC
+    while run.running and time.time() < deadline:
+        time.sleep(0.2)
+
+    summary = traffic_capture.summary(run)
+    out = {
+        "measured": not run.running,
+        "run_id": run.id,
+        "iface": (run.params or {}).get("iface", ""),
+        "filter": (run.params or {}).get("filter", ""),
+        "packets": summary.get("packets", 0),
+        "ttl": dict(summary.get("ttl") or {}),
+        "flags": dict(summary.get("flags") or {}),
+        "protocols": dict(summary.get("protocols") or {}),
+        "sni": list(summary.get("sni") or [])[:5],
+        "hosts": list(summary.get("hosts") or [])[:5],
+    }
+    if run.error:
+        out["error"] = run.error
+    if run.running:
+        out["error"] = out.get("error") or ("дамп не успел разобраться за "
+                                            "%d с" % CAPTURE_PARSE_WAIT_SEC)
+    return out
+
+
 def _log_window(start: float, end: float) -> list:
     """Хвост лога движка ровно за окно варианта."""
     try:
@@ -1397,6 +1646,9 @@ def _metrics(variant: dict, fixed: int, broken: int) -> dict:
         "target_count": len(rows),
         "fixed_count": fixed,
         "broken_count": broken,
+        # Сводка дампа, если снифер просили (S18): без неё три правила
+        # про TTL, SNI и пустой дамп просто не срабатывают.
+        "capture": variant.get("capture") or {},
     }
 
 

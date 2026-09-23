@@ -596,6 +596,246 @@ class TestTools(ExperimentCase):
         self.assertIn("reason", result)
 
 
+class TestMemoryAfterTheRun(ExperimentCase):
+    """Память подбора (S18): находка переживает перезапуск GUI.
+
+    Отчёт эксперимента живёт в памяти процесса и умирает вместе с ним —
+    поэтому «что открыло этот домен» обязано лечь в файл само, без
+    отдельной просьбы. Иначе следующая модель гоняет те же варианты по
+    второму кругу.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from core import strategy_memory
+
+        self.memory = strategy_memory
+        saved = strategy_memory.network_key
+        self.addCleanup(setattr, strategy_memory, "network_key", saved)
+        strategy_memory.network_key = lambda refresh=False: {
+            "id": "net-test", "iface": "eth9", "gateway": "10.0.0.1",
+            "prefix": "203.0.0.0/16"}
+
+    def test_the_winner_is_remembered_by_domain(self):
+        self.start()
+        self.wait_idle()
+        found = self.memory.lookup(["a.example"])
+        winners = [i for i in found["items"] if i["wins"]]
+        self.assertTrue(winners, found)
+        self.assertIn(self.GOOD, winners[0]["args"])
+
+    def test_the_loser_is_remembered_too(self):
+        # «Это не работает» — такое же знание, как «это работает»: без
+        # него следующий прогон проверит мёртвый вариант заново.
+        self.start()
+        self.wait_idle()
+        items = self.memory.lookup(["a.example"])["items"]
+        losers = [i for i in items if i["losses"] and not i["wins"]]
+        self.assertTrue(losers, items)
+        self.assertIn("--bad", losers[0]["args"])
+
+    def test_report_says_how_much_was_written(self):
+        self.start()
+        self.wait_idle()
+        report = get_experiment_runner().get_result()
+        self.assertGreater(report["memory"]["written"], 0)
+        self.assertEqual(report["memory"]["network"], "net-test")
+
+    def test_commit_marks_the_variant_as_kept(self):
+        self.tune(default_ttl_sec=60)
+        self.start(keep_best=True)
+        self.wait_awaiting()
+        get_experiment_runner().commit()
+        self.wait_idle()
+        items = self.memory.lookup(["a.example"])["items"]
+        kept = [i for i in items if i.get("committed")]
+        self.assertTrue(kept, items)
+        self.assertIn(self.GOOD, kept[0]["args"])
+
+    def test_a_broken_memory_does_not_break_the_run(self):
+        # Память полезна, но эксперимент ценен и без неё.
+        def boom(report):
+            raise RuntimeError("диск переполнен")
+
+        self._patch(self.memory, "remember_report", boom)
+        self.start()
+        report = self.wait_idle()
+        self.assertNotEqual(report["state"],
+                            strategy_experiment.STATE_FAILED)
+        self.assertEqual(len(get_experiment_runner()
+                             .get_result()["variants"]), 2)
+
+
+class FakeCaptureRun:
+    """Прогон снифера: живой, пока его не остановят.
+
+    Настоящий прогон разбирает дамп в фоновом потоке и гасит
+    ``running`` только после разбора — движок эксперимента на это и
+    рассчитывает, поэтому подделка ведёт себя так же.
+    """
+
+    def __init__(self, run_id, params):
+        self.id = run_id
+        self.params = params
+        self.running = True
+        self.error = ""
+        self.report = {}
+
+
+class TestCaptureInsideTheRun(ExperimentCase):
+    """Снифер по окну варианта (S18).
+
+    Смысл проверок: дамп обязан идти РОВНО на окне замера и обязан
+    оставаться необязательным. Эксперимент меряет стратегию; отсутствие
+    tcpdump — это отчёт без картинки, а не упавший прогон.
+    """
+
+    # Сводка, которую отдаёт `traffic_capture.summary`: два TTL, один —
+    # смертельно низкий. Ровно тот случай, ради которого всё затевалось.
+    SUMMARY = {
+        "packets": 12,
+        "captured_total": 12,
+        "sni": ["a.example"],
+        "hosts": [],
+        "ttl": {"1": 4, "64": 8},
+        "flags": {"S": 4, "RST": 1},
+        "protocols": {"tls": 6, "tcp": 6},
+    }
+
+    def setUp(self):
+        super().setUp()
+        from core import traffic_capture
+
+        self.capture_starts = []
+        self.capture_stops = []
+        self.capture_runs = {}
+        self.tcpdump = True
+
+        self._patch(traffic_capture, "available", self.fake_available)
+        self._patch(traffic_capture, "start", self.fake_start)
+        self._patch(traffic_capture, "stop", self.fake_stop)
+        self._patch(traffic_capture, "get", self.capture_runs.get)
+        self._patch(traffic_capture, "summary",
+                    lambda run: dict(self.SUMMARY))
+
+    def fake_available(self):
+        if self.tcpdump:
+            return {"available": True, "binary": "/opt/sbin/tcpdump"}
+        return {"available": False, "reason": "tcpdump на устройстве нет",
+                "hint": "поставьте его: package_install(...)"}
+
+    def fake_start(self, **kwargs):
+        run_id = "capture-%d" % len(self.capture_starts)
+        params = {"iface": "eth3", "port": kwargs.get("port"),
+                  "proto": kwargs.get("proto", ""),
+                  "filter": "tcp and port %s" % kwargs.get("port")}
+        # Движок должен видеть тот же снимок, что и при живом снифере:
+        # ярлык прогона + разобранные параметры.
+        self.capture_starts.append(dict(params, engine_args=list(
+            self.nfqws.args), running=self.nfqws.running))
+        self.capture_runs[run_id] = FakeCaptureRun(run_id, params)
+        return {"run_id": run_id, "params": params, "running": True}
+
+    def fake_stop(self):
+        self.capture_stops.append(True)
+        for run in self.capture_runs.values():
+            run.running = False
+        return {"stopped": True}
+
+    def variants_of(self, report):
+        return {item["label"]: item for item in report["variants"]}
+
+    def test_off_by_default(self):
+        # Лишний процесс на каждый замер и заметный провайдеру след —
+        # это просят осознанно.
+        self.start()
+        self.wait_idle()
+        report = get_experiment_runner().get_result()
+        self.assertEqual(self.capture_starts, [])
+        for item in report["variants"]:
+            self.assertNotIn("capture", item)
+
+    def test_summary_lands_in_every_variant(self):
+        self.start(capture=True)
+        self.wait_idle()
+        report = get_experiment_runner().get_result()
+        for label, item in self.variants_of(report).items():
+            with self.subTest(variant=label):
+                sniffed = item["capture"]
+                self.assertTrue(sniffed["measured"])
+                self.assertEqual(sniffed["packets"], 12)
+                self.assertEqual(sniffed["ttl"], {"1": 4, "64": 8})
+                self.assertEqual(sniffed["iface"], "eth3")
+
+    def test_window_matches_the_measurement(self):
+        # По дампу на baseline и на каждый вариант, и каждый закрыт:
+        # иначе в отчёт варианта B уехали бы пакеты варианта C.
+        self.start(capture=True)
+        self.wait_idle()
+        self.assertEqual(len(self.capture_starts), 3)
+        self.assertEqual(len(self.capture_stops), 3)
+        # Первый дамп — baseline, и движок на нём остановлен.
+        self.assertFalse(self.capture_starts[0]["running"])
+        self.assertTrue(self.capture_starts[1]["running"])
+
+    def test_port_is_443_unless_asked(self):
+        self.start(capture=True)
+        self.wait_idle()
+        self.assertEqual(self.capture_starts[0]["port"], 443)
+        self.assertEqual(self.capture_starts[0]["proto"], "tcp")
+
+    def test_custom_port_reaches_tcpdump(self):
+        self.start(capture=True, capture_port=8443)
+        self.wait_idle()
+        self.assertEqual(self.capture_starts[0]["port"], 8443)
+
+    def test_hint_reads_the_dump(self):
+        self.start(capture=True)
+        self.wait_idle()
+        report = get_experiment_runner().get_result()
+        for label, item in self.variants_of(report).items():
+            with self.subTest(variant=label):
+                self.assertIn("capture_ttl_too_low",
+                              [h["id"] for h in item["hints"]])
+
+    def test_no_tcpdump_does_not_break_the_run(self):
+        self.tcpdump = False
+        result = self.start(capture=True)
+        self.wait_idle()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["capture"]["available"])
+        self.assertIn("tcpdump", result["capture"]["reason"])
+        report = get_experiment_runner().get_result()
+        # Прогон отработал целиком, просто без дампа.
+        self.assertEqual(len(report["variants"]), 2)
+        self.assertEqual(self.capture_starts, [])
+
+    def test_tool_says_out_loud_that_the_sniffer_is_off(self):
+        # Молчание модель прочитает как «в сети ничего интересного».
+        self.tcpdump = False
+        answer = data("strategy_experiment_start", {
+            "variants": [{"label": "A", "args": ["--filter-tcp=443",
+                                                 self.GOOD]}],
+            "targets": ["a.example"], "capture": True})
+        self.wait_idle()
+        self.assertTrue(answer["ok"])
+        self.assertIn("снифер НЕ включился", answer["hint"])
+
+    def test_broken_sniffer_is_reported_not_raised(self):
+        from core import traffic_capture
+
+        def boom(**kwargs):
+            raise traffic_capture.CaptureError("дамп уже идёт")
+
+        self._patch(traffic_capture, "start", boom)
+        self.start(capture=True)
+        self.wait_idle()
+        report = get_experiment_runner().get_result()
+        for item in report["variants"]:
+            self.assertFalse(item["capture"]["measured"])
+            self.assertIn("дамп уже идёт", item["capture"]["error"])
+
+
 class TestConcurrency(ExperimentCase):
     """Общий мьютекс держится всем прогоном."""
 

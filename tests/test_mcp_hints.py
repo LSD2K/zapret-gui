@@ -174,6 +174,67 @@ class TestMetricRules(unittest.TestCase):
         self.assertIn("worse_than_baseline", [h["id"] for h in hints])
 
 
+class TestCaptureRules(unittest.TestCase):
+    """Подсказки по дампу (S18): ради них снифер и позвали в эксперимент.
+
+    Цифра «вариант B хуже» не говорит, что чинить. «У варианта B fake
+    ушёл с TTL 1» — говорит. Каждое правило проверяется на сводке той
+    формы, которую кладёт в отчёт `core/traffic_capture.summary`.
+    """
+
+    def test_ttl_that_dies_before_the_first_hop(self):
+        # Два разных TTL — это и есть работа десинка; беда в том, что
+        # короткий равен единице: пакет умрёт на домашнем роутере.
+        metrics = dict(HEALTHY, capture={"measured": True, "packets": 12,
+                                         "ttl": {"1": 4, "64": 8}})
+        hints = hints_for([], metrics)
+        self.assertIn("capture_ttl_too_low", [h["id"] for h in hints])
+        self.assertIn("TTL", next(h["hint"] for h in hints
+                                  if h["id"] == "capture_ttl_too_low"))
+
+    def test_normal_ttl_spread_is_not_a_problem(self):
+        metrics = dict(HEALTHY, capture={"measured": True, "packets": 12,
+                                         "ttl": {"6": 4, "64": 8}})
+        self.assertNotIn("capture_ttl_too_low", ids([], metrics))
+
+    def test_single_ttl_is_not_a_problem_either(self):
+        # Один TTL на весь дамп означает, что фейков в нём нет вовсе, —
+        # это другой разговор, и правило про них молчит.
+        metrics = dict(HEALTHY, capture={"measured": True, "packets": 9,
+                                         "ttl": {"1": 9}})
+        self.assertNotIn("capture_ttl_too_low", ids([], metrics))
+
+    def test_empty_capture_points_at_the_interface(self):
+        metrics = dict(HEALTHY, capture={"measured": True, "packets": 0})
+        hints = hints_for([], metrics)
+        self.assertIn("capture_empty", [h["id"] for h in hints])
+        self.assertIn("iface", next(h["hint"] for h in hints
+                                    if h["id"] == "capture_empty"))
+
+    def test_capture_that_did_not_run_says_nothing(self):
+        # Снифера не просили (или он не поднялся) — это не находка.
+        self.assertNotIn("capture_empty", ids([], dict(HEALTHY)))
+        self.assertNotIn("capture_empty",
+                         ids([], dict(HEALTHY,
+                                      capture={"measured": False,
+                                               "error": "нет tcpdump"})))
+
+    def test_visible_sni_matters_only_when_nothing_opened(self):
+        blind = dict(HEALTHY, ok_count=0,
+                     capture={"measured": True, "packets": 8,
+                              "sni": ["youtube.com"]})
+        self.assertIn("capture_sni_in_clear", ids([], blind))
+        # Цель открылась — значит, имя в открытую DPI не помешало, и
+        # советовать чинить нечего.
+        working = dict(blind, ok_count=2)
+        self.assertNotIn("capture_sni_in_clear", ids([], working))
+
+    def test_clean_capture_gives_nothing(self):
+        metrics = dict(HEALTHY, capture={"measured": True, "packets": 20,
+                                         "ttl": {"64": 20}, "sni": []})
+        self.assertEqual(ids(["INFO nfqws2 started"], metrics), [])
+
+
 class TestRuleTable(unittest.TestCase):
     """Сама таблица: правила остаются данными и остаются полными."""
 
