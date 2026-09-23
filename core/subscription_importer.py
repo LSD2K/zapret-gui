@@ -427,7 +427,7 @@ def _try_import_singbox_uri(uri: str, save: bool = True) -> dict:
     а не «scheme не поддержан»).
     """
     try:
-        from core.singbox_subscription import uri_to_outbound
+        from core.singbox_subscription import uri_to_outbound, mieru_host_tag
     except Exception:
         return {"handled": False, "item": None}
 
@@ -492,6 +492,12 @@ def _try_import_singbox_uri(uri: str, save: bool = True) -> dict:
                                     and o.get("tag") == tag)]
 
     obs = cfg.setdefault("outbounds", [])
+    # mieru: tag из profile, а он у разных серверов часто один («default»).
+    # Тот же tag у другого сервера не затираем, а уводим в «<tag>-<host>».
+    if outbound.get("type") == "mieru" and any(
+            o.get("tag") == tag and o.get("server") != outbound.get("server")
+            for o in obs):
+        tag = outbound["tag"] = mieru_host_tag(outbound)
     # Если outbound с таким же tag уже есть — заменяем, не дублируем.
     obs[:] = [o for o in obs if o.get("tag") != tag]
     obs.append(outbound)

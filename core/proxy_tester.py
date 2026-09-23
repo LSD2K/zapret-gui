@@ -197,6 +197,33 @@ def common_failure_hint(results: list) -> str:
                    "ключах так выглядит проблема на его стороне.")
 
 
+def _probe_port(ob: dict):
+    """
+    Порт для TCP-пробы. У mieru (sing-box-extended) вместо server_port
+    список server_ports ('9000' / '9000-9010'): берём нижний порт первого
+    элемента.
+    """
+    if ob.get("server_port"):
+        return ob["server_port"]
+    ports = ob.get("server_ports")
+    if isinstance(ports, list) and ports:
+        return str(ports[0]).split("-", 1)[0].strip()
+    return None
+
+
+def _result_port(ob: dict):
+    """Поле port строки результата: server_port, у mieru server_ports."""
+    return ob.get("server_port") or ob.get("server_ports")
+
+
+def _udp_only(ob: dict) -> bool:
+    """Сервер не слушает TCP: UDP/QUIC-протокол или mieru с transport UDP."""
+    if str(ob.get("type") or "").lower() in UDP_PROXY_TYPES:
+        return True
+    tr = ob.get("transport")
+    return isinstance(tr, str) and tr.strip().upper() == "UDP"
+
+
 def tcp_prefilter(outbounds: list, *, timeout: float = _TCP_TIMEOUT,
                   workers: int = _TCP_WORKERS, on_done=None) -> dict:
     """
@@ -215,13 +242,13 @@ def tcp_prefilter(outbounds: list, *, timeout: float = _TCP_TIMEOUT,
             continue
         tag = ob.get("tag")
         host = ob.get("server")
-        port = ob.get("server_port")
+        port = _probe_port(ob)
         if not (tag and host and port):
             continue
         # UDP/QUIC-протоколы (hysteria2/tuic/…) не слушают TCP — TCP-проба к
         # ним всегда падает и ложно метит «мёртвыми». Пропускаем в e2e:
         # реальную проверку (delay через прокси) сделает движок.
-        if str(ob.get("type") or "").lower() in UDP_PROXY_TYPES:
+        if _udp_only(ob):
             results[tag] = (True, None, "")
             continue
         targets.append((tag, host, port))
@@ -636,7 +663,7 @@ def run_outbound_tests(outbounds: list, *, target: str = DEFAULT_TARGET,
         if prob:
             bad_results.append({
                 "tag": o["tag"], "server": o.get("server"),
-                "port": o.get("server_port"), "type": o.get("type"),
+                "port": _result_port(o), "type": o.get("type"),
                 "alive": False, "latency_ms": None,
                 "stage": "config", "error": prob, "invalid": True,
             })
@@ -694,7 +721,7 @@ def run_outbound_tests(outbounds: list, *, target: str = DEFAULT_TARGET,
         if not tcp_ok:
             results.append({
                 "tag": tag, "server": ob.get("server"),
-                "port": ob.get("server_port"), "type": ob.get("type"),
+                "port": _result_port(ob), "type": ob.get("type"),
                 "alive": False, "latency_ms": None,
                 "stage": "tcp", "error": tcp_reason or TCP_FAIL_OTHER,
             })
@@ -703,7 +730,7 @@ def run_outbound_tests(outbounds: list, *, target: str = DEFAULT_TARGET,
             r = e2e[tag]
             results.append({
                 "tag": tag, "server": ob.get("server"),
-                "port": ob.get("server_port"), "type": ob.get("type"),
+                "port": _result_port(ob), "type": ob.get("type"),
                 "alive": bool(r.get("ok")),
                 "latency_ms": r.get("latency_ms"),
                 "stage": "e2e",
@@ -716,7 +743,7 @@ def run_outbound_tests(outbounds: list, *, target: str = DEFAULT_TARGET,
             # Только TCP (нет бинаря или фаза 2 не сработала).
             results.append({
                 "tag": tag, "server": ob.get("server"),
-                "port": ob.get("server_port"), "type": ob.get("type"),
+                "port": _result_port(ob), "type": ob.get("type"),
                 "alive": True, "latency_ms": tcp_ms,
                 "stage": "tcp", "error": "",
             })

@@ -303,8 +303,14 @@ def _save_cache(cache: dict):
 def _ident(ob: dict) -> tuple:
     """Ключ дедупликации сервера: тип+host+port+креды."""
     cred = (ob.get("uuid") or ob.get("password") or ob.get("id") or "")
-    return (ob.get("type"), ob.get("server"),
-            ob.get("server_port"), cred)
+    ident = (ob.get("type"), ob.get("server"),
+             ob.get("server_port"), cred)
+    # У mieru нет server_port: порты в списке server_ports, плюс transport
+    # (один сервер может слушать и TCP, и UDP на разных портах).
+    if ob.get("type") == "mieru":
+        ident += (tuple(str(p) for p in (ob.get("server_ports") or ())),
+                  ob.get("transport"))
+    return ident
 
 
 def dedup_outbounds(outbounds: list) -> list:

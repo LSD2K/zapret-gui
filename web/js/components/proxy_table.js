@@ -87,6 +87,8 @@ const ProxyTable = (() => {
             activeMark:   'активный сервер',
             activateTitle:'Пустить трафик через выделенный сервер (двойной клик по строке)',
             noLinks:      'Нет ссылок для копирования',
+            // mieru умеет только sing-box (extended), mihomo переопределяет
+            pasteSchemes: 'vless:// / vmess:// / trojan:// / ss:// / hy2:// / tuic:// / mierus://',
         }, opts.labels || {});
 
         const state = {
@@ -334,7 +336,7 @@ const ProxyTable = (() => {
         function renderPasteBox() {
             return `
                 <div style="margin-top:10px;">
-                    <label class="form-label">Вставьте ссылки (vless:// / vmess:// / trojan:// / ss:// / hy2:// / tuic:// / mierus://), по одной в строке:</label>
+                    <label class="form-label">Вставьте ссылки (${esc(L.pasteSchemes)}), по одной в строке:</label>
                     <textarea id="${opts.bodyId}-paste" class="form-textarea" spellcheck="false"
                               style="width:100%; min-height:90px; font-family:monospace; font-size:12px;"
                               placeholder="vless://...&#10;ss://..."></textarea>

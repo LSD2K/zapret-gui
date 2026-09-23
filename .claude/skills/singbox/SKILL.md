@@ -189,11 +189,15 @@ debug ушёл. Просмотр лога: `GET /api/singbox/configs/<name>/log?
   `obfs`(`salamander`), всегда TLS (часто `tls.insecure`).
 - **tuic** (`make_tuic_outbound`): `uuid`, `password`,
   `congestion_control`(`bbr`), UDP-over-QUIC.
-- **mieru** (`make_mieru_outbound`, ТОЛЬКО extended-сборка shtorm-7, апстрим не знает): `server_ports` (`["9000-9010"]`), `transport` TCP|UDP, `username`, `password`, опц. `multiplexing`; ссылки `mierus://`/`mieru://`.
+- **mieru** (`make_mieru_outbound`, ТОЛЬКО extended-сборка shtorm-7,
+  апстрим не знает): `server_ports` (`["9000-9010"]`), `transport` TCP|UDP,
+  `username`, `password`, опц. `multiplexing`, `mtu`, `handshake_mode`,
+  `traffic_pattern`; ссылки `mierus://` (и `mieru://` в том же виде).
 - **direct**, и группы ниже.
 
 Общие поля: `type`, `tag`, `server`, `server_port`. `direct` — валидный тип
-(прямой выход), НЕ deprecated.
+(прямой выход), НЕ deprecated. У mieru вместо `server_port` список
+`server_ports`.
 
 ### 5.2 Группы
 - **selector** (`make_selector_outbound`): ручной выбор; `outbounds:[tags]`,

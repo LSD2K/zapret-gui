@@ -107,6 +107,7 @@ const MihomoProxiesPage = (() => {
             activeMark:   'активный узел',
             activateTitle:'Пустить трафик через выделенный узел (двойной клик по строке)',
             noLinks:      'Нет ссылок для копирования (тип не экспортируется)',
+            pasteSchemes: 'vless:// / vmess:// / trojan:// / ss:// / hy2:// / tuic://',
         },
 
         // Состояние отладки/лога живёт в state.extra.

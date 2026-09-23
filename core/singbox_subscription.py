@@ -568,13 +568,21 @@ def tuic_to_outbound(uri: str) -> dict:
 def mieru_to_outbound(uri: str) -> dict:
     """
     `mierus://<user>:<pass>@<host>?port=<p>&protocol=TCP&profile=<имя>
-    &multiplexing=MULTIPLEXING_LOW&mtu=<n>` (простая ссылка mieru);
-    `mieru://` в том же виде считаем синонимом.
+    &multiplexing=MULTIPLEXING_LOW&mtu=<n>&handshake-mode=<m>
+    &traffic-pattern=<b64>` (простая ссылка mieru, `mieru export config
+    simple`); `mieru://` в том же виде считаем синонимом. Настоящий
+    `mieru://<base64 protobuf>` (`mieru export config`) не поддержан.
 
     port (порт или диапазон) и protocol (TCP/UDP, дефолт TCP) могут
     повторяться и идти через запятую. В ссылке mieru они парные: i-й
     protocol относится к i-му port. transport у outbound'а один, поэтому
-    берём первый protocol и оставляем только его порты. profile идёт в tag.
+    берём первый protocol и оставляем только его порты. Порт в адресе
+    (`@host:9000`) используется, только если `?port` нет: при обоих
+    приоритет у `?port`, порт адреса отбрасывается.
+
+    tag = profile (после _safe_tag); пустой или 'out' → 'mieru-<host>'.
+    handshake-mode / traffic-pattern идут в handshake_mode /
+    traffic_pattern, только если есть в ссылке.
     """
     try:
         p = urllib.parse.urlparse(uri)
@@ -582,6 +590,10 @@ def mieru_to_outbound(uri: str) -> dict:
         return {"ok": False, "error": "URI не распарсился: %s" % e}
     if p.scheme.lower() not in ("mierus", "mieru"):
         return {"ok": False, "error": "не mieru-URI"}
+    if p.scheme.lower() == "mieru" and "@" not in p.netloc:
+        return {"ok": False,
+                "error": "mieru:// с base64-конфигом не поддерживается, "
+                         "нужна ссылка mierus://"}
     if not p.username or not p.password:
         return {"ok": False, "error": "нет username:password в URI"}
     if not p.hostname:
@@ -615,8 +627,13 @@ def mieru_to_outbound(uri: str) -> dict:
         ports = [pt for pt, pr in zip(ports, protocols) if pr == transport]
 
     tag = _safe_tag(_first("profile")
-                    or urllib.parse.unquote(p.fragment or "")
-                    or "mieru-%s" % p.hostname)
+                    or urllib.parse.unquote(p.fragment or ""), "")
+    if tag in ("", "out"):
+        tag = _safe_tag("mieru-%s" % p.hostname)
+    # parse_qsl превращает неэкранированный '+' в пробел, а в base64
+    # пробелов не бывает.
+    pattern = (_first("traffic-pattern")
+               or _first("traffic_pattern")).replace(" ", "+")
     try:
         outbound = make_mieru_outbound(
             tag, p.hostname, ports,
@@ -624,10 +641,24 @@ def mieru_to_outbound(uri: str) -> dict:
             urllib.parse.unquote(p.password),
             transport=transport,
             multiplexing=_first("multiplexing") or None,
-            mtu=_first("mtu") or None)
+            mtu=_first("mtu") or None,
+            handshake_mode=(_first("handshake-mode")
+                            or _first("handshake_mode") or None),
+            traffic_pattern=pattern or None)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True, "tag": tag, "outbound": outbound}
+
+
+def mieru_host_tag(outbound: dict) -> str:
+    """
+    tag «<profile>-<host>» для mieru-outbound'а. profile у разных серверов
+    часто один («default»), а импорт подписки заменяет outbound с тем же
+    tag, то есть затирал бы сервер сервером. Импорт берёт этот tag, когда
+    profile уже занят другим сервером.
+    """
+    return _safe_tag("%s-%s" % (outbound.get("tag") or "mieru",
+                                outbound.get("server") or ""))
 
 
 # ─────── dispatcher ───────
@@ -889,6 +920,31 @@ def _tuic_to_uri(ob: dict) -> str:
         _build_query(params), _frag(ob.get("tag")))
 
 
+def _mieru_to_uri(ob: dict) -> str:
+    server, ports = ob.get("server"), ob.get("server_ports")
+    user, pwd = ob.get("username"), ob.get("password")
+    if isinstance(ports, str):
+        ports = [ports]
+    if not (server and ports and user and pwd):
+        return ""
+    host = str(server)
+    if ":" in host and not host.startswith("["):
+        host = "[%s]" % host
+    # Порт в ссылке mieru не в адресе, а в ?port; port и protocol парные
+    # (i-й protocol к i-му port), поэтому protocol повторяем на каждый порт.
+    transport = ob.get("transport") or "TCP"
+    params = [("port", str(pt)) for pt in ports]
+    params += [("protocol", transport)] * len(ports)
+    for key, field in (("profile", "tag"), ("multiplexing", "multiplexing"),
+                       ("mtu", "mtu"), ("handshake-mode", "handshake_mode"),
+                       ("traffic-pattern", "traffic_pattern")):
+        if ob.get(field):
+            params.append((key, str(ob[field])))
+    return "mierus://%s:%s@%s?%s" % (
+        _q(user), _q(pwd), host,
+        urllib.parse.urlencode(params, quote_via=urllib.parse.quote))
+
+
 _EXPORTERS = {
     "vless":       _vless_to_uri,
     "vmess":       _vmess_to_uri,
@@ -896,6 +952,7 @@ _EXPORTERS = {
     "shadowsocks": _ss_to_uri,
     "hysteria2":   _hysteria2_to_uri,
     "tuic":        _tuic_to_uri,
+    "mieru":       _mieru_to_uri,
 }
 
 

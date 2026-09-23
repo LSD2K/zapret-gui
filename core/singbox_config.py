@@ -1210,8 +1210,13 @@ def make_tuic_outbound(tag: str, server: str, port: int,
 # строк: одиночный порт '9000' или диапазон '9000-9010'.
 
 MIERU_TRANSPORTS = ("TCP", "UDP")
-MIERU_MULTIPLEXING = ("MULTIPLEXING_OFF", "MULTIPLEXING_LOW",
-                      "MULTIPLEXING_MIDDLE", "MULTIPLEXING_HIGH")
+# Значения enum'ов mieru. *_DEFAULT валидны, но значат «как по умолчанию»:
+# поле в outbound тогда не пишем.
+MIERU_MULTIPLEXING = ("MULTIPLEXING_DEFAULT", "MULTIPLEXING_OFF",
+                      "MULTIPLEXING_LOW", "MULTIPLEXING_MIDDLE",
+                      "MULTIPLEXING_HIGH")
+MIERU_HANDSHAKE_MODES = ("HANDSHAKE_DEFAULT", "HANDSHAKE_STANDARD",
+                         "HANDSHAKE_NO_WAIT")
 
 _MIERU_PORT_RE = re.compile(r"^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$")
 
@@ -1219,14 +1224,22 @@ _MIERU_PORT_RE = re.compile(r"^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$")
 def _mieru_server_ports(ports) -> list:
     """
     Порты → `server_ports`. Принимает число/строку или список из них,
-    строка может нести несколько элементов через запятую. Дубли убираем,
-    порядок сохраняем. Мусор, порт вне 1..65535, перевёрнутый диапазон
-    или пустой итог → ValueError.
+    строка может нести несколько элементов через запятую. Диапазон из
+    одного порта ('9000-9000') сворачиваем в '9000', дубли убираем,
+    порядок сохраняем. Мусор (включая float/dict), порт вне 1..65535,
+    перевёрнутый диапазон или пустой итог → ValueError.
     """
-    if isinstance(ports, (str, int)):
+    if ports is None:
+        ports = []
+    elif isinstance(ports, (str, int)) and not isinstance(ports, bool):
         ports = [ports]
+    elif not isinstance(ports, (list, tuple)):
+        raise ValueError("mieru: ports должен быть портом или списком "
+                         "портов, а не %s" % type(ports).__name__)
     out = []
-    for item in ports or []:
+    for item in ports:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ValueError("mieru: некорректный порт %r" % (item,))
         for part in str(item).split(","):
             part = part.strip()
             if not part:
@@ -1236,7 +1249,7 @@ def _mieru_server_ports(ports) -> list:
             hi = int(m.group(2)) if m and m.group(2) else lo
             if not (1 <= lo <= hi <= 65535):
                 raise ValueError("mieru: некорректный порт '%s'" % part)
-            norm = "%d-%d" % (lo, hi) if m.group(2) else str(lo)
+            norm = str(lo) if lo == hi else "%d-%d" % (lo, hi)
             if norm not in out:
                 out.append(norm)
     if not out:
@@ -1244,17 +1257,32 @@ def _mieru_server_ports(ports) -> list:
     return out
 
 
+def _mieru_enum(field: str, value, allowed: tuple) -> str:
+    """Значение enum'а mieru в верхнем регистре; *_DEFAULT → ''."""
+    v = str(value).strip().upper()
+    if v not in allowed:
+        raise ValueError("mieru: %s '%s' не поддерживается" % (field, value))
+    return "" if v.endswith("_DEFAULT") else v
+
+
 def make_mieru_outbound(tag: str, server: str, ports, username: str,
                         password: str, transport: str = "TCP",
-                        multiplexing: str = None, mtu: int = None) -> dict:
+                        multiplexing: str = None, mtu: int = None,
+                        handshake_mode: str = None,
+                        traffic_pattern: str = None) -> dict:
     """
     Собрать mieru-outbound dict (только sing-box-extended, см. выше).
+    Опциональные поля попадают в outbound, только если заданы.
 
-    ports:         9000 / '9000' / '9000-9010' или список из них
-                   (см. _mieru_server_ports) → `server_ports`
-    transport:     'TCP' | 'UDP' (регистр не важен)
-    multiplexing:  опц., MULTIPLEXING_OFF / _LOW / _MIDDLE / _HIGH
-    mtu:           опц., попадает в outbound, только если задан
+    ports:           9000 / '9000' / '9000-9010' или список из них
+                     (см. _mieru_server_ports) → `server_ports`
+    transport:       'TCP' | 'UDP' (регистр не важен)
+    multiplexing:    опц., MULTIPLEXING_OFF / _LOW / _MIDDLE / _HIGH;
+                     MULTIPLEXING_DEFAULT принимается, поле не пишется
+    mtu:             опц., целое > 0
+    handshake_mode:  опц., HANDSHAKE_STANDARD / HANDSHAKE_NO_WAIT;
+                     HANDSHAKE_DEFAULT принимается, поле не пишется
+    traffic_pattern: опц., строка как в ссылке (base64 protobuf mieru)
     """
     if not username or not password:
         raise ValueError("mieru: нужны username и password")
@@ -1266,16 +1294,21 @@ def make_mieru_outbound(tag: str, server: str, ports, username: str,
            "server_ports": _mieru_server_ports(ports),
            "transport": tr, "username": username, "password": password}
     if multiplexing:
-        mux = str(multiplexing).strip().upper()
-        if mux not in MIERU_MULTIPLEXING:
-            raise ValueError("mieru: multiplexing '%s' не поддерживается"
-                             % multiplexing)
-        out["multiplexing"] = mux
+        mux = _mieru_enum("multiplexing", multiplexing, MIERU_MULTIPLEXING)
+        if mux:
+            out["multiplexing"] = mux
     if mtu not in (None, ""):
-        try:
-            out["mtu"] = int(mtu)
-        except (TypeError, ValueError):
-            raise ValueError("mieru: mtu '%s' не число" % mtu)
+        s = str(mtu).strip()
+        if not re.fullmatch(r"[0-9]+", s) or int(s) <= 0:
+            raise ValueError("mieru: mtu '%s' должен быть целым > 0" % mtu)
+        out["mtu"] = int(s)
+    if handshake_mode:
+        hm = _mieru_enum("handshake_mode", handshake_mode,
+                         MIERU_HANDSHAKE_MODES)
+        if hm:
+            out["handshake_mode"] = hm
+    if traffic_pattern:
+        out["traffic_pattern"] = str(traffic_pattern).strip()
     return out
 
 
