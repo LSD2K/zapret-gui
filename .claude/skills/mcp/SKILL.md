@@ -61,10 +61,13 @@ description: >-
   `strategy_id`/`args`/`profiles`; линтер `core/strategy_lint.py` —
   чистые функции, коды `unknown_lua_function`/`blob_unknown`/
   `blob_file_missing`/`blob_declared_after_new`/`lua_init_order`/
-  `bare_trick_no_filter`/`l7_filter_without_ports`/`no_desync_action`,
-  ошибка линтера делает ответ `isError`),
+  `bare_trick_no_filter`/`l7_filter_without_ports`/`no_desync_action`/
+  `engine_owned_option`, ошибка линтера делает ответ `isError`; сборщик
+  вырезает из стратегии опции, которыми владеет GUI — `--user`/`--qnum`/
+  `--fwmark`/`--pidfile`/`--writable`/`--debug=@файл`),
   транспорте и авторизации (Bearer-токен, Origin, bind, рейт-лимит,
-  `/api/mcp/info`), совместимости с живыми клиентами
+  `/api/mcp/info`, белый список `Host` против DNS-rebinding —
+  `core/host_guard.py` и `gui.allowed_hosts`), совместимости с живыми клиентами
   (legacy-SSE `GET /api/mcp/sse` + `POST /api/mcp/messages` под флагом
   `mcp.transports.sse`, сессии и их уборка в `core/mcp/session.py`,
   рассылка `notifications/tools/list_changed`; stdio-мост
@@ -92,13 +95,17 @@ description: >-
   (`core/mcp/tools/jobs.py`: `job_wait`, бюджет `mcp.limits.wait_sec`,
   разрешение по виду операции), подписке на ресурсы и живом статусе
   (`resources/subscribe` + `notifications/resources/updated` поверх
-  legacy-SSE, ресурс `zapret://state/jobs`, период опроса
+  legacy-SSE и stdio-моста — там поток-писатель со своей сессией и
+  замком на stdout, ресурс `zapret://state/jobs`, период опроса
   `ResourceSpec.poll` и отпечаток `resources.digest`), памяти подбора
   (`core/strategy_memory.py` — «домен → что сработало у этого
   провайдера», локальная метка сети, инструмент `strategy_memory` и
   ресурс `zapret://memory/strategies`), снифере внутри эксперимента
   (`capture=true` в `strategy_experiment_start`, сводка по окну
-  варианта и подсказки по TTL/SNI), экспорте находки в формат каталога
+  варианта и подсказки по TTL/SNI), lua-дампе движка
+  (`lua_capture=true`, `core/lua_capture.py`: `pcap` из
+  `zapret-pcap.lua` перед первым приёмом профиля, `--writable` от
+  сборщика, подсказка `lua_capture_empty`), экспорте находки в формат каталога
   (`core/catalog_export.py`, `strategy_export_catalog`, проверка
   round-trip нашим же парсером), встроенном агенте в GUI
   (`core/agent_runner.py` + `core/llm_client.py` + `api/agent.py` +
@@ -123,7 +130,7 @@ description: >-
 Слепок того, **как устроен MCP в этом репозитории**. Читать вместо того,
 чтобы заново разбирать уже написанный код: контракт
 (`docs/mcp/00-contract.md`) говорит, *что* строили, этот файл — *как оно
-сделано сейчас*. Фича доведена до конца (S1–S16); рабочие задания
+сделано сейчас*. Фича доведена до конца (S1–S18 и ревью после них); рабочие задания
 сессий лежат в [`docs/mcp/`](../../../docs/mcp/README.md) как архив.
 
 **Этот файл — для того, кто правит код.** Пользовательский текст («зачем
@@ -147,7 +154,7 @@ scope, mutating, файл, аргументы), имя в README и число �
 | `api/mcp.py` | HTTP: `POST /api/mcp`, `GET/DELETE` → 405, `GET /api/mcp/info`, legacy-SSE (`GET /api/mcp/sse`, `POST /api/mcp/messages`) |
 | `core/mcp/server.py` | диспетчер JSON-RPC, методы протокола, псевдонимы реестра |
 | `core/mcp/registry.py` | `@tool`, проверки объявления, автозагрузка, `call()`, `tool_result()` |
-| `core/mcp/permissions.py` | 11 разрешений, зависимости, whitelist настроек на запись |
+| `core/mcp/permissions.py` | 12 разрешений, зависимости, whitelist настроек на запись |
 | `core/mcp/audit.py` | журнал вызовов (JSONL + ротация), снимки «до», диспетчер отката |
 | `core/mcp/redact.py` | маскировка секретов (ключи, URL, сырой текст) |
 | `core/mcp/schema.py` | мини-валидатор JSON Schema + `normalize_tool_schema()` |
@@ -1836,7 +1843,7 @@ loopback-only, а GUI открывают из браузера на LAN-адре
 - тексты предупреждений — в `web/js/i18n/{ru,en}.js`, ключи
   `mcp.warn.*` (токен, HTML-транспорт, ротация, перезапуск, shell,
   самоправка, аварийный запрет) и `mcp.risk.<разрешение>` (по строке на
-  каждое из 11). **S16 переиспользует их в README дословно.**
+  каждое из 12). **S16 переиспользует их в README дословно.**
 
 ## Туннели, маршруты, lua, снифер и ожидание (S17)
 
@@ -2238,7 +2245,7 @@ S12/S13 (shell, самоправка) отдают сырой текст: кла
 Правила, которые легко нарушить:
 
 - **README называет каждый инструмент.** Не потому что пользователю
-  нужны 93 имени, а потому что он решает, какие разрешения включать, —
+  нужны 116 имён, а потому что он решает, какие разрешения включать, —
   и должен видеть, что именно открывает каждое из них. Группировка в
   README идёт **по разрешению**, а не по домену;
 - **тексты предупреждений — из одного места.** `mcp.warn.*` и
@@ -2247,9 +2254,10 @@ S12/S13 (shell, самоправка) отдают сырой текст: кла
   пусть README следует за ней, а не наоборот;
 - **«включите HTTPS» писать нельзя** — своего TLS у GUI нет. Честные
   пути: `bind = local` + ssh-туннель, stdio-мост, обратный прокси;
-- **`tunnels_write` — разрешение без инструментов.** Переключатель есть
-  с S2, туннельные write-инструменты не вынесены (долг S7). И README, и
-  эта таблица обязаны говорить это прямо: молча висящий переключатель
+- **у каждого переключателя есть что открыть — кроме `secrets`.** До
+  S17 так висел `tunnels_write` (теперь за ним десять инструментов);
+  `secrets` своих инструментов не имеет намеренно, и README с этой
+  таблицей обязаны говорить это прямо: молча висящий переключатель
   выглядит как сломанная фича;
 - **`docs/upstream.json` → `mcp-spec`.** `pinned` — не версия чужого
   кода, а **ревизия спеки** (`server.PROTOCOL_VERSION`). `paths` и

@@ -236,7 +236,7 @@ singleton-менеджеры `get_xxx_manager()`, чистые функции о
 ## Как проверять работу
 
 ```sh
-python3 -m pytest tests/ -q      # Python-тесты (147+ файлов)
+python3 -m pytest tests/ -q      # Python-тесты (210+ файлов)
 node --test tests/*.js           # JS-тесты (линтер стратегий и пр.)
 make lint                        # синтаксис всех .py
 ```
