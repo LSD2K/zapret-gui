@@ -245,15 +245,19 @@ const SetupUI = (() => {
                     version: (st.version && st.version.latest && st.version.latest.version) || '',
                     tag:     (st.version && st.version.latest && st.version.latest.tag) || '',
                   };
+            // Сторонняя сборка (бэкенд отдаёт version.external_build, напр.
+            // sing-box-extended): наш релиз её бы заменил — не обновляем.
+            const externalBuild = installed && !!(st.version && st.version.external_build);
             // Обновление считаем сами, с нормализацией (как в AWG), а не
             // сырым сравнением строк — иначе `v1.18.0` != `1.18.0` даёт
             // фантомное «доступно обновление».
             const hasUpdate = installed && !!latest.version && !!installedVer
-                              && !verEqual(installedVer, latest.version);
+                              && !verEqual(installedVer, latest.version)
+                              && !externalBuild;
             return {
                 env, bin, installed, installedVer,
                 latestVer: latest.version || '', latestTag: latest.tag || '',
-                hasUpdate,
+                hasUpdate, externalBuild,
                 version: st.version, manifest: st.manifest,
             };
         }
@@ -334,7 +338,9 @@ const SetupUI = (() => {
                                 ${vm.latestTag ? `<span class="text-muted" style="font-size:11px;">(${esc(vm.latestTag)})</span>` : ''}
                                 ${vm.hasUpdate
                                     ? '<span style="color:#fb8;">— доступно обновление</span>'
-                                    : (installed ? '<span style="color:#39c45e;">— актуально</span>' : '')}
+                                    : vm.externalBuild
+                                        ? '<span class="text-muted">— установлена сторонняя сборка, панель её не обновляет</span>'
+                                        : (installed ? '<span style="color:#39c45e;">— актуально</span>' : '')}
                             </div>` : ''}
                         ${opts.versionExtraHtml ? (opts.versionExtraHtml(vm) || '') : ''}
                         ${st.latestState === 'done' && errors.length ? errors.map(e => `
@@ -350,12 +356,13 @@ const SetupUI = (() => {
                     ${archSelect}
 
                     <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+                        ${vm.externalBuild && !extras.selectedTag() ? '' : `
                         <button class="btn btn-primary btn-sm" ${installInProgress ? 'disabled' : ''}
                                 onclick="${opts.globalName}.install()">
                             ${extras.selectedTag()
                                 ? 'Установить выбранную версию'
                                 : (installed ? (vm.hasUpdate ? 'Обновить' : 'Переустановить') : 'Установить')}
-                        </button>
+                        </button>`}
                         ${installed ? `
                         <button class="btn btn-ghost btn-sm" ${installInProgress ? 'disabled' : ''}
                                 onclick="${opts.globalName}.uninstall()">

@@ -869,5 +869,67 @@ class TestFakeipApi(unittest.TestCase):
         self.assertEqual(o["fronts"], {"fi": {"front_dns": "external"}})
 
 
+class TestExternalBuildVersion(unittest.TestCase):
+    """п.7: сторонний бинарь (extended) панель не «обновляет»."""
+
+    def test_is_external_build(self):
+        from core.singbox_installer import is_external_build
+        for v in ("1.14.1", "v1.14.1", "1.13.0-beta.3", "1.12.0-rc.1",
+                  "1.14", ""):
+            with self.subTest(version=v):
+                self.assertFalse(is_external_build(v))
+        for v in ("1.14.1-extended-1.4.2", "1.14.1-Extended",
+                  "1.14.1-abcdef0", "dev"):
+            with self.subTest(version=v):
+                self.assertTrue(is_external_build(v))
+
+    def _check(self, version, installed=True, manifest_ok=True):
+        from core import singbox_installer
+        inst = singbox_installer.SingboxInstaller()
+        det = mock.Mock()
+        det.detect_binary.return_value = {
+            "installed": installed, "version": version,
+            "tags": ["with_quic"], "has_clash_api": False}
+        man = mock.patch.object(
+            inst, "get_manifest",
+            return_value={"tag": "singbox-bin-v1.14.1",
+                          "sing_box": {"version": "1.14.1"}})
+        if not manifest_ok:
+            man = mock.patch.object(inst, "get_manifest",
+                                    side_effect=RuntimeError("нет сети"))
+        with mock.patch.object(singbox_installer, "get_singbox_detector",
+                               return_value=det), man:
+            return inst.check_for_updates()
+
+    def test_extended_has_no_update(self):
+        r = self._check("1.13.8-extended-1.2.0")
+        self.assertTrue(r["external_build"])
+        self.assertFalse(r["has_update"])
+        self.assertFalse(r["needs_reinstall"])
+
+    def test_our_release_still_updates(self):
+        r = self._check("1.13.8")
+        self.assertFalse(r["external_build"])
+        self.assertTrue(r["has_update"])
+
+    def test_flag_present_without_network(self):
+        r = self._check("1.14.1-extended-1.4.2", manifest_ok=False)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["external_build"])
+
+    def test_api_version_route(self):
+        from tests._wsgi_client import WSGIClient, build_test_app
+        from core import singbox_installer
+        client = WSGIClient(build_test_app())
+        fake = mock.Mock()
+        fake.check_for_updates.return_value = {
+            "ok": True, "has_update": False, "external_build": True}
+        with mock.patch.object(singbox_installer, "get_singbox_installer",
+                               return_value=fake):
+            r = client.get_json("/api/singbox/version")
+        self.assertTrue(r["external_build"])
+        self.assertFalse(r["has_update"])
+
+
 if __name__ == "__main__":
     unittest.main()

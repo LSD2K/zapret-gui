@@ -10,6 +10,7 @@
 
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -33,6 +34,23 @@ MANIFEST_ASSET = "manifest.json"
 
 GITHUB_API = "https://api.github.com"
 HTTP_TIMEOUT = 15
+
+# Формат версий наших релизов (= версии апстрима sing-box): 1.14.1,
+# 1.13.0-beta.3, 1.12.0-rc.1. Всё остальное (1.14.1-extended-…, свои сборки
+# с хэшем) — сторонний бинарь, который панель не ставила и обновлять не должна.
+_RELEASE_VERSION_RE = re.compile(
+    r"^v?\d+\.\d+(?:\.\d+)?(?:-(?:alpha|beta|rc)\.?\d+)?$", re.IGNORECASE)
+
+
+def is_external_build(version: str) -> bool:
+    """Установлена сторонняя сборка (extended и т.п.), а не наш релиз."""
+    v = (version or "").strip()
+    if not v:
+        return False               # версия не определилась — не гадаем
+    if "extended" in v.lower():
+        return True
+    return not _RELEASE_VERSION_RE.match(v)
+
 
 INSTALLED_STATE_FILE = "/opt/etc/zapret-gui/singbox-installed.json"
 INSTALLED_STATE_FILE_FALLBACK = "/var/lib/zapret-gui/singbox-installed.json"
@@ -277,11 +295,16 @@ class SingboxInstaller:
 
     def check_for_updates(self) -> dict:
         installed = self.get_installed_version()
+        # Сторонняя сборка (sing-box-extended и т.п.): «обновление» нашим
+        # релизом её бы молча заменило — не предлагаем ни обновление, ни
+        # переустановку, UI прячет кнопку.
+        external = (bool(installed.get("installed"))
+                    and is_external_build(installed.get("version")))
         try:
             manifest = self.get_manifest()
         except Exception as e:
             return {"ok": False, "error": str(e),
-                    "installed": installed}
+                    "installed": installed, "external_build": external}
         latest_ver = (manifest.get("sing_box") or {}).get("version", "")
         latest_tag = manifest.get("tag", "")
         # «Обновление» имеет смысл только для УСТАНОВЛЕННОГО бинарника. Без
@@ -291,7 +314,8 @@ class SingboxInstaller:
         # роутере нет вовсе (discussion #102). Своя страница sing-box этим
         # не страдала: SetupUI считает has_update сам и гейтит по installed.
         has_update = (bool(installed.get("installed")) and bool(latest_ver)
-                      and latest_ver != installed.get("version"))
+                      and latest_ver != installed.get("version")
+                      and not external)
         # Переустановка нужна, даже если версия совпадает: наши сборки
         # начиная с тэга «clash_api в бинаре» включают with_clash_api, без
         # которого не работает тестер серверов (proxy_tester). Если в
@@ -303,12 +327,14 @@ class SingboxInstaller:
             installed.get("installed")
             and installed.get("tags")               # теги распарсились
             and not installed.get("has_clash_api")  # но clash_api среди них нет
+            and not external
         )
         return {
             "ok":              True,
             "installed":       installed,
             "latest":          {"tag": latest_tag, "version": latest_ver},
             "has_update":      has_update,
+            "external_build":  external,
             "needs_reinstall": needs_reinstall,
             "reinstall_reason": ("Бинарь собран без clash_api — тестер серверов"
                                  " работает только по TCP. Переустановите, чтобы"
