@@ -259,6 +259,21 @@ make upstream-offline    # только локальные сверки (идё�
 > Добавляешь новый фоновый воркер? Зарегистрируй его `reconfigure()` в
 > boot-хуках `app.py`, иначе автообновление не переживёт рестарт GUI.
 
+**Гейт безопасности** (`before_request` в `app.py`) проверяет каждый
+запрос в таком порядке:
+
+1. **`Host`** — `core/host_guard.host_allowed`: IP-литерал, `localhost`,
+   имя из `gui.allowed_hosts` (`"*"` — выключить) или хост из
+   `gui.cors_origins`; иначе `403`. Это защита от DNS-rebinding: при
+   rebinding `Origin` и `Host` совпадают, и проверка `Origin` его не
+   ловит;
+2. врезка MCP: верный Bearer-токен на `/api/mcp*` (кроме
+   `/api/mcp/ui/*`) проходит дальше мимо Basic-авторизации GUI;
+3. CSRF: мутирующий запрос с чужим `Origin` — `403`;
+4. Basic-авторизация, если `gui.auth_enabled` и пароль задан.
+   Сравнение секретов — `core.mcp.auth.secret_equal` (по байтам: на str
+   с не-ASCII `hmac.compare_digest` бросает `TypeError`).
+
 ---
 
 ## 5. Backend: `core/` по доменам
@@ -279,6 +294,7 @@ make upstream-offline    # только локальные сверки (идё�
 | `system_control.py` | Перезапуск GUI и перезагрузка роутера (отложенно, в отвязанном процессе; на Keenetic — через `ndmc`). |
 | `download_transport.py` | «Через что» качать (когда GitHub заблокирован напрямую): `direct`/`awg[:iface]`/`singbox[:cfg]`/`mihomo[:cfg]` → `urlopen_via`. Используется установщиками и рефрешерами. |
 | `network_env.py` | Детект окружения: `router` (форвардим LAN) vs `pc` (одна NIC, заворачиваем только себя). Override `network.profile`. |
+| `host_guard.py` | Белый список заголовка `Host` против DNS-rebinding (чистая функция; зовёт гейт `app.py`). |
 | `safe_io.py` | Общие безопасные I/O: атомарная запись (`atomic_write_*`: temp→fsync→`os.replace`) и пр. |
 | `backup.py` | Экспорт/импорт всей конфигурации в один JSON. |
 | `teardown.py` | Снятие всех runtime-артефактов перед удалением. |
@@ -293,16 +309,16 @@ make upstream-offline    # только локальные сверки (идё�
 
 | Модуль | Назначение |
 |--------|-----------|
-| `nfqws_manager.py` | Менеджер процесса nfqws2: compose_command, start/stop/restart, PID-мониторинг. Подхватывает и чужой процесс — поднятый автозапуском (его PID-файл `/var/run/zapret-nfqws.pid`, затем скан `/proc` по демонам); такой помечен `external` в статусе. |
+| `nfqws_manager.py` | Менеджер процесса nfqws2: compose_command, start/stop/restart, PID-мониторинг. `compose_command` вырезает из аргументов стратегии опции, которыми владеет GUI (`strategy_lint.ENGINE_OWNED_OPTIONS`: `--user`/`--qnum`/`--fwmark`/`--pidfile`/`--writable`/`--debug=@файл`, `--hostlist-auto` вне каталогов списков), и добавляет `--writable`, если стратегия пишет pcap (`core/lua_capture.py`). Подхватывает и чужой процесс — поднятый автозапуском (его PID-файл `/var/run/zapret-nfqws.pid`, затем скан `/proc` по демонам); такой помечен `external` в статусе. |
 | `nfqws_reload.py` | Горячая перезагрузка списков в живом nfqws2 (SIGHUP): движок читает `--hostlist`/`--ipset` один раз при старте, поэтому правка файла без сигнала ничего не меняет. |
 | `nfqws_control.py` | Последовательность «firewall → движок → конфиг → автозапуск» одним кодом для UI, CLI и MCP: `start`/`stop`/`restart`/`apply_strategy`/`clear_strategy`/`reload_lists`, `busy()` — кто держит движок. |
 | `nfqws_session.py` | Общий мьютекс на nfqws2/firewall + снимок состояния и возврат «как было». Берут все, кто движок МЕНЯЕТ (сканер на весь прогон, `nfqws_control`, сравнение проб); читающие — нет. Межпроцессная часть — lock-файл рядом с `settings.json`. |
 | `zapret_installer.py` | Установка/обновление бинаря nfqws2 (bol-van/zapret2). |
 | `strategy_builder.py` | Менеджер стратегий (единый источник: builtin JSON + пользовательские). Плюс декларативная сборка профиля: `compose_profile_args()` / `compose_profiles()` — описание (фильтр → payload/range → инстансы, порядок по §15 скила) в строку аргументов и в формат, который принимают `save_user_strategy` и `build_nfqws_args`. |
-| `strategy_lint.py` | Линтер профилей nfqws2: чистые функции без I/O (окружение — аргументами). Ловит то, чего `nfqws2 --intercept=0` не ловит в принципе: неизвестную lua-функцию, незаявленный blob, декларацию после `--new`, порядок `--lua-init`, приём без фильтра. `error` — «так точно не сработает», `warning` — «подозрительно, но бывает осознанно». |
+| `strategy_lint.py` | Линтер профилей nfqws2: чистые функции без I/O (окружение — аргументами). Ловит то, чего `nfqws2 --intercept=0` не ловит в принципе: неизвестную lua-функцию, незаявленный blob, декларацию после `--new`, порядок `--lua-init`, приём без фильтра, опцию, которой владеет GUI (`engine_owned_option`). `error` — «так точно не сработает», `warning` — «подозрительно, но бывает осознанно». |
 | `strategy_generator.py` | Генерация стратегий «на лету» (параметрические сетки приёмов desync). |
 | `strategy_scanner.py` | Автоперебор стратегий против целей, ранжирование от простых к сложным. Формула ранжирования (`compose_score`) и правило «baseline открыт — кредита нет» (`credit_success`) вынесены на уровень модуля: их же зовёт движок экспериментов. |
-| `strategy_experiment.py` | Эксперименты A/B со стратегиями: варианты (`args`/`strategy_id`/`profiles`), baseline без обхода, пробы с медианой по повторам, дельта к baseline, хвост лога движка по окну варианта, правила-подсказки «почему не сработало» (`HINT_RULES` — данные). Состояние возвращается в `finally`, `keep_best` живёт только до `ttl_sec` (дедмен-свитч), снимок дублируется на диск — `recover_after_restart()` при старте GUI. |
+| `strategy_experiment.py` | Эксперименты A/B со стратегиями: варианты (`args`/`strategy_id`/`profiles`), baseline без обхода, пробы с медианой по повторам, дельта к baseline, хвост лога движка по окну варианта, правила-подсказки «почему не сработало» (`HINT_RULES` — данные), по желанию — tcpdump по окну варианта (`capture`) и lua-дамп того, что получил движок (`lua_capture`, `core/lua_capture.py`). Состояние возвращается в `finally`, `keep_best` живёт только до `ttl_sec` (дедмен-свитч), снимок дублируется на диск — `recover_after_restart()` при старте GUI. |
 | `strategy_state.py` | Persist выученных стратегий (state.tsv от z2k-state-persist.lua: закреплённая `nstrategy` на домен). |
 | `healthcheck.py` | Healthcheck-демон (autocircular watchdog): фоном дёргает референс-домены служб и чинит упавшее. |
 | `scan_targets.py` | Профили целей подбора. |
@@ -614,7 +630,8 @@ stdout). Период опроса задаёт сам
 
 ```jsonc
 {
-  "gui":    { "port": 8080, … },
+  "gui":    { "port": 8080, "auth_enabled": false, "cors_origins": [],
+              "allowed_hosts": [], … },  // имена кроме IP/localhost — DNS-rebinding
   "zapret": { "base_path": "/opt/zapret2", "lists_path": …, "ipset_path": … },
   "nfqws":  { "ports_tcp": "80,443,…", "ports_udp": "…", "unified_hostlist": false },
   "install":{ "mirror": "", "tmpdir": "" },
