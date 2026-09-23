@@ -441,7 +441,7 @@ MCP то, что уже умеет менеджер, нельзя: разойд�
 | `mcp/schema.py` | Мини-валидатор JSON Schema (stdlib, без `jsonschema`). |
 | `mcp/resources.py` / `mcp/config_docs.py` / `mcp/prompts.py` | Справочники `zapret://…` (живой `nfqws2 -?`, карта `--lua-desync`, каталоги), описания настроек, промты-сценарии. |
 | `mcp/session.py` / `mcp/stdio.py` | Сессии legacy-SSE и stdio-мост (`ssh router zapret-gui mcp --stdio`). |
-| `mcp/tools/*.py` | 114 инструментов по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает), `jobs.py` — `job_wait` (ожидание вместо опроса в цикле). |
+| `mcp/tools/*.py` | 116 инструментов по доменам; `_paging.py` и `_jobs.py` — общие формы списка и асинхронной задачи (реестр модули с `_` пропускает), `jobs.py` — `job_wait` (ожидание вместо опроса в цикле), `memory.py` — память подбора. |
 
 Логика, которую MCP **использует, но не содержит**: `nfqws_control.py`
 (старт/стоп/применение стратегии — общий код для UI, CLI и MCP),
@@ -450,10 +450,41 @@ MCP то, что уже умеет менеджер, нельзя: разойд�
 `code_guard.py`, `tunnels_overview.py` (читает состояние шести движков),
 `tunnels_control.py` (меняет его: поднять/погасить/переписать конфиг —
 одной формой на все шесть), `traffic_capture.py` + `pcap_reader.py`
-(короткий дамп после движка и его разбор в поля).
+(короткий дамп после движка и его разбор в поля),
+`strategy_memory.py` (память подбора: «домен → что сработало у этого
+провайдера», файл рядом с `settings.json`), `catalog_export.py`
+(argv → секция `catalogs/*.txt`, чистые функции без I/O).
+
+**Подписка на ресурсы.** `resources/subscribe` +
+`notifications/resources/updated` работают только там, где есть канал
+«сервер → клиент», то есть на legacy-SSE. Период опроса задаёт сам
+ресурс (`ResourceSpec.poll` — это цена рендера, а не желание),
+отпечаток — `resources.digest()`, хранение подписок и рассылка —
+`mcp/session.py`. Ради этого заведён ресурс `zapret://state/jobs`:
+живой прогресс всех долгих операций из тех же источников, что у
+`job_wait`.
 
 Точная спецификация — скил [`mcp`](.claude/skills/mcp/SKILL.md);
 пользовательская часть — README, раздел «Управление через ИИ (MCP)».
+
+### 5.9 Встроенный агент: `core/agent_runner.py`, `core/llm_client.py`
+
+Та же модель, что ходит по MCP, но локально и кнопкой на странице
+«Агент». **Новых возможностей нет**: агент — это цикл «спросил модель →
+она попросила инструмент → позвали `registry.call` → отдали результат».
+Инструменты, разрешения (`mcp.permissions`), маскировка, журнал и
+лимиты ответа — те же самые и в том же месте.
+
+| Модуль | Назначение |
+|--------|-----------|
+| `llm_client.py` | Клиент к OpenAI-совместимому API на `urllib`: `/chat/completions` и `/models`. Ни `openai`, ни `requests` на роутер не едут. К локальным адресам ходим **мимо прокси окружения**: `HTTPS_PROXY` на роутере настроен на обход блокировок. |
+| `agent_runner.py` | Цикл и его рамки: один прогон за раз, `agent.max_steps`, потолок вызовов, стоп-флаг, набор инструментов (`scenarios` — те, из которых состоят готовые сценарии `mcp/prompts.py`, ~30; `all` — весь реестр), обрезка вывода под окно локальной модели. |
+| `api/agent.py` + `web/js/pages/agent.js` | Страница: настройки сервера модели, готовые задачи кнопками, транскрипт каждого шага. Ключ API наружу не уезжает — как токен MCP. |
+
+Отдельный флаг `agent.enabled` (по умолчанию выключен) — это отдельная
+дверь: выключенный MCP-транспорт агента не выключает, и наоборот.
+Роуты `/api/agent/*` живут под общей авторизацией GUI: врезка «MCP со
+своим токеном проходит мимо гейта» действует только на `/api/mcp`.
 
 ---
 
@@ -495,6 +526,7 @@ MCP то, что уже умеет менеджер, нельзя: разойд�
 | `healthcheck.py` | `/api/healthcheck` | autocircular-демон: enable/disable/run/status/config |
 | `backup.py` / `config_api.py` / `autostart.py` / `gui_update.py` / `logs.py` | … | бэкап / настройки / автозапуск / обновление GUI (+`/releases`) / логи (SSE) |
 | `mcp.py` / `mcp_ui.py` | `/api/mcp`, `/api/mcp/ui` | MCP-сервер (JSON-RPC, legacy-SSE, loopback-only `/info`) / панель управления им. **Две разные двери:** в `/api/mcp` пускает Bearer-токен, в `/api/mcp/ui` — только авторизация GUI (панель раздаёт разрешения, и токен модели не должен их расширять — врезка в `app.py`) |
+| `agent.py` | `/api/agent` | встроенный агент: настройки сервера модели, «проверить связь», запуск/остановка прогона, транскрипт. Дверь та же, что у `/api/mcp/ui` — общая авторизация GUI: врезка с Bearer-токеном действует только на `/api/mcp` |
 | `v1_compat.py` | `/api/v1/*` | алиасы старых путей — чтобы внешние скрипты не сломались при переименованиях |
 
 > Полный список конкретных роутов — в docstring каждого файла `api/*.py`
@@ -596,12 +628,20 @@ MCP то, что уже умеет менеджер, нельзя: разойд�
   "healthcheck": { "enabled": false, … },   // autocircular-демон
   "awg": { "watchdog": { "enabled": false, … }, … },
   "unified": { "routes": [ … ] },   // маршруты единого слоя (+ devices/dscp)
-  "routing": { … }                  // legacy selective-routing (мигрируется в unified)
+  "routing": { … },                 // legacy selective-routing (мигрируется в unified)
+  "mcp":    { "enabled": false, "token": "", "permissions": {…}, "limits": {…},
+              "probes": {…}, "experiment": {…}, "capture": {…}, "shell": {…},
+              "self_edit": {…} },
+  "agent":  { "enabled": false, "base_url": "http://127.0.0.1:1234/v1",
+              "model": "", "max_steps": 12, "tools": "scenarios", … }
+                                    // встроенный агент; разрешения берёт у mcp
 }
 ```
 
 Рядом с `settings.json` лежит `.server_pool_cache.json` (last-good
-outbound'ы по источникам). Конфиги движков — отдельные файлы на диске
+outbound'ы по источникам), журнал и снимки MCP (`mcp-audit.jsonl`,
+`mcp-undo.json`), снимок эксперимента (`.mcp-experiment.json`) и память
+подбора (`strategy-memory.json`). Конфиги движков — отдельные файлы на диске
 (каталоги выбираются `*_platform.config_dir`).
 
 > Новое поле настроек — добавляй в `DEFAULT_CONFIG` (`config_manager.py`),

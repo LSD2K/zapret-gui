@@ -284,6 +284,7 @@ const StrategiesPage = (() => {
                 case 'toggleFavorite': toggleFavorite(sid); break;
                 case 'applyStrategy': applyStrategy(sid); break;
                 case 'copyStrategyToClipboard': copyStrategyToClipboard(sid); break;
+                case 'exportToCatalog': exportToCatalog(sid); break;
                 case 'openEdit': openEdit(sid); break;
                 case 'deleteStrategy': deleteStrategy(sid); break;
                 case 'duplicateStrategy': duplicateStrategy(sid); break;
@@ -1129,6 +1130,13 @@ const StrategiesPage = (() => {
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                         </svg>
                         В буфер
+                    </button>
+                    <button class="btn btn-ghost btn-sm" data-action="exportToCatalog" title="Собрать секцию каталога catalogs/*.txt — готовую к pull request'у в zapret-gui. Файлы каталогов при этом не трогаются.">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        В каталог
                     </button>
                     ${!isBuiltin ? `
                         <button class="btn btn-ghost btn-sm" data-action="openEdit" title="Редактировать">
@@ -2037,6 +2045,29 @@ const StrategiesPage = (() => {
         _copyText(text, 'Стратегия скопирована в буфер (профилей: ' + parts.length + ')');
     }
 
+    // Экспорт в формат каталога (S18): находка на устройстве превращается
+    // в секцию INI, готовую к pull request'у. Файлы в catalogs/ при этом
+    // не трогаются — их перезаписывает установщик GUI, и локальная правка
+    // там потерялась бы при первом же обновлении.
+    async function exportToCatalog(sid) {
+        const s = strategies.find(x => x.id === sid);
+        if (!s) return;
+        try {
+            const res = await API.post('/api/strategies/' + encodeURIComponent(sid)
+                                       + '/export-catalog', {});
+            if (!res || !res.ok) {
+                Toast.error((res && res.error) || 'Секция не собралась');
+                return;
+            }
+            const warn = (res.warnings || []).join('; ');
+            _copyText(res.text,
+                      'Секция скопирована — вставьте её в ' + res.file
+                      + (warn ? '. ' + warn : ''));
+        } catch (e) {
+            Toast.error('Экспорт не удался: ' + (e.message || e));
+        }
+    }
+
     // Вставка по кнопке: пытаемся прочитать буфер (в secure-context). На роутере
     // по http navigator.clipboard.readText недоступен — подсказываем Ctrl+V,
     // который работает через событие paste (см. attachGlobalKeys).
@@ -2510,6 +2541,7 @@ const StrategiesPage = (() => {
         saveHealthcheckSettings,
         // §3 буфер обмена
         copyStrategyToClipboard,
+        exportToCatalog,
         pasteStrategyFromClipboard,
         // §7 множественный выбор / объединение
         toggleSelect,

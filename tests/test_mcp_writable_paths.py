@@ -113,8 +113,13 @@ class TestInvariants(unittest.TestCase):
 
     def test_permission_and_access_settings_are_closed(self):
         # Модель не расширяет собственные права и не роняет управление.
+        # `agent.` здесь по той же причине, что `mcp.` (S18): это
+        # настройки ПОВОДКА — адрес сервера модели, потолок шагов,
+        # набор инструментов. Право их править означает право сменить
+        # себе модель и снять с себя ограничения.
         for path in leaves(DEFAULT_CONFIG):
-            if path.startswith(("mcp.", "gui.", "install.", "autostart.")):
+            if path.startswith(("mcp.", "agent.", "gui.", "install.",
+                                "autostart.")):
                 with self.subTest(path=path):
                     self.assertFalse(perms.is_writable(path), path)
 

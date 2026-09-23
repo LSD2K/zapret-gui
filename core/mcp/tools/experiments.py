@@ -127,6 +127,17 @@ VARIANT_SCHEMA = {
                           "description": ("Leave the winner applied until "
                                           "commit or ttl_sec. / Оставить "
                                           "лучший применённым.")},
+            "capture": {"type": "boolean", "default": False,
+                        "description": ("Sniff each variant's window with "
+                                        "tcpdump and put TTL/SNI/flags "
+                                        "into the report. Needs tcpdump. / "
+                                        "Снимать дамп по окну каждого "
+                                        "варианта.")},
+            "capture_port": {"type": "integer", "minimum": 1,
+                             "maximum": 65535,
+                             "description": ("Port to sniff; 443 by "
+                                             "default. / Порт для "
+                                             "дампа.")},
         },
         "required": ["variants"],
         "additionalProperties": False,
@@ -149,6 +160,8 @@ def strategy_experiment_start(args: dict) -> dict:
         baseline=bool(args.get("baseline", True)),
         ttl_sec=args.get("ttl_sec"),
         keep_best=args.get("keep_best"),
+        capture=args.get("capture"),
+        capture_port=args.get("capture_port"),
         source="mcp",
     )
     if not result.get("ok"):
@@ -157,13 +170,21 @@ def strategy_experiment_start(args: dict) -> dict:
 
     result["note"] = NOTE
     result["hint"] = (
-        "прогон идёт в фоне: опрашивайте strategy_experiment_status(), "
-        "отчёт — strategy_experiment_result(). Состояние вернётся само "
-        "через %d с, %s" % (
+        "прогон идёт в фоне: подпишитесь на zapret://state/jobs "
+        "(resources/subscribe) или дождитесь одним job_wait"
+        "(kind=\"experiment\"), отчёт — strategy_experiment_result(). "
+        "Состояние вернётся само через %d с, %s" % (
             result["ttl_sec"],
             "победитель останется применённым до commit"
             if result.get("keep_best") else
             "варианты применяются только на время замера"))
+    sniff = result.get("capture") or {}
+    if sniff.get("wanted") and not sniff.get("available"):
+        # Молча отдать отчёт без дампа нельзя: модель попросила снифер
+        # и решит, что в сети ничего интересного не происходит.
+        result["hint"] += ("; снифер НЕ включился: %s — %s"
+                           % (sniff.get("reason") or "tcpdump недоступен",
+                              sniff.get("hint") or "поставьте tcpdump"))
     return result
 
 
@@ -484,6 +505,10 @@ def _variant(entry: dict, keep_log: bool) -> dict:
         out["strategy_id"] = entry["strategy_id"]
     if entry.get("engine_error"):
         out["engine_error"] = entry["engine_error"]
+    if entry.get("capture"):
+        # Снифер по окну варианта (S18): не пакеты, а сводка по ним —
+        # пакеты целиком читаются traffic_capture_result(run_id=…).
+        out["capture"] = entry["capture"]
     if keep_log:
         out["nfqws_log"] = list(entry.get("nfqws_log") or [])
         out["log_truncated"] = bool(entry.get("log_truncated"))
@@ -499,6 +524,7 @@ def _baseline(entry: dict) -> dict:
         "per_target": list(entry.get("per_target") or []),
         "success_rate": entry.get("success_rate", 0.0),
         "open_without_bypass": list(entry.get("open_without_bypass") or []),
+        "capture": entry.get("capture") or {},
     }
 
 
