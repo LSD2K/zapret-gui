@@ -2,31 +2,31 @@
 """
 Маршруты через AdGuard Home: «какие домены в какой туннель».
 
-Одно место правды — секция ``agh_routes`` в settings.json: правила
+Одно место правды, секция ``agh_routes`` в settings.json: правила
 «списки доменов → outbound sing-box». Из них раскладываются:
 
   (а) route-правила sing-box ``{"domain_suffix": [...], "outbound": tag}``
-      в выбранный конфиг: сразу после ``hijack-dns`` (нет его — после
-      ``sniff``, нет и его — в начало) и до ``{"inbound": ["tun-in"], ...}``.
+      в выбранный конфиг: сразу после ``hijack-dns`` (нет его, после
+      ``sniff``, нет и его, в начало) и до ``{"inbound": ["tun-in"], ...}``.
       Сам конфиг собирает FakeIP-сборщик в режиме внешнего фронт-DNS,
       этот модуль его только дополняет;
-  (б) upstream-строки AdGuard Home ``[/a.com/b.org/]127.0.0.1:1053`` —
+  (б) upstream-строки AdGuard Home ``[/a.com/b.org/]127.0.0.1:1053`` -
       глобально (``/control/dns_config``) или поклиентно
       (``/control/clients/*``), чтобы AdGuard отдавал домены из правил в
-      dns-in sing-box (fakeip), а остальное — своим обычным upstream'ам.
+      dns-in sing-box (fakeip), а остальное, своим обычным upstream'ам.
 
 Что считается «нашим»:
-  * в AdGuard — строки, заканчивающиеся на ``]<dns_target>`` (и на цели
+  * в AdGuard, строки, заканчивающиеся на ``]<dns_target>`` (и на цели
     прошлых применений из ``_applied.agh.targets``: смена цели не должна
     оставлять хвостов);
-  * в sing-box — правила из ``_applied.singbox.rules``. Пометить их полем
+  * в sing-box, правила из ``_applied.singbox.rules``. Пометить их полем
     нельзя (sing-box отвергает неизвестные поля), поэтому снимаем по
     точному совпадению.
 
 Все HTTP-вызовы к AdGuard идут через одну обёртку :func:`_http_request`
-(urllib, мимо прокси окружения) — тесты мокают именно её.
+(urllib, мимо прокси окружения), тесты мокают именно её.
 
-Схема сети и постановка — docs/gw/spec-b3-agh-routes.md.
+Схема сети и постановка, docs/gw/spec-b3-agh-routes.md.
 """
 
 import base64
@@ -57,7 +57,7 @@ LINE_CHUNK = 40
 # Маска пароля в ответах API (как у gui.auth_password в /api/config).
 MASK = "***"
 
-# Имя конфига sing-box — то же правило, что у singbox_manager.
+# Имя конфига sing-box, то же правило, что у singbox_manager.
 _CONFIG_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
 _RULE_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,40}$")
 
@@ -80,7 +80,7 @@ class AghError(Exception):
 # ─────────────────────── нормализация ────────────────────────────────
 
 def _to_ascii(s: str) -> str:
-    """IDN → punycode (AdGuard и sing-box ждут ASCII). Не вышло — ''."""
+    """IDN → punycode (AdGuard и sing-box ждут ASCII). Не вышло, ''."""
     if s.isascii():
         return s
     try:
@@ -166,7 +166,7 @@ def render_agh_lines(domains, target: str) -> list:
     """
     Upstream-строки AdGuard вида ``[/a.com/b.org/]127.0.0.1:1053``, не
     больше LINE_CHUNK доменов в строке. Домены сортируются и
-    дедуплицируются — одинаковый вход даёт одинаковые строки.
+    дедуплицируются, одинаковый вход даёт одинаковые строки.
     """
     doms = sorted(set(d for d in (domains or []) if d))
     return ["[/%s/]%s" % ("/".join(doms[i:i + LINE_CHUNK]), target)
@@ -196,7 +196,7 @@ def replace_managed(lines, new_lines, targets) -> list:
     """
     Заменить наши строки новыми, остальные оставить как есть. Новые встают
     на место первой нашей строки (порядок чужих строк не меняется), а если
-    наших не было — в конец.
+    наших не было, в конец.
     """
     out, inserted = [], False
     for line in lines or []:
@@ -226,7 +226,7 @@ def merge_singbox_rules(cfg: dict, old_rules, new_rules) -> dict:
     """
     Снять из ``route.rules`` ранее поставленные нами правила (точное
     совпадение с ``old_rules``) и вставить ``new_rules`` сразу после
-    ``hijack-dns`` (нет его — после ``sniff``, нет и его — в начало), но
+    ``hijack-dns`` (нет его, после ``sniff``, нет и его, в начало), но
     не позже правила ``{"inbound": ["tun-in"], ...}``. cfg меняется на
     месте и возвращается. Чистая функция.
     """
@@ -280,7 +280,7 @@ def outbound_tags(cfg) -> list:
 
 def _dns_in_mismatch(cfg, target: str) -> str:
     """Адрес dns-in конфига, если цель DNS на него не попадает, иначе ''.
-    Сравниваем порт и адрес (адрес — только если dns-in слушает не все
+    Сравниваем порт и адрес (адрес, только если dns-in слушает не все
     интерфейсы)."""
     m = re.match(r"^(?:[a-z]+://)?\[?([^\]]*?)\]?:(\d+)$", target or "")
     if not m or not isinstance(cfg, dict):
@@ -387,7 +387,7 @@ def _clean_url_quiet(v) -> str:
 
 
 def _url_origin(url: str) -> str:
-    """scheme://хост:порт — для логов и сообщений (без пути и прочего)."""
+    """scheme://хост:порт, для логов и сообщений (без пути и прочего)."""
     try:
         u = urllib.parse.urlsplit(str(url or ""))
         host = u.hostname or "?"
@@ -487,7 +487,7 @@ def _clean_rules(v) -> tuple:
 def update_settings(data: dict) -> dict:
     """
     Частичное обновление настроек (PUT /api/agh-routes). Пустой пароль и
-    маска ``***`` пароль не меняют. Ошибка валидации — ValueError, при
+    маска ``***`` пароль не меняют. Ошибка валидации, ValueError, при
     ней ничего не записывается.
     """
     if not isinstance(data, dict):
@@ -542,9 +542,9 @@ def _collect_detail(rule: dict) -> tuple:
     (отсортированные домены правила, предупреждения, ошибки).
 
     Источник, который не удалось прочитать (geosite не скачался и нет
-    кэша, список удалён, hostlist-файла нет, исключение при чтении), —
+    кэша, список удалён, hostlist-файла нет, исключение при чтении), -
     ОШИБКА плана: иначе применение молча сняло бы его домены из sing-box
-    и AdGuard. Пустой, но существующий hostlist — только предупреждение.
+    и AdGuard. Пустой, но существующий hostlist, только предупреждение.
     """
     name = str(rule.get("name") or rule.get("id") or "?")
     raw, warns, errs = [], [], []
@@ -598,7 +598,7 @@ def collect(rule: dict) -> list:
 
 def list_sources(config_name: str = "") -> dict:
     """Что можно выбрать в правилах: hostlist'ы, named lists, geosite;
-    для указанного конфига sing-box — его outbound'ы."""
+    для указанного конфига sing-box, его outbound'ы."""
     out = {"hostlists": [], "named_lists": [], "geosite": [], "outbounds": []}
     try:
         from core.hostlist_manager import get_hostlist_manager
@@ -651,7 +651,7 @@ def _http_request(method: str, url: str, *, body=None, user: str = "",
     Единственная точка HTTP к AdGuard Home. Basic-авторизация, таймаут,
     мимо прокси окружения (HTTPS_PROXY на роутере обычно смотрит в обход
     блокировок, и 127.0.0.1 через него не открыть). Возвращает
-    (код, данные): данные — разобранный JSON, текст или {} для пустого
+    (код, данные): данные, разобранный JSON, текст или {} для пустого
     тела. Сеть, авторизация и коды ≥ 400 → AghError.
     """
     headers = {"Accept": "application/json",
@@ -706,7 +706,7 @@ def _agh_call(s: dict, method: str, path: str, body=None):
 
 
 def test_connection(overrides: dict = None) -> dict:
-    """GET /control/status → версия AdGuard Home. overrides — несохранённые
+    """GET /control/status → версия AdGuard Home. overrides, несохранённые
     url/логин/пароль из формы (пустой пароль и маска = сохранённый)."""
     s = get_settings()
     ov = overrides if isinstance(overrides, dict) else {}
@@ -821,7 +821,7 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
     mgr = get_singbox_manager()
     ctx["sb_mgr"] = mgr
 
-    # Конфиг сменили — наши правила из прежнего надо снять.
+    # Конфиг сменили, наши правила из прежнего надо снять.
     if prev_name and prev_name != name and prev_rules:
         r = mgr.get_config(prev_name)
         cfg = r.get("parsed") if r.get("ok") else None
@@ -844,8 +844,8 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
     if not isinstance(cfg, dict):
         why = (r.get("error") or "не найден") if not r.get("ok") else \
             "не разобран: " + "; ".join(r.get("errors") or [])
-        # Ставить некуда — ошибка. Снимать не из чего (выключено, файла
-        # нет) — предупреждение: AdGuard всё равно надо почистить.
+        # Ставить некуда, ошибка. Снимать не из чего (выключено, файла
+        # нет), предупреждение: AdGuard всё равно надо почистить.
         (errors if rules_desired else warnings).append(
             "конфиг sing-box «%s»: %s" % (name, why))
         if old:
@@ -882,7 +882,7 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
     bad = _dns_in_mismatch(cfg, target) if enabled else ""
     if bad:
         warnings.append("в конфиге «%s» dns-in слушает %s, а цель DNS "
-                        "для AdGuard — %s" % (name, bad, target))
+                        "для AdGuard, %s" % (name, bad, target))
     return sb
 
 
@@ -1019,7 +1019,7 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
                               "клиенту нечего дать кроме наших строк" % cid)
             # use_global_settings оставляем true: в AdGuard этот флаг
             # про фильтрацию (блокировки, safe search и т.п.), а не про
-            # upstream'ы — поклиентные upstream'ы действуют при любом
+            # upstream'ы, поклиентные upstream'ы действуют при любом
             # его значении. С false новый клиент остался бы без фильтров.
             payload = {"name": name, "ids": [cid], "tags": [],
                        "use_global_settings": True,
@@ -1040,7 +1040,7 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
         own = [x for x in cur if not is_managed_line(x, targets)]
         rec = prev.get(name)
         # Без записи о прошлом применении: пустые или равные глобальным
-        # upstream'ы — клиент живёт на глобальных, иначе у него свои.
+        # upstream'ы, клиент живёт на глобальных, иначе у него свои.
         kind = (rec.get("base") if rec else
                 ("global" if not own or own == base else "own"))
         if kind == "global":
@@ -1048,7 +1048,7 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
             # глобальные (без наших) плюс наши строки.
             new = base + list(lines)
         else:
-            # У клиента свои upstream'ы — их не трогаем, меняем только наши.
+            # У клиента свои upstream'ы, их не трогаем, меняем только наши.
             new = replace_managed(cur, list(lines), targets)
         n_cur = len([x for x in cur if is_managed_line(x, targets)])
         op = {"id": cid, "name": name, "exists": True,
@@ -1080,7 +1080,7 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
             continue
         ids = ",".join(str(x) for x in c.get("ids") or [])
         if ours:
-            # Клиента создавали мы — снимаем его целиком.
+            # Клиента создавали мы, снимаем его целиком.
             ops.append({"id": ids, "name": name, "action": "delete",
                         "exists": True, "current": n_cur, "desired": 0,
                         "path": "/control/clients/delete",
@@ -1089,7 +1089,7 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
         rest = [x for x in cur if not is_managed_line(x, targets)]
         kind = rec.get("base") if rec else ("global" if rest == base
                                             else "own")
-        # Клиент до нас ходил через глобальные — возвращаем его к ним.
+        # Клиент до нас ходил через глобальные, возвращаем его к ним.
         new = [] if kind == "global" else rest
         if new and not any(_is_general_upstream(x) for x in new):
             errors.append("клиент AdGuard %s: после снятия наших строк не "
@@ -1175,7 +1175,7 @@ def _public_plan(plan: dict) -> dict:
 
 
 def plan() -> dict:
-    """Что изменит apply() — без записи."""
+    """Что изменит apply(), без записи."""
     return _public_plan(_compute(get_settings())[0])
 
 
@@ -1185,7 +1185,7 @@ def _write_singbox(mgr, name: str, cfg: dict, prev_text: str) -> dict:
     """
     check → save → рестарт того, кто держит инстанс: процесс панели
     (SingboxManager) или systemd-юнит sing-box-gui с этим конфигом. Не
-    поднялся — возвращаем прежний текст и перезапускаем снова; что
+    поднялся, возвращаем прежний текст и перезапускаем снова; что
     получилось на самом деле, пишем в ответ.
     """
     from core import singbox_autostart
@@ -1304,7 +1304,7 @@ def _apply_locked() -> dict:
                               "rules": ctx.get("sb_rules") or []}
         _store_applied(applied)
 
-    # 2. AdGuard: клиентам — до смены глобального списка, снятие — после.
+    # 2. AdGuard: клиентам, до смены глобального списка, снятие, после.
     errors, failed = [], set()
     ops = ctx.get("agh_ops") or []
 
@@ -1336,7 +1336,7 @@ def _apply_locked() -> dict:
 
     targets = [ctx["target"]]
     if errors:
-        # Строки со старой целью могли остаться — помним её до успеха.
+        # Строки со старой целью могли остаться, помним её до успеха.
         targets = _dedup(targets + list(ctx.get("agh_targets") or []))
     records = list(ctx.get("agh_records") or [])
     # Не снятых из-за ошибки клиентов помним до следующего применения

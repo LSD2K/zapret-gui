@@ -2,8 +2,8 @@
 """
 Маршруты через AdGuard Home (core/agh_routes.py, api/agh_routes.py).
 
-AdGuard Home и sing-box подменяются фейками: HTTP — через единственную
-обёртку `_http_request`, sing-box — через `get_singbox_manager`.
+AdGuard Home и sing-box подменяются фейками: HTTP, через единственную
+обёртку `_http_request`, sing-box, через `get_singbox_manager`.
 Настройки живут во временном settings.json.
 """
 
@@ -290,7 +290,7 @@ class TestRenderLines(unittest.TestCase):
         self.assertEqual(out, ["https://1.1.1.1/dns-query",
                                "[/new.com/]127.0.0.1:1053",
                                "[/corp.lan/]10.0.0.1"])
-        # Наших не было — новые в конец.
+        # Наших не было, новые в конец.
         out = agh_routes.replace_managed(["x"], ["[/n/]" + TARGET], t)
         self.assertEqual(out, ["x", "[/n/]" + TARGET])
 
@@ -339,7 +339,7 @@ class TestMergeSingboxRules(unittest.TestCase):
         rules = cfg["route"]["rules"]
         self.assertNotIn(self.R1, rules)
         self.assertNotIn(self.R2, rules)
-        self.assertIn(near, rules)       # похожее, но чужое — остаётся
+        self.assertIn(near, rules)       # похожее, но чужое, остаётся
 
     def test_after_sniff_or_front(self):
         cfg = {"route": {"rules": [{"action": "sniff"},
@@ -517,7 +517,7 @@ class TestApplyGlobal(_Base):
         self.assertEqual(self.our_rules(), [])
         self.assertEqual(self.agh.info["upstream_dns"],
                          ["https://dns.cloudflare.com/dns-query"])
-        # После снятия — снова без изменений.
+        # После снятия, снова без изменений.
         self.assertFalse(agh_routes.apply()["changed"])
 
     def test_target_change_drops_old_lines(self):
@@ -620,10 +620,10 @@ class TestClientsMode(_Base):
         self.assertEqual(tv["upstreams"], ["tls://dns.example"] + lines)
         self.assertFalse(tv["use_global_settings"])
 
-        # Глобальные upstream'ы — без наших строк.
+        # Глобальные upstream'ы, без наших строк.
         self.assertEqual(self.agh.info["upstream_dns"],
                          ["https://dns.cloudflare.com/dns-query"])
-        # Клиентам — до смены глобального списка.
+        # Клиентам, до смены глобального списка.
         paths = [p for p, _ in self.agh.posts]
         self.assertLess(paths.index("/control/clients/add"),
                         paths.index("/control/dns_config"))
@@ -655,7 +655,7 @@ class TestClientsMode(_Base):
 
     def test_client_on_global_copy_is_global(self):
         # Записи о прошлом применении нет, а upstream'ы клиента равны
-        # глобальным — это клиент «на глобальных»: снятие вернёт его к [].
+        # глобальным, это клиент «на глобальных»: снятие вернёт его к [].
         self.agh.client("phone")["upstreams"] = list(
             self.agh.info["upstream_dns"])
         self.settings(clients=["10.10.10.6"])
@@ -935,12 +935,12 @@ class TestSingboxRestart(_Base):
     def test_rollback_save_failure_is_reported(self):
         self.settings()
         self.sb.restart_fail = True
-        self.sb.save_fail_after = 1      # новый сохранится, откат — нет
+        self.sb.save_fail_after = 1      # новый сохранится, откат, нет
         r = agh_routes.apply()
         self.assertFalse(r["ok"])
         self.assertFalse(r["singbox"]["rolled_back"])
         self.assertIn("вернуть прежний конфиг не удалось", r["error"])
-        # В файле новый конфиг — так и запоминаем.
+        # В файле новый конфиг, так и запоминаем.
         rules = agh_routes.get_settings()["_applied"]["singbox"]["rules"]
         self.assertEqual(len(rules), 2)
 
@@ -1111,7 +1111,7 @@ class TestConnectionAndValidation(_Base):
                                         "agh_password": "other"})
         self.assertTrue(r["ok"])
         self.assertEqual(self.agh.auth[-1], ("admin", "other"))
-        # Тот же адрес — можно без пароля (берётся сохранённый).
+        # Тот же адрес, можно без пароля (берётся сохранённый).
         r = agh_routes.test_connection({"agh_url": "http://127.0.0.1:3000/"})
         self.assertTrue(r["ok"])
         self.assertEqual(self.agh.auth[-1], ("admin", "pw"))

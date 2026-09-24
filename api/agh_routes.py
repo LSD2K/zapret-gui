@@ -3,19 +3,19 @@
 API маршрутов через AdGuard Home («какие домены в какой туннель»).
 
 Эндпоинты:
-  GET  /api/agh-routes          — настройки (пароль замаскирован)
-  PUT  /api/agh-routes          — частичное обновление (пустой пароль и
+  GET  /api/agh-routes         , настройки (пароль замаскирован)
+  PUT  /api/agh-routes         , частичное обновление (пустой пароль и
                                   маска *** пароль не меняют)
-  GET  /api/agh-routes/sources  — что можно выбрать в правилах: hostlist'ы,
-                                  named lists, geosite; ?config=<имя> —
+  GET  /api/agh-routes/sources , что можно выбрать в правилах: hostlist'ы,
+                                  named lists, geosite; ?config=<имя> -
                                   ещё outbound'ы этого конфига sing-box
-  GET  /api/agh-routes/plan     — что изменит применение, без записи
-  POST /api/agh-routes/apply    — применить (sing-box, затем AdGuard)
-  POST /api/agh-routes/test     — связь с AdGuard Home (версия); в теле
+  GET  /api/agh-routes/plan    , что изменит применение, без записи
+  POST /api/agh-routes/apply   , применить (sing-box, затем AdGuard)
+  POST /api/agh-routes/test    , связь с AdGuard Home (версия); в теле
                                   можно передать несохранённые
                                   agh_url/agh_user/agh_password
 
-Логика — core/agh_routes.py.
+Логика, core/agh_routes.py.
 """
 
 from bottle import request, response
@@ -70,7 +70,7 @@ def register(app):
 
     @app.post("/api/agh-routes/apply")
     def api_agh_routes_apply():
-        """Применить маршруты. Ошибки плана — ok:false + errors (HTTP 200:
+        """Применить маршруты. Ошибки плана, ok:false + errors (HTTP 200:
         страница показывает их списком)."""
         response.content_type = "application/json; charset=utf-8"
         from core import agh_routes

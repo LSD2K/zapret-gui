@@ -1,5 +1,5 @@
 /**
- * agh_routes.js — «Туннель: домены → outbound».
+ * agh_routes.js, «Туннель: домены → outbound».
  *
  * Одно место правды для схемы gw: правила «списки доменов → outbound
  * sing-box». Из них бэкенд (core/agh_routes.py) раскладывает route rules
@@ -161,7 +161,7 @@ const AghRoutesPage = (() => {
                 <div class="form-group" style="max-width:360px;">
                     <label class="form-label" for="agr-config">Конфиг</label>
                     <select class="form-input" id="agr-config" data-field="singbox_config">
-                        <option value="">— не выбран —</option>${missingCfg}${cfgOpts}
+                        <option value="">- не выбран -</option>${missingCfg}${cfgOpts}
                     </select>
                 </div>
                 <div class="form-hint">
@@ -199,7 +199,7 @@ const AghRoutesPage = (() => {
         if (!a.at) return 'ещё не применялось';
         const when = new Date(a.at * 1000).toLocaleString();
         const where = a.mode === 'clients' ? `клиентам AdGuard: ${a.clients}` : 'глобально в AdGuard';
-        return `применено ${esc(when)}: ${a.singbox_rules} правил в «${esc(a.singbox_config || '—')}», ${where}`;
+        return `применено ${esc(when)}: ${a.singbox_rules} правил в «${esc(a.singbox_config || '-')}», ${where}`;
     }
 
     function listLabel(id) {
@@ -228,7 +228,7 @@ const AghRoutesPage = (() => {
 
     function outboundOptions(cur) {
         const tags = sources.outbounds || [];
-        let html = '<option value="">— outbound —</option>';
+        let html = '<option value="">- outbound -</option>';
         html += tags.map(t => `<option value="${escAttr(t.tag)}" ${t.tag === cur ? 'selected' : ''}>`
             + `${esc(t.tag)}${t.type ? ' · ' + esc(t.type) : ''}</option>`).join('');
         if (cur && !tags.some(t => t.tag === cur)) {
@@ -474,7 +474,7 @@ const AghRoutesPage = (() => {
     function apply() {
         return withBusy(async () => {
             if (dirty && !(await save(true))) return;
-            const cfg = st.singbox_config || '—';
+            const cfg = st.singbox_config || '-';
             const ok = await Confirm.show('Применить маршруты?',
                 `Конфиг sing-box «${esc(cfg)}» будет перезаписан (запущенный инстанс перезапустится), `
                 + 'в AdGuard Home заменятся наши upstream-строки. Чужие строки и правила не трогаются.',
@@ -505,7 +505,7 @@ const AghRoutesPage = (() => {
                 Toast.success('Применено');
                 const sb = r.singbox || {};
                 // Ни процесс панели, ни юнит sing-box-gui этот конфиг не
-                // крутят — перезапускать больше некому.
+                // крутят, перезапускать больше некому.
                 if (sb.saved && !sb.restarted && !sb.restart_via) {
                     Toast.warning(`Конфиг «${sb.config}» сохранён, но не запущен ни панелью, ни юнитом sing-box-gui: перезапустите sing-box вручную`, 10000);
                 }
@@ -575,7 +575,7 @@ const AghRoutesPage = (() => {
         const ruleRows = (p.rules || []).map(r => `
             <tr>
                 <td>${esc(r.name)}</td>
-                <td>${esc(r.outbound || '—')}</td>
+                <td>${esc(r.outbound || '-')}</td>
                 <td>${r.skipped ? `<span class="text-muted">${esc(r.skipped)}</span>` : r.domains}</td>
                 <td class="text-muted" style="font-size:11px;">${esc((r.sample || []).join(', '))}</td>
             </tr>`).join('');
@@ -623,7 +623,7 @@ const AghRoutesPage = (() => {
                 <thead><tr><th>Правило</th><th style="width:18%;">Outbound</th><th style="width:12%;">Доменов</th><th>Примеры</th></tr></thead>
                 <tbody>${ruleRows}</tbody></table>` : ''}
 
-            <div class="card-title" style="margin:8px 0 4px;">sing-box «${esc(sb.config || '—')}» ${sbState}
+            <div class="card-title" style="margin:8px 0 4px;">sing-box «${esc(sb.config || '-')}» ${sbState}
                 ${sb.changed ? '<span class="badge badge-warning">будет изменён</span>' : ''}</div>
             <div style="font-size:12.5px;">
                 наших правил сейчас: ${(sb.rules_current || []).length}, после применения: ${(sb.rules_desired || []).length}
