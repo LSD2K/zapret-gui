@@ -411,6 +411,8 @@ const AghRoutesPage = (() => {
             rules: (st.rules || []).map(r => ({
                 id: r.id || '', name: r.name || '', enabled: r.enabled !== false,
                 outbound: r.outbound || '', lists: r.lists || [], domains: r.domains || [],
+                // подсетей на странице нет, но при сохранении их не теряем
+                subnets: r.subnets || [],
             })),
         };
         if (pw) p.agh_password = pw;

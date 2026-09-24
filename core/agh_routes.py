@@ -9,7 +9,9 @@
       в выбранный конфиг: сразу после ``hijack-dns`` (нет его, после
       ``sniff``, нет и его, в начало) и до ``{"inbound": ["tun-in"], ...}``.
       Сам конфиг собирает FakeIP-сборщик в режиме внешнего фронт-DNS,
-      этот модуль его только дополняет;
+      этот модуль его только дополняет. Подсети правила (``subnets``, для
+      приложений, ходящих по IP без DNS) ставятся рядом отдельным правилом
+      ``{"ip_cidr": [...], "outbound": tag}``, в AdGuard они не попадают;
   (б) upstream-строки AdGuard Home ``[/a.com/b.org/]127.0.0.1:1053`` -
       глобально (``/control/dns_config``) или поклиентно
       (``/control/clients/*``), чтобы AdGuard отдавал домены из правил в
@@ -149,6 +151,30 @@ def _split_tokens(v) -> list:
             line = line.split("#", 1)[0]
             tokens.extend(t for t in re.split(r"[\s,;]+", line) if t)
     return tokens
+
+
+def _clean_subnets(tokens, name: str, warns: list) -> list:
+    """Подсети правила: только IPv4, адрес без маски = /32, хост-биты
+    обнуляются (149.154.167.41/20 → 149.154.160.0/20). IPv6 и мусор
+    отбрасываются с предупреждением. Порядок сохраняется, без дублей."""
+    out, bad, v6 = [], [], []
+    for tok in tokens:
+        try:
+            net = ipaddress.ip_network(tok, strict=False)
+        except ValueError:
+            bad.append(tok)
+            continue
+        if net.version != 4:
+            v6.append(tok)
+            continue
+        out.append(str(net))
+    if bad:
+        warns.append("правило «%s»: отброшено %d подсетей (%s)"
+                     % (name, len(bad), ", ".join(bad[:5])))
+    if v6:
+        warns.append("правило «%s»: IPv6 не поддерживается, отброшено "
+                     "(%s)" % (name, ", ".join(v6[:5])))
+    return _dedup(out)
 
 
 def _dedup(seq) -> list:
@@ -328,6 +354,9 @@ def public_settings(s: dict = None) -> dict:
     """Настройки для API: пароль замаскирован, служебное вынесено."""
     s = copy.deepcopy(s if s is not None else get_settings())
     applied = s.pop("_applied", None) or {}
+    for r in s.get("rules") or []:
+        if isinstance(r, dict):
+            r.setdefault("subnets", [])
     s["has_password"] = bool(s.get("agh_password"))
     if s.get("agh_password"):
         s["agh_password"] = MASK
@@ -469,6 +498,10 @@ def _clean_rules(v) -> tuple:
         if dropped:
             warns.append("правило «%s»: отброшено %d записей (%s)"
                          % (name, len(dropped), ", ".join(dropped[:5])))
+        subnets = _clean_subnets(
+            _split_tokens(_need_str_list(r.get("subnets"),
+                                         where + "subnets",
+                                         allow_text=True)), name, warns)
         lists = _need_str_list(r.get("lists"), where + "lists")
         lists = _dedup(x.strip() for x in lists if x.strip())
         if any(len(x) > 200 for x in lists):
@@ -480,6 +513,7 @@ def _clean_rules(v) -> tuple:
             "outbound": (r.get("outbound") or "").strip(),
             "lists": lists,
             "domains": domains,
+            "subnets": subnets,
         })
     return out, warns
 
@@ -747,9 +781,9 @@ def test_connection(overrides: dict = None) -> dict:
 # ─────────────────────── план ────────────────────────────────────────
 
 def _rules_part(s: dict, enabled: bool, errors: list, warnings: list):
-    """Домены по правилам с учётом «первое правило выигрывает».
+    """Домены и подсети по правилам с учётом «первое правило выигрывает».
     Возвращает (rules_info, rules_desired, all_domains)."""
-    info, desired, assigned = [], [], {}
+    info, desired, assigned, nets_assigned = [], [], {}, {}
     for r in s.get("rules") or []:
         if not isinstance(r, dict):
             continue
@@ -757,7 +791,8 @@ def _rules_part(s: dict, enabled: bool, errors: list, warnings: list):
         item = {"id": r.get("id") or "", "name": name,
                 "enabled": bool(r.get("enabled", True)),
                 "outbound": str(r.get("outbound") or ""),
-                "domains": 0, "sample": [], "skipped": ""}
+                "domains": 0, "sample": [], "subnets": 0,
+                "subnets_sample": [], "skipped": ""}
         info.append(item)
         if not enabled or not item["enabled"]:
             item["skipped"] = "выключено"
@@ -795,15 +830,55 @@ def _rules_part(s: dict, enabled: bool, errors: list, warnings: list):
                                                        ", ".join(single[:5])))
         item["domains"] = len(own)
         item["sample"] = own[:5]
-        if not own:
+        nets = _rule_subnets(r, name, nets_assigned, warnings)
+        item["subnets"] = len(nets)
+        item["subnets_sample"] = nets[:5]
+        if not own and not nets:
             item["skipped"] = "нет доменов"
             warnings.append("правило «%s»: нет доменов, пропущено" % name)
             continue
         if not item["outbound"]:
             errors.append("правило «%s»: не выбран outbound" % name)
             continue
-        desired.append({"domain_suffix": own, "outbound": item["outbound"]})
+        if own:
+            desired.append({"domain_suffix": own,
+                            "outbound": item["outbound"]})
+        if nets:
+            desired.append({"ip_cidr": nets, "outbound": item["outbound"]})
     return info, desired, sorted(assigned)
+
+
+def _rule_subnets(rule, name, nets_assigned, warnings) -> list:
+    """Подсети правила без уже занятых правилами выше (первое выигрывает).
+    Вложенные подсети разных правил только предупреждение: в sing-box
+    сработает правило выше. nets_assigned пополняется."""
+    own, dup, overlap = [], {}, {}
+    for raw in rule.get("subnets") or []:
+        try:
+            net = ipaddress.ip_network(str(raw), strict=False)
+        except ValueError:
+            continue
+        if net.version != 4:
+            continue
+        key = str(net)
+        if key in nets_assigned:
+            other = nets_assigned[key][0]
+            if other != name:
+                dup[other] = dup.get(other, 0) + 1
+            continue
+        for other, other_net in nets_assigned.values():
+            if other != name and net.overlaps(other_net):
+                overlap[other] = overlap.get(other, 0) + 1
+                break
+        nets_assigned[key] = (name, net)
+        own.append(key)
+    for other, n in dup.items():
+        warnings.append("правило «%s»: %d подсетей уже есть в правиле "
+                        "«%s», берётся первое" % (name, n, other))
+    for other, n in overlap.items():
+        warnings.append("правило «%s»: %d подсетей пересекаются с "
+                        "подсетями правила «%s»" % (name, n, other))
+    return own
 
 
 def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
@@ -861,10 +936,10 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
         sb["systemd"] = bool(singbox_autostart.unit_runs_config(name))
     tags = outbound_tags(cfg)
     sb["outbounds"] = [t["tag"] for t in tags]
-    for rule in rules_desired:
-        if rule["outbound"] not in sb["outbounds"]:
+    for ob in _dedup(rule["outbound"] for rule in rules_desired):
+        if ob not in sb["outbounds"]:
             errors.append("outbound «%s» не найден в конфиге sing-box «%s»"
-                          % (rule["outbound"], name))
+                          % (ob, name))
     cur_rules = ((cfg.get("route") or {}).get("rules") or []) \
         if isinstance(cfg.get("route"), dict) else []
     sb["rules_current"] = [x for x in cur_rules if x in old]
@@ -1125,7 +1200,7 @@ def _compute(s: dict) -> tuple:
 
     rules_info, rules_desired, domains = _rules_part(s, enabled, errors,
                                                      warnings)
-    if enabled and not domains:
+    if enabled and not domains and not rules_desired:
         warnings.append("нет ни одного домена: применение снимет всё, что "
                         "было поставлено раньше")
     lines = render_agh_lines(domains, target) if target_ok else []

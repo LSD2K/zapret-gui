@@ -25,7 +25,8 @@
                                            #   для которых ставится per-client upstream (поэтапное включение)
     "rules": [                             # порядок = приоритет (первое совпадение в sing-box)
         # {"id": "ai", "name": "AI-сервисы", "enabled": True, "outbound": "mieruNeth",
-        #  "lists": ["hl:claude", "geosite:openai", "<named list id>"], "domains": ["example.org"]}
+        #  "lists": ["hl:claude", "geosite:openai", "<named list id>"], "domains": ["example.org"],
+        #  "subnets": ["149.154.160.0/20"]}   # IPv4 CIDR для приложений без DNS (спека T2)
     ],
 }
 ```
@@ -69,6 +70,17 @@
 (доступные списки: hostlists, named lists с названиями, известные geosite-алиасы),
 `GET /api/agh-routes/plan`, `POST /api/agh-routes/apply`, `POST /api/agh-routes/test`.
 Зарегистрировать в `api/__init__.py` как остальные.
+
+Подсети правила (спека T2, `spec-t2-tun-dns-mode-subnets.md`): поле `subnets` в
+`PUT` принимает список строк или текст с разделителями как у `domains`; хранится
+нормализованным (только IPv4, адрес без маски = `/32`, хост-биты обнуляются, без
+дублей; IPv6 и мусор отбрасываются с предупреждением в `warnings`). `GET` отдаёт
+`subnets` у каждого правила (у старых `[]`). В `plan`/`apply` у `rules[]` есть
+`subnets` (число) и `subnets_sample` (до 5). В sing-box правило с подсетями даёт
+`{"ip_cidr": [...], "outbound": tag}` сразу после своего `domain_suffix` (или одно,
+если доменов нет); одинаковая подсеть в двух правилах достаётся первому, вложенные
+подсети разных правил только предупреждение. В AdGuard подсети не уходят, маршрут
+подсетей в TUN ставит панель.
 
 ## UI
 Страница `agh-routes` («Туннель: домены → outbound») в `web/js/pages/agh_routes.js`,

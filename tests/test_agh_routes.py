@@ -1175,5 +1175,119 @@ class TestConnectionAndValidation(_Base):
         self.assertEqual(code, 400)
 
 
+# ─────────────────────── подсети (спека T2) ──────────────────────────
+
+TG = ["149.154.160.0/20", "91.108.4.0/22"]
+
+
+class TestSubnets(_Base):
+
+    def test_normalize(self):
+        rules, warns = agh_routes._clean_rules([
+            {"name": "TG", "outbound": "Finland",
+             "subnets": "149.154.167.41\n149.154.167.41/20, 91.108.4.0/22"
+                        " # dc\n2001:67c:4e8::/48 мусор 149.154.160.0/20"}])
+        self.assertEqual(rules[0]["subnets"], ["149.154.167.41/32",
+                                               "149.154.160.0/20",
+                                               "91.108.4.0/22"])
+        self.assertTrue(any("IPv6 не поддерживается" in w for w in warns))
+        self.assertTrue(any("мусор" in w for w in warns))
+        # список строк тоже принимается, нет поля = []
+        rules, _ = agh_routes._clean_rules([
+            {"name": "A", "subnets": ["10.0.0.1/8"]}, {"name": "B"}])
+        self.assertEqual(rules[0]["subnets"], ["10.0.0.0/8"])
+        self.assertEqual(rules[1]["subnets"], [])
+        with self.assertRaises(ValueError):
+            agh_routes._clean_rules([{"name": "A", "subnets": [1]}])
+
+    def test_rule_with_subnets_only(self):
+        self.settings(rules=[{"id": "tg", "name": "TG", "outbound": "Finland",
+                              "subnets": TG}])
+        p = agh_routes.plan()
+        self.assertEqual(p["rules"][0]["subnets"], 2)
+        self.assertEqual(p["rules"][0]["subnets_sample"], TG)
+        self.assertEqual(p["rules"][0]["skipped"], "")
+        self.assertFalse(any("пропущено" in w for w in p["warnings"]))
+        self.assertEqual(p["singbox"]["rules_desired"],
+                         [{"ip_cidr": TG, "outbound": "Finland"}])
+        r = agh_routes.apply()
+        self.assertTrue(r["ok"], r)
+        rules = self.sb.parsed("gw")["route"]["rules"]
+        self.assertEqual(rules[2], {"ip_cidr": TG, "outbound": "Finland"})
+        self.assertEqual(rules[3]["inbound"], ["tun-in"])
+        # AdGuard подсетей не касается
+        self.assertFalse(any("149.154" in x
+                             for x in self.agh.info["upstream_dns"]))
+
+    def test_ip_cidr_after_domain_suffix(self):
+        self.settings(rules=[
+            {"id": "tg", "name": "TG", "outbound": "Finland",
+             "domains": ["telegram.org"], "subnets": TG},
+            {"id": "ai", "name": "AI", "outbound": "mieruNeth",
+             "domains": ["claude.ai"]}])
+        self.assertTrue(agh_routes.apply()["ok"])
+        rules = self.sb.parsed("gw")["route"]["rules"]
+        self.assertEqual(rules[2:5], [
+            {"domain_suffix": ["telegram.org"], "outbound": "Finland"},
+            {"ip_cidr": TG, "outbound": "Finland"},
+            {"domain_suffix": ["claude.ai"], "outbound": "mieruNeth"}])
+        applied = agh_routes.get_settings()["_applied"]["singbox"]["rules"]
+        self.assertIn({"ip_cidr": TG, "outbound": "Finland"}, applied)
+
+    def test_reapply_replaces_old_ip_cidr_keeps_foreign(self):
+        manual = {"ip_cidr": ["203.0.113.0/24"], "outbound": "Finland"}
+        self.sb.configs["gw"] = json.dumps(b2_config([manual]))
+        self.settings(rules=[{"id": "tg", "name": "TG", "outbound": "Finland",
+                              "subnets": TG}])
+        self.assertTrue(agh_routes.apply()["ok"])
+        rules = agh_routes.get_settings()["rules"]
+        rules[0]["subnets"] = ["95.161.64.0/20"]
+        agh_routes.update_settings({"rules": rules})
+        self.assertTrue(agh_routes.apply()["ok"])
+        cidr = [r for r in self.sb.parsed("gw")["route"]["rules"]
+                if "ip_cidr" in r]
+        self.assertEqual(cidr, [
+            {"ip_cidr": ["95.161.64.0/20"], "outbound": "Finland"}, manual])
+        # подсети убрали совсем, чужое правило всё равно на месте
+        rules[0]["subnets"] = []
+        rules[0]["domains"] = ["telegram.org"]
+        agh_routes.update_settings({"rules": rules})
+        self.assertTrue(agh_routes.apply()["ok"])
+        cidr = [r for r in self.sb.parsed("gw")["route"]["rules"]
+                if "ip_cidr" in r]
+        self.assertEqual(cidr, [manual])
+
+    def test_first_rule_wins_and_overlap_warning(self):
+        self.settings(rules=[
+            {"name": "A", "outbound": "mieruNeth",
+             "subnets": ["149.154.160.0/20"]},
+            {"name": "B", "outbound": "Finland",
+             "subnets": ["149.154.160.0/20", "149.154.167.0/24",
+                         "91.108.4.0/22"]}])
+        p = agh_routes.plan()
+        rd = p["singbox"]["rules_desired"]
+        self.assertEqual(rd[0]["ip_cidr"], ["149.154.160.0/20"])
+        self.assertEqual(rd[1]["ip_cidr"], ["149.154.167.0/24",
+                                            "91.108.4.0/22"])
+        self.assertTrue(any("подсетей уже есть в правиле «A», берётся "
+                            "первое" in w for w in p["warnings"]))
+        self.assertTrue(any("пересекаются" in w for w in p["warnings"]))
+
+    def test_api_roundtrip(self):
+        client = WSGIClient(build_test_app())
+        r = client.put_json("/api/agh-routes", {"rules": [
+            {"id": "tg", "name": "TG", "outbound": "Finland",
+             "subnets": "149.154.167.41/20\n91.108.4.0/22"}]})
+        self.assertEqual(r["_status"], 200)
+        g = client.get_json("/api/agh-routes")
+        self.assertEqual(g["settings"]["rules"][0]["subnets"], TG)
+        # правило, сохранённое до T2, отдаётся с пустыми subnets
+        self.cm.set("agh_routes", "rules", [
+            {"id": "old", "name": "old", "enabled": True,
+             "outbound": "Finland", "lists": [], "domains": ["a.com"]}])
+        g = client.get_json("/api/agh-routes")
+        self.assertEqual(g["settings"]["rules"][0]["subnets"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
