@@ -44,6 +44,7 @@ REST API для sing-box.
                                                   сервер (body: {tag})
   POST   /api/singbox/configs/<name>/prune-invalid  — найти/удалить серверы
                                                   с битым ключом (body:{apply})
+  POST   /api/singbox/parse-links           : ссылки → outbound'ы, без записи
   POST   /api/singbox/export-links          — outbounds|config → share-ссылки
                                                   (для копирования в буфер)
 
@@ -1167,6 +1168,45 @@ def register(app):
             except Exception:
                 pass
         return res
+
+    @app.route("/api/singbox/parse-links", method="POST")
+    def singbox_parse_links():
+        """
+        Разбор share-ссылок в outbound'ы sing-box без записи конфига (для
+        внешних панелей: они сами решают, куда вставить outbound).
+
+        body: {"text": "<ссылки через перевод строки>"}. Ответ:
+        {"ok", "outbounds": [...], "errors": [{"scheme", "error"}],
+        "schemes": [...]}. Ни одна не разобралась: 400 с первой ошибкой.
+        Сами ссылки в ответ не попадают (в них логины и пароли).
+        """
+        response.content_type = "application/json; charset=utf-8"
+        try:
+            body = request.json or {}
+        except Exception:
+            body = {}
+        from core.singbox_subscription import _HANDLERS, uri_to_outbound
+        schemes = sorted(_HANDLERS)
+        text = str(body.get("text") or "").strip()
+        if not text:
+            response.status = 400
+            return {"ok": False, "error": "Пустой текст", "schemes": schemes}
+        lines = [x.strip() for x in text.splitlines() if x.strip()]
+        outbounds, errors = [], []
+        for uri in lines:
+            r = uri_to_outbound(uri)
+            if r.get("ok") and r.get("outbound"):
+                outbounds.append(r["outbound"])
+            else:
+                scheme = uri.split("://", 1)[0].lower() if "://" in uri else ""
+                errors.append({"scheme": scheme[:20],
+                               "error": r.get("error") or "не разобрана"})
+        if not outbounds:
+            response.status = 400
+            return {"ok": False, "error": errors[0]["error"],
+                    "errors": errors, "schemes": schemes}
+        return {"ok": True, "outbounds": outbounds, "errors": errors,
+                "schemes": schemes}
 
     @app.route("/api/singbox/export-links", method="POST")
     def singbox_export_links():

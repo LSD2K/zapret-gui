@@ -463,3 +463,44 @@ class TestGvisorStackFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestParseLinks(unittest.TestCase):
+    """POST /api/singbox/parse-links: разбор без записи конфига."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = WSGIClient(build_test_app())
+
+    def test_parses_without_saving(self):
+        text = ("vless://11111111-2222-3333-4444-555555555555@203.0.113.5:443"
+                "?type=ws&path=%2Fws&security=tls&sni=example.com#nl1\n"
+                "mierus://user:pass@203.0.113.6?port=9000-9010&protocol=TCP"
+                "&profile=fin\n"
+                "wg://nope")
+        with mock.patch("core.singbox_manager.SingboxManager.save_config"
+                        ) as save:
+            r = self.client.post_json("/api/singbox/parse-links",
+                                      {"text": text})
+        save.assert_not_called()
+        self.assertEqual(r["_status"], 200)
+        self.assertTrue(r["ok"])
+        self.assertEqual([o["type"] for o in r["outbounds"]],
+                         ["vless", "mieru"])
+        self.assertEqual(r["outbounds"][0]["tag"], "nl1")
+        self.assertEqual(r["outbounds"][1]["server_ports"], ["9000-9010"])
+        self.assertEqual(r["errors"][0]["scheme"], "wg")
+        self.assertIn("vless", r["schemes"])
+        self.assertNotIn("pass", str(r["errors"]))
+
+    def test_nothing_parsed_is_400(self):
+        r = self.client.post_json("/api/singbox/parse-links",
+                                  {"text": "trojan://@:bad"})
+        self.assertEqual(r["_status"], 400)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["error"])
+        self.assertIn("mierus", r["schemes"])
+
+    def test_empty_text_is_400(self):
+        r = self.client.post_json("/api/singbox/parse-links", {})
+        self.assertEqual(r["_status"], 400)
