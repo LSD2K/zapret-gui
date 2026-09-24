@@ -128,6 +128,8 @@ class TestEngineSnapshot(unittest.TestCase):
                     mock.patch("core.singbox_subscription.uri_to_outbound",
                                return_value={"ok": True,
                                              "outbound": dict(vless)}),
+                    mock.patch("core.config_manager.get_config_manager",
+                               return_value=_FakeCM()),
                 ]
                 for p in ps:
                     p.start()
@@ -245,9 +247,9 @@ def _vless(tag="p1", server="1.2.3.4"):
 
 
 # Целевая форма из спеки (проверена sing-box 1.14.1: check + run). Одно
-# отличие от текста спеки: у dns-direct нет `detour: direct` — typed-сервер
-# с detour на пустой direct проходит check, но падает на run (FATAL
-# «detour to an empty direct outbound makes no sense»).
+# отличие от первой редакции спеки: у dns-direct нет `detour: direct` —
+# typed-сервер с detour на пустой direct проходит check, но падает на run
+# (FATAL «detour to an empty direct outbound makes no sense»).
 EXPECTED_ONE_PROXY = {
     "log": {"level": "info"},
     "dns": {
@@ -258,6 +260,8 @@ EXPECTED_ONE_PROXY = {
         ],
         "rules": [
             {"query_type": ["AAAA"], "action": "predefined",
+             "rcode": "NOERROR"},
+            {"query_type": ["HTTPS", "SVCB"], "action": "predefined",
              "rcode": "NOERROR"},
             {"query_type": ["A"], "server": "dns-fakeip"},
         ],
@@ -309,6 +313,16 @@ class TestExternalConfig(unittest.TestCase):
         self.assertEqual(list(cfg), ["log", "dns", "inbounds", "outbounds",
                                      "route", "experimental"])
 
+    def test_https_svcb_rule_sits_between_aaaa_and_a(self):
+        rules = _external()["dns"]["rules"]
+        self.assertEqual([r["query_type"] for r in rules],
+                         [["AAAA"], ["HTTPS", "SVCB"], ["A"]])
+
+    def test_engine_has_no_https_rule(self):
+        eng = build_fakeip_config(proxy_outbound=_vless(),
+                                  proxied_domains=["a.com"], typed_dns=True)
+        self.assertNotIn("HTTPS", render_conf(eng))
+
     def test_passes_structural_validator(self):
         from core.singbox_config import validate, parse_conf
         cfg = _external()
@@ -359,13 +373,13 @@ class TestExternalConfig(unittest.TestCase):
         self.assertEqual(cfg["dns"]["servers"][0]["domain_resolver"],
                          "dns-bootstrap")
 
-    def test_bad_direct_dns_raises(self):
-        with self.assertRaises(ValueError):
-            _external(direct_dns="quic://1.1.1.1")
-
-    def test_unknown_front_raises(self):
-        with self.assertRaises(ValueError):
-            _external(front_dns="agh")
+    def test_bad_input_raises(self):
+        for kw in (dict(direct_dns="quic://1.1.1.1"), dict(front_dns="agh"),
+                   dict(dns_listen="localhost"), dict(dns_port=True),
+                   dict(dns_port=0), dict(tun_address="172.19.0.1")):
+            with self.subTest(**{k: repr(v) for k, v in kw.items()}):
+                with self.assertRaises(ValueError):
+                    _external(**kw)
 
     def test_default_port_differs_by_mode(self):
         self.assertEqual(_external()["inbounds"][0]["listen_port"], 1053)
@@ -374,6 +388,39 @@ class TestExternalConfig(unittest.TestCase):
                                   capture_dns=True)
         dns_in = [i for i in eng["inbounds"] if i["tag"] == "dns-in"][0]
         self.assertEqual(dns_in["listen_port"], 1153)
+
+
+class TestNormalize(unittest.TestCase):
+    """Проверка ввода режима external."""
+
+    def test_tun_address(self):
+        from core.singbox_fakeip_front import norm_tun_address
+        self.assertEqual(norm_tun_address(" 172.19.0.5/30 "), "172.19.0.5/30")
+        self.assertEqual(norm_tun_address("fd00::1/126"), "fd00::1/126")
+        self.assertEqual(norm_tun_address(""), "172.19.0.1/30")
+        for bad in ("172.19.0.1", "172.19.0.1/33", "nope/30", "1.2.3/24"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    norm_tun_address(bad)
+
+    def test_port(self):
+        from core.singbox_fakeip_front import norm_port
+        self.assertEqual(norm_port(None), 1053)
+        self.assertEqual(norm_port(""), 1053)
+        self.assertEqual(norm_port("5300"), 5300)
+        for bad in (True, False, "abc", 0, 70000, [53]):
+            with self.subTest(value=repr(bad)):
+                with self.assertRaises(ValueError):
+                    norm_port(bad)
+
+    def test_listen(self):
+        from core.singbox_fakeip_front import norm_listen
+        self.assertEqual(norm_listen(None), "127.0.0.1")
+        self.assertEqual(norm_listen("[::1]"), "::1")
+        for bad in ("foo", "localhost", "127.0.0.1:53"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    norm_listen(bad)
 
 
 class TestExternalOutbounds(unittest.TestCase):
@@ -385,6 +432,9 @@ class TestExternalOutbounds(unittest.TestCase):
             proxy_endpoints=endpoints, front_dns="external")
         return cfg
 
+    def _sel(self, cfg):
+        return [o for o in cfg["outbounds"] if o["tag"] == "proxy-out"][0]
+
     def test_two_proxies_get_selector(self):
         cfg = self._obs([_vless("p1"), _vless("p2", "vpn.example.com")])
         self.assertEqual(cfg["outbounds"], [
@@ -394,12 +444,18 @@ class TestExternalOutbounds(unittest.TestCase):
             {"type": "direct", "tag": "direct"},
         ])
 
+    def test_selector_goes_before_first_direct(self):
+        cfg = self._obs([_vless("p1"), {"type": "direct", "tag": "direct"},
+                         _vless("p2")])
+        self.assertEqual([o["tag"] for o in cfg["outbounds"]],
+                         ["p1", "proxy-out", "direct", "p2"])
+        self.assertEqual(self._sel(cfg)["outbounds"], ["p1", "p2"])
+
     def test_groups_go_first(self):
         auto = {"type": "urltest", "tag": "auto", "outbounds": ["p1", "p2"]}
         cfg = self._obs([_vless("p1"), _vless("p2"), auto])
-        sel = [o for o in cfg["outbounds"] if o["tag"] == "proxy-out"][0]
-        self.assertEqual(sel["outbounds"], ["auto", "p1", "p2"])
-        self.assertEqual(sel["default"], "auto")
+        self.assertEqual(self._sel(cfg)["outbounds"], ["auto", "p1", "p2"])
+        self.assertEqual(self._sel(cfg)["default"], "auto")
 
     def test_existing_proxy_out_is_kept(self):
         mine = {"type": "selector", "tag": "proxy-out",
@@ -413,8 +469,7 @@ class TestExternalOutbounds(unittest.TestCase):
         cfg = self._obs([_vless("p1"), {"type": "direct", "tag": "direct"}])
         tags = [o["tag"] for o in cfg["outbounds"]]
         self.assertEqual(tags.count("direct"), 1)
-        sel = [o for o in cfg["outbounds"] if o["tag"] == "proxy-out"][0]
-        self.assertEqual(sel["outbounds"], ["p1"])
+        self.assertEqual(self._sel(cfg)["outbounds"], ["p1"])
 
     def test_endpoints_are_members(self):
         wg = {"type": "wireguard", "tag": "wg0", "address": ["10.0.0.2/32"],
@@ -423,8 +478,7 @@ class TestExternalOutbounds(unittest.TestCase):
         self.assertEqual(cfg["endpoints"], [wg])
         self.assertEqual(list(cfg)[:5], ["log", "dns", "inbounds",
                                          "outbounds", "endpoints"])
-        sel = [o for o in cfg["outbounds"] if o["tag"] == "proxy-out"][0]
-        self.assertEqual(sel["outbounds"], ["p1", "wg0"])
+        self.assertEqual(self._sel(cfg)["outbounds"], ["p1", "wg0"])
 
     def test_untagged_proxy_gets_tag(self):
         ob = _vless()
@@ -433,21 +487,66 @@ class TestExternalOutbounds(unittest.TestCase):
         self.assertEqual(cfg["outbounds"][0]["tag"], "proxy")
 
     def test_input_not_mutated(self):
-        obs = [_vless("p1")]
+        obs = [_vless("p1"), {**_vless("p2"), "domain_resolver": "x"}]
+        before = json.loads(json.dumps(obs))
         self._obs(obs)
-        self.assertEqual(obs, [_vless("p1")])
+        self.assertEqual(obs, before)
 
     def test_no_proxies_raises(self):
         with self.assertRaises(ValueError):
             self._obs([{"type": "direct", "tag": "direct"}])
 
+    def test_duplicate_tag_raises(self):
+        for obs, eps in (([_vless("p1"), _vless("p1", "5.6.7.8")], None),
+                         ([_vless("wg0")], [{"type": "wireguard",
+                                             "tag": "wg0"}])):
+            with self.subTest(obs=[o["tag"] for o in obs]):
+                with self.assertRaises(ValueError) as ctx:
+                    self._obs(obs, eps)
+                self.assertIn("повторяется", str(ctx.exception))
+
+    def test_direct_tag_on_proxy_raises(self):
+        with self.assertRaises(ValueError):
+            self._obs([_vless("direct")])
+
+    def test_group_members_filtered_and_deduped(self):
+        grp = {"type": "urltest", "tag": "auto",
+               "outbounds": ["p1", "gone", "p1", "p2", "block"]}
+        sel = {"type": "selector", "tag": "manual",
+               "outbounds": ["gone"], "default": "gone"}
+        top = {"type": "selector", "tag": "top",
+               "outbounds": ["manual", "auto"], "default": "manual"}
+        cfg = self._obs([_vless("p1"), _vless("p2"), grp, sel, top,
+                         {"type": "block", "tag": "block"}])
+        by = {o["tag"]: o for o in cfg["outbounds"]}
+        self.assertEqual(by["auto"]["outbounds"], ["p1", "p2"])
+        self.assertNotIn("manual", by)                 # пустая — выброшена
+        self.assertNotIn("block", by)                  # удалён в 1.13
+        self.assertEqual(by["top"]["outbounds"], ["auto"])
+        self.assertNotIn("default", by["top"])         # manual ушёл
+        self.assertEqual(self._sel(cfg)["outbounds"],
+                         ["auto", "top", "p1", "p2"])
+
+    def test_foreign_domain_resolver_dropped(self):
+        obs = [{**_vless("p1"), "domain_resolver": "my-dns"},
+               {**_vless("p2"), "domain_resolver": {"server": "dns-direct",
+                                                     "strategy": "ipv4_only"}},
+               {**_vless("p3"), "domain_resolver": {"strategy": "ipv4_only"}}]
+        cfg = self._obs(obs)
+        by = {o["tag"]: o for o in cfg["outbounds"]}
+        self.assertNotIn("domain_resolver", by["p1"])
+        self.assertEqual(by["p2"]["domain_resolver"]["server"], "dns-direct")
+        self.assertEqual(by["p3"]["domain_resolver"],
+                         {"strategy": "ipv4_only"})
+
 
 class _FakeCM:
     """Минимальный config manager (get/set/save), без записи на диск."""
 
-    def __init__(self, data=None):
+    def __init__(self, data=None, save_ok=True):
         self.data = json.loads(json.dumps(data or {}))
         self.saves = 0
+        self.save_ok = save_ok
 
     def get(self, *keys, default=None):
         node = self.data
@@ -467,15 +566,15 @@ class _FakeCM:
 
     def save(self):
         self.saves += 1
-        return True
+        return self.save_ok
 
 
 class TestFrontSidecar(unittest.TestCase):
     """п.4: режим хранится в settings.json → singbox.fakeip_front."""
 
     def setUp(self):
-        from core import singbox_fakeip
-        self.sf = singbox_fakeip
+        from core import singbox_fakeip_front
+        self.sf = singbox_fakeip_front
         self.cm = _FakeCM()
         self._p = mock.patch("core.config_manager.get_config_manager",
                              return_value=self.cm)
@@ -499,9 +598,65 @@ class TestFrontSidecar(unittest.TestCase):
         self.sf.forget_front("nope")
         self.assertEqual(self.cm.saves, 0)
 
+    def test_failed_save_raises_and_restores_memory(self):
+        self.cm.save_ok = False
+        with self.assertRaises(RuntimeError):
+            self.sf.remember_front("fi", {"front_dns": "external"})
+        self.assertFalse(self.sf.is_external_front("fi"))
+        self.assertEqual(self.cm.data["singbox"]["fakeip_front"], {})
+
+    def test_clear_front_reports_failure(self):
+        self.cm.data = {"singbox": {"fakeip_front": {
+            "fi": {"front_dns": "external"}}}}
+        self.cm.save_ok = False
+        err = self.sf.clear_front("fi")
+        self.assertIn("не удалось", err)
+        self.assertTrue(self.sf.is_external_front("fi"))
+
     def test_default_config_has_section(self):
         from core.config_manager import DEFAULT_CONFIG
         self.assertEqual(DEFAULT_CONFIG["singbox"]["fakeip_front"], {})
+
+
+class TestLoopWarnings(unittest.TestCase):
+    """Прямой DNS, который вернётся в AdGuard, и dns-in не на loopback."""
+
+    def _p(self, dd, listen="127.0.0.1", port=1053, own=()):
+        from core.singbox_fakeip_front import direct_dns_problems
+        return direct_dns_problems(dd, listen, port, own=own)
+
+    def test_warns(self):
+        for dd in ("local", "127.0.0.1", "127.0.0.1:53", "udp://127.0.0.53",
+                   "tls://127.0.0.1", "[::1]:53", "192.168.10.1"):
+            with self.subTest(dd=dd):
+                errors, warnings = self._p(dd, own={
+                    __import__("ipaddress").ip_address("192.168.10.1")})
+                self.assertEqual(errors, [])
+                self.assertTrue(any("петля" in w for w in warnings), warnings)
+
+    def test_quiet(self):
+        for dd in ("https://1.1.1.1/dns-query", "9.9.9.9", "127.0.0.1:5353",
+                   "https://cloudflare-dns.com/dns-query", "192.168.10.2"):
+            with self.subTest(dd=dd):
+                self.assertEqual(self._p(dd, own={
+                    __import__("ipaddress").ip_address("192.168.10.1")}),
+                    ([], []))
+
+    def test_self_loop_is_error(self):
+        errors, _ = self._p("127.0.0.1:1053")
+        self.assertTrue(errors)
+        errors, _ = self._p("udp://10.0.0.1:5300", listen="0.0.0.0",
+                            port=5300, own={
+                                __import__("ipaddress").ip_address(
+                                    "10.0.0.1")})
+        self.assertTrue(errors)
+
+    def test_listen_not_loopback_warns(self):
+        from core.singbox_fakeip_front import listen_warnings
+        self.assertEqual(listen_warnings("127.0.0.1"), [])
+        self.assertEqual(listen_warnings("::1"), [])
+        self.assertTrue(listen_warnings("192.168.1.1"))
+        self.assertTrue(listen_warnings("0.0.0.0"))
 
 
 class _Plat:
@@ -515,17 +670,25 @@ class _Plat:
 
 
 class _Mgr:
-    def __init__(self, check=None, cfg=None):
+    def __init__(self, check=None, cfg=None, save_ok=True, running=(),
+                 dns_in=None, others=()):
         self.check = check or {"ok": True}
         self.checked = []
         self.saved = None
         self.cfg = cfg
+        self.save_ok = save_ok
+        self.running = set(running)
+        self.dns_in = dict(dns_in or {})
+        self.others = list(others)
+        self.capture_removed = 0
 
     def check_text(self, text):
         self.checked.append(text)
         return self.check
 
     def save_config(self, name, text=""):
+        if not self.save_ok:
+            return {"ok": False, "error": "write: диск полон"}
         self.saved = (name, text)
         return {"ok": True, "warnings": []}
 
@@ -533,6 +696,19 @@ class _Mgr:
         if self.cfg is None:
             return {"ok": False}
         return {"ok": True, "parsed": self.cfg}
+
+    def is_running(self, name):
+        return name in self.running
+
+    def _config_dns_in_port(self, name):
+        return self.dns_in.get(name, 0)
+
+    def list_configs(self):
+        return [{"name": n, "running": n in self.running}
+                for n in [*self.dns_in, *self.others]]
+
+    def _remove_dns_capture(self):
+        self.capture_removed += 1
 
 
 class _HM:
@@ -554,7 +730,7 @@ class TestExternalOrchestrator(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _run(self, mgr, link=_vless(tag="my-srv"), nft=False, **kw):
+    def _run(self, mgr, link=_vless(tag="my-srv"), nft=False, own=(), **kw):
         plat = _Plat(self.tmp, nft)
         ps = [
             mock.patch("core.singbox_manager.get_singbox_manager",
@@ -567,6 +743,8 @@ class TestExternalOrchestrator(unittest.TestCase):
                        return_value={"ok": True, "outbound": dict(link)}),
             mock.patch("core.config_manager.get_config_manager",
                        return_value=self.cm),
+            mock.patch("core.singbox_fakeip_front._host_addresses",
+                       return_value=set(own)),
         ]
         for p in ps:
             p.start()
@@ -578,6 +756,9 @@ class TestExternalOrchestrator(unittest.TestCase):
             for p in ps:
                 p.stop()
 
+    def _fronts(self):
+        return self.cm.get("singbox", "fakeip_front", default={})
+
     def test_link_builds_saves_and_remembers(self):
         mgr = _Mgr()
         res = self._run(mgr, proxy_link="vless://x", hostlists=["yt"],
@@ -588,9 +769,11 @@ class TestExternalOrchestrator(unittest.TestCase):
         self.assertEqual((res["dns_listen"], res["dns_port"]),
                          ("127.0.0.1", 1053))
         self.assertEqual(res["direct_dns"], "https://1.1.1.1/dns-query")
+        self.assertEqual(res["domains"], 3)
         self.assertEqual(
             res["adguard_upstream"],
-            "[/example.org/youtube.com/googlevideo.com/]127.0.0.1:1053")
+            ["[/example.org/youtube.com/googlevideo.com/]127.0.0.1:1053"])
+        self.assertEqual(res["warnings"], [])
         # одна проверка (только typed), сохранено то, что проверено
         self.assertEqual(len(mgr.checked), 1)
         self.assertEqual(mgr.saved, ("fi", mgr.checked[0]))
@@ -603,14 +786,33 @@ class TestExternalOrchestrator(unittest.TestCase):
                          ["my-srv", "proxy-out", "direct"])
         # домены в конфиг не попадают — их отбирает AdGuard
         self.assertNotIn("youtube.com", mgr.saved[1])
-        self.assertEqual(self.cm.data["singbox"]["fakeip_front"]["fi"],
+        self.assertEqual(self._fronts()["fi"],
                          {"front_dns": "external", "dns_listen": "127.0.0.1",
                           "dns_port": 1053})
+
+    def test_default_name(self):
+        mgr = _Mgr()
+        res = self._run(mgr, proxy_link="vless://x", name="")
+        self.assertEqual(res["name"], "fakeip-agh")
+        self.assertEqual(mgr.saved[0], "fakeip-agh")
+
+    def test_upstream_split_by_40(self):
+        doms = ["d%03d.example" % i for i in range(95)]
+        res = self._run(_Mgr(), proxy_link="vless://x", domains=doms,
+                        dns_listen="::1", dns_port=5300)
+        lines = res["adguard_upstream"]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual([ln.count("/") - 1 for ln in lines], [40, 40, 15])
+        self.assertTrue(all(ln.endswith("]:5300") and "[::1]" in ln
+                            for ln in lines))
+        self.assertEqual(res["adguard_upstream_hint"], "[/домен/][::1]:5300")
 
     def test_no_domains_needed(self):
         res = self._run(_Mgr(), proxy_link="vless://x")
         self.assertTrue(res["ok"], res)
-        self.assertEqual(res["adguard_upstream"], "[/домен/]127.0.0.1:1053")
+        self.assertEqual(res["adguard_upstream"], [])
+        self.assertEqual(res["adguard_upstream_hint"],
+                         "[/домен/]127.0.0.1:1053")
 
     def test_same_on_nft_and_iptables(self):
         a, b = _Mgr(), _Mgr()
@@ -619,11 +821,19 @@ class TestExternalOrchestrator(unittest.TestCase):
         self.assertEqual(a.saved, b.saved)
         self.assertNotIn("auto_redirect", a.saved[1])
 
-    def test_cache_falls_back_to_run_dir(self):
+    def test_tun_address_normalized(self):
         mgr = _Mgr()
+        res = self._run(mgr, proxy_link="vless://x",
+                        tun_address=" 172.19.0.5/30 ")
+        self.assertEqual(res["tun_address"], "172.19.0.5/30")
+        tun = json.loads(mgr.saved[1])["inbounds"][1]
+        self.assertEqual(tun["address"], ["172.19.0.5/30"])
+
+    def test_cache_falls_back_to_run_dir(self):
+        from core.singbox_fakeip_front import fakeip_cache_path
         plat = _Plat(self.tmp)
         plat.data_dir = ""
-        self.assertEqual(self.sf.fakeip_cache_path("x", plat),
+        self.assertEqual(fakeip_cache_path("x", plat),
                          os.path.join(self.tmp, "run", "cache-x.db"))
 
     def test_proxy_config_takes_all_outbounds(self):
@@ -634,18 +844,22 @@ class TestExternalOrchestrator(unittest.TestCase):
             {"type": "block", "tag": "block"},
         ]}
         mgr = _Mgr(cfg=src)
-        with mock.patch("core.singbox_manager.get_singbox_manager",
-                        return_value=mgr):
-            res = self._run(mgr, link={}, proxy_config="pool")
+        res = self._run(mgr, link={}, proxy_config="pool")
         self.assertTrue(res["ok"], res)
         cfg = json.loads(mgr.saved[1])
         self.assertEqual([o["tag"] for o in cfg["outbounds"]],
                          ["a", "b", "auto", "proxy-out", "direct"])
-        sel = cfg["outbounds"][3]
-        self.assertEqual(sel, {"type": "selector", "tag": "proxy-out",
-                               "outbounds": ["auto", "a", "b"],
-                               "default": "auto"})
+        self.assertEqual(cfg["outbounds"][3],
+                         {"type": "selector", "tag": "proxy-out",
+                          "outbounds": ["auto", "a", "b"], "default": "auto"})
         self.assertEqual(res["proxies"], 2)
+
+    def test_proxy_config_with_duplicate_tags_is_rejected(self):
+        mgr = _Mgr(cfg={"outbounds": [_vless("a"), _vless("a", "5.6.7.8")]})
+        res = self._run(mgr, link={}, proxy_config="pool")
+        self.assertFalse(res["ok"])
+        self.assertIn("повторяется", res["error"])
+        self.assertIsNone(mgr.saved)
 
     def test_check_failure_is_reported_and_not_saved(self):
         mgr = _Mgr(check={"ok": False, "error": "FATAL bad"})
@@ -653,7 +867,7 @@ class TestExternalOrchestrator(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("FATAL bad", res["error"])
         self.assertIsNone(mgr.saved)
-        self.assertNotIn("singbox", self.cm.data)
+        self.assertEqual(self._fronts(), {})
 
     def test_no_binary_saves_with_warning(self):
         mgr = _Mgr(check={"ok": False, "no_binary": True})
@@ -661,22 +875,81 @@ class TestExternalOrchestrator(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertTrue(res["warning"])
 
+    def test_mark_write_failure_blocks_save(self):
+        self.cm.save_ok = False
+        mgr = _Mgr()
+        res = self._run(mgr, proxy_link="vless://x")
+        self.assertFalse(res["ok"])
+        self.assertIn("settings.json", res["error"])
+        self.assertIsNone(mgr.saved)
+        self.assertEqual(self._fronts(), {})
+
+    def test_config_write_failure_rolls_mark_back(self):
+        mgr = _Mgr(save_ok=False)
+        res = self._run(mgr, proxy_link="vless://x")
+        self.assertFalse(res["ok"])
+        self.assertEqual(self._fronts(), {})
+
+    def test_config_write_failure_restores_previous_mark(self):
+        prev = {"front_dns": "external", "dns_listen": "127.0.0.1",
+                "dns_port": 5300}
+        self.cm.data = {"singbox": {"fakeip_front": {"fi": dict(prev)}}}
+        res = self._run(_Mgr(save_ok=False), proxy_link="vless://x")
+        self.assertFalse(res["ok"])
+        self.assertEqual(self._fronts(), {"fi": prev})
+
+    def test_running_engine_with_capture_is_refused(self):
+        mgr = _Mgr(running={"fi"}, dns_in={"fi": 1153})
+        res = self._run(mgr, proxy_link="vless://x")
+        self.assertFalse(res["ok"])
+        self.assertIn("остановите", res["error"])
+        self.assertIsNone(mgr.saved)
+        self.assertEqual(mgr.capture_removed, 0)
+        self.assertEqual(self._fronts(), {})
+
+    def test_running_without_capture_is_fine(self):
+        mgr = _Mgr(running={"fi"})
+        self.assertTrue(self._run(mgr, proxy_link="vless://x")["ok"])
+
+    def test_stale_capture_of_stopped_engine_is_removed(self):
+        mgr = _Mgr(dns_in={"fi": 1153})
+        self.assertTrue(self._run(mgr, proxy_link="vless://x")["ok"])
+        self.assertEqual(mgr.capture_removed, 1)
+
+    def test_stale_capture_kept_for_other_running_config(self):
+        mgr = _Mgr(dns_in={"fi": 1153, "other": 1153}, running={"other"})
+        self.assertTrue(self._run(mgr, proxy_link="vless://x")["ok"])
+        self.assertEqual(mgr.capture_removed, 0)
+
     def test_input_validation(self):
-        for kw, frag in ((dict(dns_listen="localhost"), "IP"),
+        for kw, frag in ((dict(dns_listen="localhost"), "нужен IP"),
                          (dict(dns_port=70000), "диапазон"),
                          (dict(dns_port="x"), "число"),
+                         (dict(dns_port=True), "число"),
                          (dict(direct_dns="dns.google"), "не распознан"),
-                         (dict(tun_address="nope"), "CIDR"),
+                         (dict(tun_address="nope/30"), "CIDR"),
+                         (dict(tun_address="172.19.0.1"), "префикс"),
+                         (dict(direct_dns="127.0.0.1:1053"), "по кругу"),
                          (dict(front_dns="agh"), "front_dns")):
-            with self.subTest(**kw):
+            with self.subTest(**{k: repr(v) for k, v in kw.items()}):
                 res = self._run(_Mgr(), proxy_link="vless://x", **kw)
                 self.assertFalse(res["ok"])
                 self.assertIn(frag, res["error"])
 
-    def test_local_direct_dns_warns(self):
-        res = self._run(_Mgr(), proxy_link="vless://x", direct_dns="local")
-        self.assertTrue(res["ok"])
-        self.assertTrue(any("петля" in w for w in res["warnings"]))
+    def test_loop_warnings(self):
+        import ipaddress
+        for dd in ("local", "127.0.0.1", "127.0.0.1:53", "10.0.0.1"):
+            with self.subTest(dd=dd):
+                res = self._run(_Mgr(), proxy_link="vless://x", direct_dns=dd,
+                                own={ipaddress.ip_address("10.0.0.1")})
+                self.assertTrue(res["ok"], res)
+                self.assertTrue(any("петля" in w for w in res["warnings"]))
+
+    def test_lan_listen_warns(self):
+        res = self._run(_Mgr(), proxy_link="vless://x",
+                        dns_listen="192.168.1.1")
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(any("loopback" in w for w in res["warnings"]))
 
     def test_engine_build_forgets_external_mark(self):
         self.cm.data = {"singbox": {"fakeip_front": {
@@ -688,7 +961,20 @@ class TestExternalOrchestrator(unittest.TestCase):
             res = self._run(mgr, proxy_link="vless://x", front_dns="engine",
                             domains=["a.com"])
         self.assertTrue(res["ok"], res)
-        self.assertEqual(self.cm.data["singbox"]["fakeip_front"], {})
+        self.assertEqual(self._fronts(), {})
+
+    def test_engine_build_refused_when_mark_cannot_be_cleared(self):
+        self.cm.data = {"singbox": {"fakeip_front": {
+            "fi": {"front_dns": "external"}}}}
+        self.cm.save_ok = False
+        mgr = _Mgr()
+        with mock.patch("core.singbox_detector.get_singbox_detector") as det:
+            det.return_value.detect_binary.return_value = {
+                "version": "1.14.1", "installed": True}
+            res = self._run(mgr, proxy_link="vless://x", front_dns="engine",
+                            domains=["a.com"])
+        self.assertFalse(res["ok"])
+        self.assertIsNone(mgr.saved)
 
 
 class TestManagerExternalFront(unittest.TestCase):
@@ -717,14 +1003,19 @@ class TestManagerExternalFront(unittest.TestCase):
         ]
         for p in self._ps:
             p.start()
-        ext = _external(dns_port=1053)
         eng = build_fakeip_config(proxy_outbound=_vless(),
                                   proxied_domains=["a.com"],
                                   capture_dns=True, typed_dns=True)
-        self.mgr.save_config("ext", text=render_conf(ext))
+        # external на LAN-адресе: защищает только отметка в settings.json
+        self.mgr.save_config("ext", text=render_conf(
+            _external(dns_listen="192.168.1.1", dns_port=1053)))
         self.mgr.save_config("eng", text=render_conf(eng))
+        # dns-in на loopback без отметки (например, отметку потеряли)
+        self.mgr.save_config("lo", text=render_conf(_external()))
+        self.mgr.save_config("lo6", text=render_conf(
+            _external(dns_listen="::1")))
         self.cm.data = {"singbox": {"fakeip_front": {
-            "ext": {"front_dns": "external", "dns_listen": "127.0.0.1",
+            "ext": {"front_dns": "external", "dns_listen": "192.168.1.1",
                     "dns_port": 1053}}}}
 
     def tearDown(self):
@@ -747,15 +1038,19 @@ class TestManagerExternalFront(unittest.TestCase):
             r = self.mgr.up(name)
         return r, apply
 
-    def test_dns_in_port_is_zero_for_external(self):
+    def test_dns_in_port(self):
         self.assertEqual(self.mgr._config_dns_in_port("ext"), 0)
+        self.assertEqual(self.mgr._config_dns_in_port("lo"), 0)
+        self.assertEqual(self.mgr._config_dns_in_port("lo6"), 0)
         self.assertEqual(self.mgr._config_dns_in_port("eng"), 1153)
 
     def test_up_external_does_not_capture(self):
-        r, apply = self._up("ext")
-        self.assertTrue(r["ok"], r)
-        apply.assert_not_called()
-        self.assertNotIn("transparent", self.cm.data["singbox"])
+        for name in ("ext", "lo"):
+            with self.subTest(name=name):
+                r, apply = self._up(name)
+                self.assertTrue(r["ok"], r)
+                apply.assert_not_called()
+                self.assertNotIn("transparent", self.cm.data["singbox"])
 
     def test_up_engine_still_captures(self):
         # Контроль: тот же путь для engine ставит dns-only REDIRECT.
@@ -769,13 +1064,17 @@ class TestManagerExternalFront(unittest.TestCase):
         # Перехват от engine-конфига не снимается остановкой external.
         self.cm.data["singbox"]["transparent"] = {
             "mode": "dns-only", "dns_hijack_port": 1153}
-        with mock.patch.object(self.sm, "_run", return_value=(1, "", "")), \
-                mock.patch("core.singbox_transparent.remove") as rm:
-            r = self.mgr.down("ext")
-        self.assertTrue(r["ok"])
-        rm.assert_not_called()
-        self.assertEqual(self.cm.data["singbox"]["transparent"]["mode"],
-                         "dns-only")
+        for name in ("ext", "lo"):
+            with self.subTest(name=name):
+                with mock.patch.object(self.sm, "_run",
+                                       return_value=(1, "", "")), \
+                        mock.patch("core.singbox_transparent.remove") as rm:
+                    r = self.mgr.down(name)
+                self.assertTrue(r["ok"])
+                rm.assert_not_called()
+                self.assertEqual(
+                    self.cm.data["singbox"]["transparent"]["mode"],
+                    "dns-only")
 
     def test_delete_forgets_mark(self):
         r = self.mgr.delete_config("ext")
@@ -784,7 +1083,7 @@ class TestManagerExternalFront(unittest.TestCase):
 
 
 class TestFakeipApi(unittest.TestCase):
-    """п.6: параметры фронт-DNS доходят до build_and_save, дефолты по режиму."""
+    """п.6: параметры фронт-DNS доходят до build_and_save; ввод → 400."""
 
     @classmethod
     def setUpClass(cls):
@@ -798,27 +1097,55 @@ class TestFakeipApi(unittest.TestCase):
         self.assertEqual(r["_status"], 200)
         return bs.call_args.kwargs
 
-    def test_external_defaults(self):
+    def test_external_passthrough(self):
         kw = self._build({"front_dns": "external", "proxy_link": "vless://x"})
         self.assertEqual(kw["front_dns"], "external")
-        self.assertEqual(kw["dns_port"], 1053)
-        self.assertEqual(kw["dns_listen"], "127.0.0.1")
-        self.assertEqual(kw["direct_dns"], "https://1.1.1.1/dns-query")
+        self.assertEqual(kw["name"], "fakeip-agh")
+        self.assertIsNone(kw["dns_port"])      # дефолт 1053 — в модуле
+        self.assertIsNone(kw["dns_listen"])
+        self.assertIsNone(kw["direct_dns"])
 
     def test_external_explicit(self):
         kw = self._build({"front_dns": "external", "proxy_link": "vless://x",
-                          "dns_listen": "10.0.0.1", "dns_port": 5300,
-                          "direct_dns": "tls://1.1.1.1",
+                          "name": "mine", "dns_listen": "10.0.0.1",
+                          "dns_port": 5300, "direct_dns": "tls://1.1.1.1",
                           "tun_address": "172.20.0.1/30"})
-        self.assertEqual((kw["dns_listen"], kw["dns_port"], kw["direct_dns"],
-                          kw["tun_address"]),
-                         ("10.0.0.1", 5300, "tls://1.1.1.1", "172.20.0.1/30"))
+        self.assertEqual((kw["name"], kw["dns_listen"], kw["dns_port"],
+                          kw["direct_dns"], kw["tun_address"]),
+                         ("mine", "10.0.0.1", 5300, "tls://1.1.1.1",
+                          "172.20.0.1/30"))
 
     def test_engine_defaults_unchanged(self):
         kw = self._build({"proxy_link": "vless://x", "domains": "a.com"})
         self.assertEqual(kw["front_dns"], "engine")
+        self.assertEqual(kw["name"], "fakeip")
         self.assertEqual(kw["dns_port"], 1153)
         self.assertEqual(kw["direct_dns"], "local")
+        self.assertNotIn("dns_listen", kw)
+
+    def test_bad_input_is_400(self):
+        # Настоящий build_and_save: ввод проверяется до прокси и settings.
+        cases = (
+            ({"front_dns": "external", "dns_port": "abc"}, "число"),
+            ({"front_dns": "external", "dns_port": True}, "число"),
+            ({"dns_port": True}, "число"),
+            ({"dns_port": "abc"}, "число"),
+            ({"front_dns": "bogus"}, "front_dns"),
+            ({"front_dns": "external", "dns_listen": "foo"}, "нужен IP"),
+            ({"front_dns": "external", "tun_address": "172.19.0.1"},
+             "префикс"),
+        )
+        for body, frag in cases:
+            with self.subTest(body=body):
+                with mock.patch("core.singbox_fakeip_front."
+                                "_resolve_proxy_set") as rp:
+                    r = self.client.post_json(
+                        "/api/singbox/fakeip/build",
+                        dict(body, proxy_link="vless://x"))
+                self.assertEqual(r["_status"], 400, r)
+                self.assertFalse(r["ok"])
+                self.assertIn(frag, r["error"])
+                rp.assert_not_called()
 
     def test_options_route_returns_build_options(self):
         from core import singbox_fakeip
@@ -861,12 +1188,14 @@ class TestFakeipApi(unittest.TestCase):
         self.assertEqual(o["front_dns"], "engine")
         self.assertEqual(o["front_dns_modes"], ["engine", "external"])
         self.assertEqual(o["external_defaults"], {
-            "dns_listen": "127.0.0.1", "dns_port": 1053,
+            "name": "fakeip-agh", "dns_listen": "127.0.0.1", "dns_port": 1053,
             "direct_dns": "https://1.1.1.1/dns-query",
             "tun_address": "172.19.0.1/30", "stack": "system"})
         self.assertEqual(o["engine_defaults"],
-                         {"dns_port": 1153, "direct_dns": "local"})
+                         {"name": "fakeip", "dns_port": 1153,
+                          "direct_dns": "local"})
         self.assertEqual(o["fronts"], {"fi": {"front_dns": "external"}})
+        self.assertEqual(o["default_direct_dns"], "local")
 
 
 class TestExternalBuildVersion(unittest.TestCase):

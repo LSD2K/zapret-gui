@@ -7,17 +7,20 @@ nft ещё `auto_redirect=true`, sing-box сам становится DNS все
 это AdGuard Home на :53 (логи по клиентам, фильтры, только Cloudflare DoH). Нужен
 режим, где AdGuard остаётся впереди и шлёт sing-box только домены из списка.
 
-Целевой конфиг (проверен `sing-box check` на extended 1.14.1):
+Целевой конфиг (проверен `sing-box check` на extended 1.14.1; после реализации
+сверен с официальным 1.14.1 уже `check` + `run` + живыми запросами, отсюда две
+правки к первой редакции, см. «Уточнения после реализации»):
 ```json
 {
   "log": {"level": "info"},
   "dns": {
     "servers": [
-      {"type": "https", "tag": "dns-direct", "server": "1.1.1.1", "detour": "direct"},
+      {"type": "https", "tag": "dns-direct", "server": "1.1.1.1"},
       {"type": "fakeip", "tag": "dns-fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"}
     ],
     "rules": [
       {"query_type": ["AAAA"], "action": "predefined", "rcode": "NOERROR"},
+      {"query_type": ["HTTPS", "SVCB"], "action": "predefined", "rcode": "NOERROR"},
       {"query_type": ["A"], "server": "dns-fakeip"}
     ],
     "final": "dns-direct"
@@ -42,7 +45,9 @@ nft ещё `auto_redirect=true`, sing-box сам становится DNS все
 }
 ```
 Смысл: AdGuard для доменов из списка использует upstream `127.0.0.1:1053`; sing-box
-отдаёт fakeip (A) и пустой ответ на AAAA (IPv6 в сети нет); маршрут `198.18.0.0/15`
+отдаёт fakeip (A) и пустой ответ на AAAA (IPv6 в сети нет) и на HTTPS/SVCB
+(иначе `ipv4hint` из HTTPS-записи, полученный через DoH, уводит браузер на
+настоящий IP мимо fakeip); маршрут `198.18.0.0/15`
 ведёт в `singbox-tun` (ставится снаружи, networkd); всё, что пришло из TUN, идёт в
 `proxy-out`; реальные имена sing-box резолвит сам через DoH 1.1.1.1. Доменные правила
 `domain_suffix → <outbound>` внутрь route добавляет отдельный модуль (B3), сборщик
@@ -59,7 +64,8 @@ nft ещё `auto_redirect=true`, sing-box сам становится DNS все
      независимо от nft/iptables; никакого перехвата :53 (`capture_dns` игнорируется,
      `_apply_dns_capture` не вызывать для таких конфигов: признак режима хранить в
      `settings.json` рядом с конфигом, см. п.4)
-   - dns rules: AAAA → `predefined NOERROR`, A → fakeip; `domain_suffix`-правила для
+   - dns rules: AAAA → `predefined NOERROR`, HTTPS/SVCB → `predefined NOERROR`,
+     A → fakeip (в engine правило HTTPS/SVCB не добавлять); `domain_suffix`-правила для
      fakeip НЕ нужны (в sing-box приходят только домены, которые прислал AdGuard);
      `route.rules`: `sniff`, `hijack-dns`, `{"inbound":["tun-in"],"outbound":"proxy-out"}`;
      `ip_is_private → direct` не добавлять (fakeip-диапазон приватный, правило
@@ -68,9 +74,9 @@ nft ещё `auto_redirect=true`, sing-box сам становится DNS все
    - `cache_file.path` абсолютный: `<platform.run_dir или /var/lib/sing-box>/cache-<name>.db`,
      каталог создавать при сохранении
 2. `direct_dns` (обе ветки, typed): принимать `https://host/path`, `tls://host`,
-   `ip:port`, `udp://ip:port`; typed-серверы соответственно `https`/`tls`/`udp` с
-   `detour: direct`. Сейчас всё, кроме `local` и голого IPv4, молча превращается в
-   `local`, это баг.
+   `ip:port`, `udp://ip:port`; typed-серверы соответственно `https`/`tls`/`udp`
+   (БЕЗ `detour`, см. уточнения). Сейчас всё, кроме `local` и голого IPv4, молча
+   превращается в `local`, это баг.
 3. Несколько прокси: в режиме `external` `proxy_config` может содержать несколько
    outbounds и группы (`selector`/`urltest`). Брать все outbounds/endpoints как есть;
    если среди них нет тега `proxy-out`, создать `selector` с тегом `proxy-out` из всех
@@ -94,6 +100,22 @@ nft ещё `auto_redirect=true`, sing-box сам становится DNS все
 8. Тесты: `tests/test_singbox_fakeip_front.py`: сборка external-конфига (точная форма
    JSON выше, с учётом п.1-3), `direct_dns` варианты, несколько прокси, режим engine
    не изменился (снапшот существующего поведения), `_do_up` не вызывает capture.
+
+## Уточнения после реализации
+- `detour: "direct"` у typed DNS-сервера: `sing-box check` его пропускает, а
+  `run` на 1.14.1 падает `FATAL start dns/https[dns-direct]: detour to an empty
+  direct outbound makes no sense`. Без `detour` typed-сервер и так ходит напрямую,
+  мимо `route.final` (проверено при `final: proxy-out`). То же касалось engine с
+  голым IPv4 в `direct_dns`.
+- DNS-сервер с именем вместо IP (`https://cloudflare-dns.com/dns-query`) не берёт
+  `route.default_domain_resolver` (`check`: «missing domain resolver for domain
+  server address»); ему ставится свой `domain_resolver` на
+  `{"type":"local","tag":"dns-bootstrap"}`.
+- HTTPS/SVCB → пустой NOERROR (правило выше) проверено живыми запросами TYPE65/64.
+- Код режима external: `core/singbox_fakeip_front.py`; в `singbox_config` и
+  `singbox_fakeip` только хуки. Режим конфига: `settings.json →
+  singbox.fakeip_front[<имя>]`, дополнительно менеджер не ставит REDIRECT :53
+  для `dns-in` на loopback.
 
 ## Не делать
 Не менять поведение режима `engine` (Keenetic/OpenWrt пользователи апстрима).

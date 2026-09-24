@@ -22,6 +22,7 @@
 будет `tun0` / `singbox-tun`.
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -260,9 +261,11 @@ class SingboxManager:
         Конфиг FakeIP с внешним фронт-DNS (settings.json →
         singbox.fakeip_front) тоже несёт dns-in, но это upstream для AdGuard
         Home, а не цель REDIRECT :53 — для него 0: ни перехвата на up, ни
-        снятия чужого перехвата на down."""
+        снятия чужого перехвата на down. Независимо от отметки 0 и для dns-in
+        на loopback: REDIRECT шлёт пакет на адрес входящего интерфейса, до
+        127.0.0.0/8 и ::1 он не дойдёт."""
         try:
-            from core.singbox_fakeip import is_external_front
+            from core.singbox_fakeip_front import is_external_front
             if is_external_front(name):
                 return 0
         except Exception:
@@ -272,6 +275,8 @@ class SingboxManager:
             for ib in cfg.get("inbounds") or []:
                 if (isinstance(ib, dict) and ib.get("tag") == "dns-in"
                         and ib.get("type") == "direct"):
+                    if _is_loopback(ib.get("listen")):
+                        return 0
                     return int(ib.get("listen_port") or 0)
         except Exception:
             pass
@@ -467,7 +472,7 @@ class SingboxManager:
         """Отметка «фронт-DNS внешний» живёт в settings.json рядом с
         конфигом — уходит вместе с ним."""
         try:
-            from core.singbox_fakeip import forget_front
+            from core.singbox_fakeip_front import forget_front
             forget_front(name)
         except Exception:
             pass
@@ -738,6 +743,13 @@ class SingboxManager:
 
 
 # ─────── helpers ───────
+
+def _is_loopback(addr) -> bool:
+    try:
+        return ipaddress.ip_address(str(addr or "").strip("[]")).is_loopback
+    except ValueError:
+        return False
+
 
 def _tail_file(path: str, lines: int = 80) -> str:
     try:

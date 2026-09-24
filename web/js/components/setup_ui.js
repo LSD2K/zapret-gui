@@ -339,7 +339,7 @@ const SetupUI = (() => {
                                 ${vm.hasUpdate
                                     ? '<span style="color:#fb8;">— доступно обновление</span>'
                                     : vm.externalBuild
-                                        ? '<span class="text-muted">— установлена сторонняя сборка, панель её не обновляет</span>'
+                                        ? '<span class="text-muted">— установлена сторонняя сборка, панель её не обновляет и не удаляет</span>'
                                         : (installed ? '<span style="color:#39c45e;">— актуально</span>' : '')}
                             </div>` : ''}
                         ${opts.versionExtraHtml ? (opts.versionExtraHtml(vm) || '') : ''}
@@ -363,7 +363,7 @@ const SetupUI = (() => {
                                 ? 'Установить выбранную версию'
                                 : (installed ? (vm.hasUpdate ? 'Обновить' : 'Переустановить') : 'Установить')}
                         </button>`}
-                        ${installed ? `
+                        ${installed && !vm.externalBuild ? `
                         <button class="btn btn-ghost btn-sm" ${installInProgress ? 'disabled' : ''}
                                 onclick="${opts.globalName}.uninstall()">
                             Удалить

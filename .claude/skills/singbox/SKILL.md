@@ -563,18 +563,25 @@ TUN, sing-box по fake-IP восстанавливает домен и прок
 **Внешний фронт-DNS (`front_dns="external"`, форк debian-gw,
 `docs/gw/spec-b2-fakeip-front.md`)** — впереди AdGuard Home, он шлёт в
 sing-box только домены из списка (upstream `[/домен/]127.0.0.1:1053`):
-- `build_fakeip_external_config()`: `dns-in` (direct, udp) на
-  `dns_listen:dns_port`, TUN без auto_route/strict_route/auto_redirect
-  (маршрут `198.18.0.0/15` ставится снаружи), DNS: AAAA → `predefined`
-  NOERROR, A → fakeip, остальное → прямой DNS; route: sniff, hijack-dns,
-  `inbound tun-in → proxy-out`, final direct, `default_domain_resolver`
-  всегда; `cache_file.path` абсолютный (`platform.data_dir`,
-  у Linux `/var/lib/sing-box`). Без `ip_is_private → direct` (fakeip-диапазон
-  приватный) и без domain_suffix-правил fakeip.
-- Несколько прокси из `proxy_config`: все outbounds/endpoints как есть,
-  без тега `proxy-out` достраивается selector (`fakeip_external_outbounds`).
-- Режим хранится в `settings.json → singbox.fakeip_front[<имя>]`; для таких
-  конфигов `_config_dns_in_port` = 0 → никакого REDIRECT :53.
+- Код — `core/singbox_fakeip_front.py` (в `singbox_config`/`singbox_fakeip`
+  только хуки `front_dns=…`). `build_fakeip_external_config()`: `dns-in`
+  (direct, udp) на `dns_listen:dns_port`, TUN без auto_route/strict_route/
+  auto_redirect (маршрут `198.18.0.0/15` ставится снаружи), DNS: AAAA и
+  HTTPS/SVCB → `predefined` NOERROR (иначе `ipv4hint` HTTPS-записи уводит
+  браузер мимо fakeip), A → fakeip, остальное → прямой DNS; route: sniff,
+  hijack-dns, `inbound tun-in → proxy-out`, final direct,
+  `default_domain_resolver` всегда; `cache_file.path` абсолютный
+  (`platform.data_dir`, у Linux `/var/lib/sing-box`). Без
+  `ip_is_private → direct` (fakeip-диапазон приватный) и без
+  domain_suffix-правил fakeip.
+- Несколько прокси из `proxy_config`: все outbounds/endpoints как есть
+  (`fakeip_external_outbounds`: block/dns выбрасываются, повтор тега —
+  ошибка, чужой `domain_resolver` снимается, члены групп — только
+  существующие теги), без тега `proxy-out` достраивается selector.
+- Режим хранится в `settings.json → singbox.fakeip_front[<имя>]` (пишется
+  ДО конфига); для таких конфигов и для любого `dns-in` на loopback
+  `_config_dns_in_port` = 0 → никакого REDIRECT :53. Пересобрать под тем же
+  именем запущенный engine-конфиг с перехватом нельзя (отказ).
 - Только typed-DNS (1.12+).
 
 > ⚠️ **typed DNS-сервер + `detour` на пустой `direct`-outbound**:

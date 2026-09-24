@@ -814,7 +814,7 @@ const SingboxDashboardPage = (() => {
             ${notInstalled}
             <div style="display:flex; flex-direction:column; gap:10px; max-width:680px;">
                 <label style="font-size:12px;">Имя конфига
-                    <input type="text" value="${escapeAttr(f.name)}" style="width:100%;"
+                    <input type="text" id="sb-fi-name" value="${escapeAttr(f.name)}" style="width:100%;"
                            oninput="SingboxDashboardPage.setFakeip('name', this.value)">
                 </label>
 
@@ -842,7 +842,7 @@ const SingboxDashboardPage = (() => {
                     <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
                         <input type="radio" name="sb-fi-front" value="external" ${ext ? 'checked' : ''}
                                onchange="SingboxDashboardPage.setFakeipFront('external')">
-                        внешний (AdGuard Home, слушать ${escapeHtml(extDef.dns_listen || '127.0.0.1')}:${escapeHtml(String(extDef.dns_port || 1053))})
+                        внешний (AdGuard Home, слушать ${escapeHtml(hostPort(extDef.dns_listen || '127.0.0.1', extDef.dns_port || 1053))})
                     </label>
                     <div class="sb-fi-external" style="margin:6px 0 0 22px; font-size:12px; ${externalOnly}">
                         Адрес
@@ -927,20 +927,33 @@ const SingboxDashboardPage = (() => {
         if (!box) return;
         const r = fakeipResult;
         if (!r || r.front_dns !== 'external') { box.innerHTML = ''; return; }
-        const line = r.adguard_upstream
-            || `[/домен/]${r.dns_listen || '127.0.0.1'}:${r.dns_port || 1053}`;
+        const hint = r.adguard_upstream_hint
+            || `[/домен/]${hostPort(r.dns_listen || '127.0.0.1', r.dns_port || 1053)}`;
+        // Строки по 40 доменов (бэкенд); без доменов — только шаблон.
+        const lines = Array.isArray(r.adguard_upstream) ? r.adguard_upstream
+            : (r.adguard_upstream ? [String(r.adguard_upstream)] : []);
         const warns = [].concat(r.warning ? [r.warning] : [], r.warnings || []);
         box.innerHTML = `
             <div style="padding:8px 10px; border-radius:6px; font-size:12px;
                         background:rgba(60,140,220,.10); border:1px solid rgba(60,140,220,.35);">
                 Конфиг «${escapeHtml(r.name)}» создан. В AdGuard добавьте upstream
-                <code>[/домен/]${escapeHtml(r.dns_listen || '127.0.0.1')}:${escapeHtml(String(r.dns_port || 1053))}</code>
-                для доменов из списка:
-                <textarea readonly rows="${line.length > 120 ? 3 : 1}"
-                          style="width:100%; margin-top:6px; font-family:monospace; font-size:11px;"
-                          onclick="this.select()">${escapeHtml(line)}</textarea>
+                <code>${escapeHtml(hint)}</code>
+                ${lines.length ? `для доменов из списка (${escapeHtml(String(r.domains || 0))}):
+                <textarea id="sb-fi-upstream" readonly wrap="off" rows="1"
+                          style="width:100%; margin-top:6px; font-family:monospace; font-size:11px;
+                                 resize:vertical; overflow:auto; max-height:260px;"
+                          onclick="this.select()">${escapeHtml(lines.join('\n'))}</textarea>`
+                : '(домены из списков панели не выбраны — впишите свои).'}
                 ${warns.map(w => `<div style="color:#fb8; margin-top:4px;">${escapeHtml(w)}</div>`).join('')}
             </div>`;
+        const ta = document.getElementById('sb-fi-upstream');
+        if (ta) ta.style.height = (ta.scrollHeight + 4) + 'px';   // автовысота
+    }
+
+    // host:port, IPv6 — в скобках.
+    function hostPort(host, port) {
+        const h = String(host || '');
+        return `${h.includes(':') ? '[' + h + ']' : h}:${port}`;
     }
 
     function setFakeipFront(mode) {
@@ -948,6 +961,15 @@ const SingboxDashboardPage = (() => {
         const def = (fakeipOpts && fakeipOpts.external_defaults) || {};
         const extDns = def.direct_dns || 'https://1.1.1.1/dns-query';
         f.front_dns = mode === 'external' ? 'external' : 'engine';
+        // Имя по умолчанию у режимов своё — чтобы не перезаписать engine-конфиг.
+        const extName = def.name || 'fakeip-agh';
+        if (f.front_dns === 'external' && (!f.name.trim() || f.name.trim() === 'fakeip')) {
+            f.name = extName;
+        } else if (f.front_dns === 'engine' && f.name.trim() === extName) {
+            f.name = 'fakeip';
+        }
+        const nameInput = document.getElementById('sb-fi-name');
+        if (nameInput) nameInput.value = f.name;
         // Прямой DNS: у режимов разные дефолты (local петлит через AdGuard).
         if (f.front_dns === 'external' && (!f.direct_dns.trim() || f.direct_dns.trim() === 'local')) {
             f.direct_dns = extDns;
@@ -980,8 +1002,9 @@ const SingboxDashboardPage = (() => {
             return;
         }
         const hostlists = Object.keys(f.hostlists).filter(k => f.hostlists[k]);
+        const ext = f.front_dns === 'external';
         const payload = {
-            name: f.name.trim() || 'fakeip',
+            name: f.name.trim() || (ext ? 'fakeip-agh' : 'fakeip'),
             proxy_link: f.proxy_link.trim(),
             proxy_config: f.proxy_config,
             route_all: f.route_all,
@@ -991,12 +1014,12 @@ const SingboxDashboardPage = (() => {
             stack: f.stack, capture_dns: f.capture_dns,
             front_dns: f.front_dns,
         };
-        const ext = f.front_dns === 'external';
         if (ext) {
             const def = (fakeipOpts && fakeipOpts.external_defaults) || {};
             payload.direct_dns = f.direct_dns.trim() || def.direct_dns || 'https://1.1.1.1/dns-query';
             payload.dns_listen = f.dns_listen.trim() || def.dns_listen || '127.0.0.1';
-            payload.dns_port = parseInt(f.dns_port, 10) || def.dns_port || 1053;
+            // Порт как есть: неверный ввод проверит бэкенд (400 с текстом).
+            payload.dns_port = String(f.dns_port).trim() || def.dns_port || 1053;
         }
         fakeipBusy = true;
         const btn = document.getElementById('sb-fakeip-create');
@@ -1020,9 +1043,13 @@ const SingboxDashboardPage = (() => {
                 }
                 await refresh();
             } else {
+                fakeipResult = null;
+                renderFakeipResult();
                 Toast.error((r && r.error) || 'ошибка создания');
             }
         } catch (e) {
+            fakeipResult = null;
+            renderFakeipResult();
             Toast.error(e.message);
         } finally {
             fakeipBusy = false;

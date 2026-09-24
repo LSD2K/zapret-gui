@@ -818,37 +818,45 @@ def register(app):
                 return [s.strip() for s in re.split(r"[\s,]+", v) if s.strip()]
             return []
 
-        # Фронт-DNS: engine (как раньше) | external (AdGuard Home впереди).
-        # Дефолты порта/прямого DNS у режимов разные (1153/local и
-        # 1053/https://1.1.1.1/dns-query), поэтому подставляем по режиму.
-        from core.singbox_config import (
-            EXTERNAL_DNS_LISTEN, EXTERNAL_DNS_PORT, EXTERNAL_DIRECT_DNS)
+        # Фронт-DNS: engine (как раньше) | external (AdGuard Home впереди,
+        # core/singbox_fakeip_front). Имя/порт/прямой DNS по умолчанию у
+        # режимов разные; ввод external проверяет модуль (ошибка → 400).
+        from core.singbox_fakeip_front import EXTERNAL_DEFAULT_NAME
         front = str(body.get("front_dns") or "engine").strip().lower()
-        external = front == "external"
-        try:
-            dns_port = int(body.get("dns_port") or
-                           (EXTERNAL_DNS_PORT if external else 1153))
-        except (TypeError, ValueError):
+        external = front != "engine"
+        raw_port = body.get("dns_port")
+        if isinstance(raw_port, bool):        # True == 1 для int()
             response.status = 400
             return {"ok": False, "error": "dns_port: нужно число"}
+        front_kw = {}
+        if external:
+            dns_port = raw_port
+            front_kw = {"dns_listen": body.get("dns_listen"),
+                        "tun_address": body.get("tun_address") or ""}
+        else:
+            try:
+                dns_port = int(raw_port or 1153)
+            except (TypeError, ValueError):
+                response.status = 400
+                return {"ok": False, "error": "dns_port: нужно число"}
 
         res = build_and_save(
-            name=(body.get("name") or "fakeip"),
+            name=(body.get("name") or
+                  (EXTERNAL_DEFAULT_NAME if external else "fakeip")),
             proxy_link=(body.get("proxy_link") or ""),
             proxy_config=(body.get("proxy_config") or ""),
             hostlists=_list(body.get("hostlists")),
             domains=_list(body.get("domains")),
             cidrs=_list(body.get("cidrs")),
             direct_dns=(body.get("direct_dns") or
-                        (EXTERNAL_DIRECT_DNS if external else "local")),
+                        (None if external else "local")),
             route_all=bool(body.get("route_all")),
             tun_iface=(body.get("tun_iface") or "singbox-tun"),
             stack=(body.get("stack") or "system"),
             capture_dns=bool(body.get("capture_dns", True)),
             dns_port=dns_port,
             front_dns=front,
-            dns_listen=(body.get("dns_listen") or EXTERNAL_DNS_LISTEN),
-            tun_address=(body.get("tun_address") or ""),
+            **front_kw,
         )
         if not res.get("ok"):
             response.status = 400
