@@ -482,6 +482,12 @@ install_from_github() {
             # через $SUDO, иначе обновление от обычного пользователя падает на
             # «Permission denied» до копирования файлов.
             $SUDO cp "$CONFIG_DIR/settings.json" "$TMP_DIR/settings.json.bak"
+            # Панель может переписывать settings.json в этот же момент: пустой
+            # или битый бэкап потом восстановился бы поверх рабочего конфига.
+            if ! $SUDO python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) and d else 1)" "$TMP_DIR/settings.json.bak" 2>/dev/null; then
+                error "Бэкап settings.json пустой или битый, обновление остановлено (файлы не тронуты)"
+                exit 1
+            fi
             ok "Бэкап settings.json"
         fi
         if [ -d "$APP_DIR/config/strategies/user" ]; then
@@ -648,6 +654,9 @@ After=network-online.target nftables.service
 Type=simple
 WorkingDirectory=$APP_DIR
 ExecStart=$(command -v python3) $APP_DIR/app.py --config $CONFIG_DIR
+# nfqws2 запускается панелью в той же cgroup; при рестарте панели он не
+# должен умирать вместе с ней (обход не прерывается, панель его подхватывает).
+KillMode=process
 Restart=always
 RestartSec=5
 
@@ -680,8 +689,10 @@ if existed:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
-    except Exception:
-        data = {}
+    except Exception as e:
+        # Не затирать существующий конфиг пустым: лучше оставить как есть.
+        sys.stderr.write("settings.json не разобран (%s), host/port не записаны\n" % e)
+        sys.exit(1)
 
 gui = data.get("gui") if isinstance(data.get("gui"), dict) else {}
 if not existed:
