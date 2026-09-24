@@ -246,7 +246,7 @@ const SetupUI = (() => {
                     tag:     (st.version && st.version.latest && st.version.latest.tag) || '',
                   };
             // Сторонняя сборка (бэкенд отдаёт version.external_build, напр.
-            // sing-box-extended): наш релиз её бы заменил — не обновляем.
+            // sing-box-extended): наш релиз её бы заменил, не обновляем.
             const externalBuild = installed && !!(st.version && st.version.external_build);
             // Обновление считаем сами, с нормализацией (как в AWG), а не
             // сырым сравнением строк — иначе `v1.18.0` != `1.18.0` даёт
@@ -339,7 +339,7 @@ const SetupUI = (() => {
                                 ${vm.hasUpdate
                                     ? '<span style="color:#fb8;">— доступно обновление</span>'
                                     : vm.externalBuild
-                                        ? '<span class="text-muted">— установлена сторонняя сборка, панель её не обновляет и не удаляет</span>'
+                                        ? '<span class="text-muted">(сторонняя сборка, панель её не обновляет и не удаляет)</span>'
                                         : (installed ? '<span style="color:#39c45e;">— актуально</span>' : '')}
                             </div>` : ''}
                         ${opts.versionExtraHtml ? (opts.versionExtraHtml(vm) || '') : ''}

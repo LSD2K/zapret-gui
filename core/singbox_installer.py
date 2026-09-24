@@ -37,7 +37,7 @@ HTTP_TIMEOUT = 15
 
 # Формат версий наших релизов (= версии апстрима sing-box): 1.14.1,
 # 1.13.0-beta.3, 1.12.0-rc.1. Всё остальное (1.14.1-extended-…, свои сборки
-# с хэшем) — сторонний бинарь, который панель не ставила и обновлять не должна.
+# с хэшем): сторонний бинарь, который панель не ставила и обновлять не должна.
 _RELEASE_VERSION_RE = re.compile(
     r"^v?\d+\.\d+(?:\.\d+)?(?:-(?:alpha|beta|rc)\.?\d+)?$", re.IGNORECASE)
 
@@ -46,7 +46,7 @@ def is_external_build(version: str) -> bool:
     """Установлена сторонняя сборка (extended и т.п.), а не наш релиз."""
     v = (version or "").strip()
     if not v:
-        return False               # версия не определилась — не гадаем
+        return False               # версия не определилась, не гадаем
     if "extended" in v.lower():
         return True
     return not _RELEASE_VERSION_RE.match(v)
@@ -296,7 +296,7 @@ class SingboxInstaller:
     def check_for_updates(self) -> dict:
         installed = self.get_installed_version()
         # Сторонняя сборка (sing-box-extended и т.п.): «обновление» нашим
-        # релизом её бы молча заменило — не предлагаем ни обновление, ни
+        # релизом её бы молча заменило, поэтому не предлагаем ни обновление, ни
         # переустановку, UI прячет кнопку.
         external = (bool(installed.get("installed"))
                     and is_external_build(installed.get("version")))

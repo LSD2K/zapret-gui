@@ -16,7 +16,7 @@ domain/cidr route-правила. Домены берём из существу�
   build_options()  — данные для формы (версия, списки, конфиги, nft).
   build_and_save() — собрать, проверить бинарём, сохранить конфиг.
 
-front_dns != engine (AdGuard Home впереди, sing-box — его upstream) живёт
+front_dns != engine (AdGuard Home впереди, sing-box его upstream) живёт
 в core/singbox_fakeip_front; здесь только хуки.
 """
 
@@ -148,8 +148,8 @@ def build_and_save(*, name: str = "fakeip", proxy_link: str = "",
                    dns_port: int = None, front_dns: str = "engine",
                    **front_kw) -> dict:
     """
-    front_dns='engine' — sing-box сам DNS LAN (dns_port 1153, direct_dns
-    local, перехват :53 по capture_dns). Иначе — core.singbox_fakeip_front
+    front_dns='engine': sing-box сам DNS LAN (dns_port 1153, direct_dns
+    local, перехват :53 по capture_dns). Иначе core.singbox_fakeip_front
     (front_kw: dns_listen, tun_address; cidrs/route_all/capture_dns там не
     нужны).
     """
@@ -241,7 +241,7 @@ def build_and_save(*, name: str = "fakeip", proxy_link: str = "",
                 "error": "sing-box отверг сгенерированный конфиг: %s"
                          % (last_err or "неизвестная ошибка")}
 
-    # Имя могло быть собрано с внешним фронт-DNS — снять отметку ДО записи,
+    # Имя могло быть собрано с внешним фронт-DNS: снять отметку ДО записи,
     # иначе менеджер не поставит этому конфигу перехват :53.
     from core.singbox_fakeip_front import clear_front
     front_err = clear_front(name)

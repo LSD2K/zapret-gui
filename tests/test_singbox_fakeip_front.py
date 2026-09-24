@@ -1,7 +1,7 @@
 # tests/test_singbox_fakeip_front.py
 """FakeIP с внешним фронт-DNS (docs/gw/spec-b2-fakeip-front.md).
 
-Главный сторож здесь — снапшот режима engine: `tests/fixtures/
+Главный сторож здесь: снапшот режима engine: `tests/fixtures/
 singbox_fakeip_engine_snapshot.json` снят с `build_fakeip_config` и
 `build_and_save` ДО появления режима external. Новый режим не имеет права
 сдвинуть сборку engine ни на байт (Keenetic/OpenWrt пользователи апстрима).
@@ -29,7 +29,7 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# Единственное осознанное отличие engine от снапшота — п.2 спеки: typed-DNS
+# Единственное осознанное отличие engine от снапшота это п.2 спеки: typed-DNS
 # с непустым прямым DNS. Раньше IP давал udp с `detour: direct` (FATAL на
 # `run` у 1.12+), а https/tls/ip:port молча превращались в `local`. Меняется
 # ТОЛЬКО сервер dns-direct, всё остальное обязано совпасть со снапшотом.
@@ -247,7 +247,7 @@ def _vless(tag="p1", server="1.2.3.4"):
 
 
 # Целевая форма из спеки (проверена sing-box 1.14.1: check + run). Одно
-# отличие от первой редакции спеки: у dns-direct нет `detour: direct` —
+# отличие от первой редакции спеки: у dns-direct нет `detour: direct`:
 # typed-сервер с detour на пустой direct проходит check, но падает на run
 # (FATAL «detour to an empty direct outbound makes no sense»).
 EXPECTED_ONE_PROXY = {
@@ -343,7 +343,7 @@ class TestExternalConfig(unittest.TestCase):
                          "/srv/sb/cache-x.db")
 
     def test_engine_only_knobs_are_ignored(self):
-        # capture_dns/auto_redirect/route_all/домены — вещи режима engine.
+        # capture_dns/auto_redirect/route_all/домены: вещи режима engine.
         cfg = _external(capture_dns=True, auto_redirect=True, route_all=True,
                         proxied_domains=["youtube.com"],
                         proxied_cidrs=["203.0.113.0/24"], typed_dns=False)
@@ -520,7 +520,7 @@ class TestExternalOutbounds(unittest.TestCase):
                          {"type": "block", "tag": "block"}])
         by = {o["tag"]: o for o in cfg["outbounds"]}
         self.assertEqual(by["auto"]["outbounds"], ["p1", "p2"])
-        self.assertNotIn("manual", by)                 # пустая — выброшена
+        self.assertNotIn("manual", by)                 # пустая, выброшена
         self.assertNotIn("block", by)                  # удалён в 1.13
         self.assertEqual(by["top"]["outbounds"], ["auto"])
         self.assertNotIn("default", by["top"])         # manual ушёл
@@ -717,7 +717,7 @@ class _HM:
 
 
 class TestExternalOrchestrator(unittest.TestCase):
-    """build_and_save(front_dns='external') — сборка, проверка, запись."""
+    """build_and_save(front_dns='external'): сборка, проверка, запись."""
 
     def setUp(self):
         import tempfile
@@ -784,7 +784,7 @@ class TestExternalOrchestrator(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.dirname(cache)))
         self.assertEqual([o["tag"] for o in cfg["outbounds"]],
                          ["my-srv", "proxy-out", "direct"])
-        # домены в конфиг не попадают — их отбирает AdGuard
+        # домены в конфиг не попадают, их отбирает AdGuard
         self.assertNotIn("youtube.com", mgr.saved[1])
         self.assertEqual(self._fronts()["fi"],
                          {"front_dns": "external", "dns_listen": "127.0.0.1",
@@ -1101,7 +1101,7 @@ class TestFakeipApi(unittest.TestCase):
         kw = self._build({"front_dns": "external", "proxy_link": "vless://x"})
         self.assertEqual(kw["front_dns"], "external")
         self.assertEqual(kw["name"], "fakeip-agh")
-        self.assertIsNone(kw["dns_port"])      # дефолт 1053 — в модуле
+        self.assertIsNone(kw["dns_port"])      # дефолт 1053 в модуле
         self.assertIsNone(kw["dns_listen"])
         self.assertIsNone(kw["direct_dns"])
 

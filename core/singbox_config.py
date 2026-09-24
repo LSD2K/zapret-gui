@@ -790,7 +790,7 @@ def _norm_suffix_domains(domains) -> list:
 
 
 # Схема прямого DNS → тип typed-сервера (1.12+). Порт по умолчанию sing-box
-# подставляет сам (53/853/443), path у https — `/dns-query`.
+# подставляет сам (53/853/443), path у https: `/dns-query`.
 _DIRECT_DNS_SCHEMES = {"udp": "udp", "tls": "tls", "https": "https"}
 
 DNS_BOOTSTRAP_TAG = "dns-bootstrap"
@@ -807,7 +807,7 @@ def _ip_literal(s: str) -> bool:
 def parse_direct_dns(value):
     """
     Разобрать поле «прямой DNS» формы в typed-сервер sing-box 1.12+ (без
-    тега). None — формат не распознан.
+    тега). None, если формат не распознан.
 
       local / ''              → {"type": "local"}
       1.1.1.1, 1.1.1.1:5353,
@@ -841,7 +841,7 @@ def parse_direct_dns(value):
         if typ == "https" and path not in ("", "/", "/dns-query"):
             srv["path"] = path
         return srv
-    # Без схемы — только IP-литерал (udp), опционально с портом.
+    # Без схемы: только IP-литерал (udp), опционально с портом.
     host, port = s, 0
     if s.startswith("["):
         end = s.find("]")
@@ -873,7 +873,7 @@ def make_direct_dns_servers(value, *, tag: str = "dns-direct"):
     серверу нужен свой `domain_resolver`: DNS-серверы не берут
     `route.default_domain_resolver` («missing domain resolver for domain
     server address»), а ссылка на самого себя дала бы петлю. Имя резолвим
-    системным резолвером (`local`, тег dns-bootstrap). None — не распознан.
+    системным резолвером (`local`, тег dns-bootstrap). None, если не распознан.
     """
     srv = parse_direct_dns(value)
     if srv is None:
@@ -899,7 +899,7 @@ def make_fakeip_dns(*, proxied_domains=None, direct_dns: str = "local",
 
     direct_dns: 'local'/'' → системный резолвер (без host-поля, переносимо).
     typed: IP / IP:порт / udp:// / tls:// / https:// → свой тип сервера
-    (parse_direct_dns), нераспознанное — как раньше, `local`. legacy: строка
+    (parse_direct_dns), нераспознанное как раньше: `local`. legacy: строка
     уходит в `address` как есть. fakeip=False → секция без FakeIP (для режима
     «весь трафик»), только direct-сервер, чтобы hijack-dns был куда отдавать.
     """
@@ -963,7 +963,7 @@ def build_fakeip_config(*, proxy_outbound: dict,
     (FakeIP не нужен, DNS прямой). Иначе — выбранные домены/подсети в прокси,
     остальное напрямую, домены через FakeIP. dns_port по умолчанию 1153.
 
-    front_dns != 'engine' (внешний фронт-DNS, AdGuard Home впереди) — сборка
+    front_dns != 'engine' (внешний фронт-DNS, AdGuard Home впереди): сборка
     в core/singbox_fakeip_front, front_kw уходят туда.
     """
     if front_dns != "engine":

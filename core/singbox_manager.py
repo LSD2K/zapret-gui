@@ -260,7 +260,7 @@ class SingboxManager:
 
         Конфиг FakeIP с внешним фронт-DNS (settings.json →
         singbox.fakeip_front) тоже несёт dns-in, но это upstream для AdGuard
-        Home, а не цель REDIRECT :53 — для него 0: ни перехвата на up, ни
+        Home, а не цель REDIRECT :53, для него 0: ни перехвата на up, ни
         снятия чужого перехвата на down. Независимо от отметки 0 и для dns-in
         на loopback: REDIRECT шлёт пакет на адрес входящего интерфейса, до
         127.0.0.0/8 и ::1 он не дойдёт."""
@@ -470,7 +470,7 @@ class SingboxManager:
     @staticmethod
     def _forget_fakeip_front(name: str):
         """Отметка «фронт-DNS внешний» живёт в settings.json рядом с
-        конфигом — уходит вместе с ним."""
+        конфигом и уходит вместе с ним."""
         try:
             from core.singbox_fakeip_front import forget_front
             forget_front(name)

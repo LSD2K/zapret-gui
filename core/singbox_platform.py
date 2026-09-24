@@ -41,7 +41,7 @@ class SingboxPlatform:
     config_dir = "/etc/sing-box"           # JSON-конфиги
     run_dir    = "/var/run/sing-box"
     log_dir    = "/var/log"
-    # Постоянные данные движка (cache_file FakeIP). Пусто — брать run_dir.
+    # Постоянные данные движка (cache_file FakeIP). Пусто: брать run_dir.
     data_dir   = ""
 
     # init.d
@@ -155,7 +155,7 @@ class GenericLinuxSingbox(SingboxPlatform):
     config_dir = "/etc/sing-box"
     run_dir    = "/var/run/sing-box"
     log_dir    = "/var/log"
-    # /var/run — tmpfs: fakeip-кэш не пережил бы перезагрузку, а AdGuard
+    # /var/run это tmpfs: fakeip-кэш не пережил бы перезагрузку, а AdGuard
     # держит выданные fakeip в своём кэше.
     data_dir   = "/var/lib/sing-box"
     init_dir   = "/etc/systemd/system"

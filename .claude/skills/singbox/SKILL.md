@@ -561,9 +561,9 @@ TUN, sing-box по fake-IP восстанавливает домен и прок
   ∈ {auto_redirect, iptables-redirect, manual}.
 
 **Внешний фронт-DNS (`front_dns="external"`, форк debian-gw,
-`docs/gw/spec-b2-fakeip-front.md`)** — впереди AdGuard Home, он шлёт в
+`docs/gw/spec-b2-fakeip-front.md`)**: впереди AdGuard Home, он шлёт в
 sing-box только домены из списка (upstream `[/домен/]127.0.0.1:1053`):
-- Код — `core/singbox_fakeip_front.py` (в `singbox_config`/`singbox_fakeip`
+- Код: `core/singbox_fakeip_front.py` (в `singbox_config`/`singbox_fakeip`
   только хуки `front_dns=…`). `build_fakeip_external_config()`: `dns-in`
   (direct, udp) на `dns_listen:dns_port`, TUN без auto_route/strict_route/
   auto_redirect (маршрут `198.18.0.0/15` ставится снаружи), DNS: AAAA и
@@ -575,8 +575,8 @@ sing-box только домены из списка (upstream `[/домен/]12
   `ip_is_private → direct` (fakeip-диапазон приватный) и без
   domain_suffix-правил fakeip.
 - Несколько прокси из `proxy_config`: все outbounds/endpoints как есть
-  (`fakeip_external_outbounds`: block/dns выбрасываются, повтор тега —
-  ошибка, чужой `domain_resolver` снимается, члены групп — только
+  (`fakeip_external_outbounds`: block/dns выбрасываются, повтор тега это
+  ошибка, чужой `domain_resolver` снимается, в группах только
   существующие теги), без тега `proxy-out` достраивается selector.
 - Режим хранится в `settings.json → singbox.fakeip_front[<имя>]` (пишется
   ДО конфига); для таких конфигов и для любого `dns-in` на loopback
@@ -587,10 +587,10 @@ sing-box только домены из списка (upstream `[/домен/]12
 > ⚠️ **typed DNS-сервер + `detour` на пустой `direct`-outbound**:
 > `sing-box check` молчит, а `run` падает FATAL «detour to an empty direct
 > outbound makes no sense» (проверено на 1.14.1). Прямой typed-сервер
-> пишем БЕЗ detour — он и так ходит напрямую, мимо `route.final`
+> пишем БЕЗ detour: он и так ходит напрямую, мимо `route.final`
 > (`parse_direct_dns`). И ещё: DNS-сервер с именем вместо IP не берёт
 > `route.default_domain_resolver` («missing domain resolver for domain
-> server address») — ему нужен свой `domain_resolver` (у нас local-bootstrap).
+> server address»), ему нужен свой `domain_resolver` (у нас local-bootstrap).
 
 ---
 

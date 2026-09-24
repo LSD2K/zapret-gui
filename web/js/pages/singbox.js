@@ -37,8 +37,8 @@ const SingboxDashboardPage = (() => {
         name: 'fakeip', source: 'link', proxy_link: '', proxy_config: '',
         route_all: false, hostlists: {}, domains: '', cidrs: '',
         direct_dns: 'local', stack: 'system', capture_dns: true,
-        // Фронт-DNS: engine — sing-box сам DNS LAN (перехват :53);
-        // external — впереди AdGuard Home, sing-box его upstream.
+        // Фронт-DNS: engine, sing-box сам DNS LAN (перехват :53);
+        // external, впереди AdGuard Home, sing-box его upstream.
         front_dns: 'engine', dns_listen: '127.0.0.1', dns_port: '1053',
     };
     let fakeipResult = null;         // последняя сборка external (подсказка для AdGuard)
@@ -920,7 +920,7 @@ const SingboxDashboardPage = (() => {
     }
 
     // Подсказка после сборки external: какой upstream прописать в AdGuard.
-    // Автоматически это делает модуль маршрутов через AdGuard (B3), здесь —
+    // Автоматически это делает модуль маршрутов через AdGuard (B3), здесь
     // для ручной настройки.
     function renderFakeipResult() {
         const box = document.getElementById('sb-fi-result');
@@ -929,7 +929,7 @@ const SingboxDashboardPage = (() => {
         if (!r || r.front_dns !== 'external') { box.innerHTML = ''; return; }
         const hint = r.adguard_upstream_hint
             || `[/домен/]${hostPort(r.dns_listen || '127.0.0.1', r.dns_port || 1053)}`;
-        // Строки по 40 доменов (бэкенд); без доменов — только шаблон.
+        // Строки по 40 доменов (бэкенд); без доменов только шаблон.
         const lines = Array.isArray(r.adguard_upstream) ? r.adguard_upstream
             : (r.adguard_upstream ? [String(r.adguard_upstream)] : []);
         const warns = [].concat(r.warning ? [r.warning] : [], r.warnings || []);
@@ -943,14 +943,14 @@ const SingboxDashboardPage = (() => {
                           style="width:100%; margin-top:6px; font-family:monospace; font-size:11px;
                                  resize:vertical; overflow:auto; max-height:260px;"
                           onclick="this.select()">${escapeHtml(lines.join('\n'))}</textarea>`
-                : '(домены из списков панели не выбраны — впишите свои).'}
+                : '(домены из списков панели не выбраны, впишите свои).'}
                 ${warns.map(w => `<div style="color:#fb8; margin-top:4px;">${escapeHtml(w)}</div>`).join('')}
             </div>`;
         const ta = document.getElementById('sb-fi-upstream');
         if (ta) ta.style.height = (ta.scrollHeight + 4) + 'px';   // автовысота
     }
 
-    // host:port, IPv6 — в скобках.
+    // host:port, IPv6 в скобках.
     function hostPort(host, port) {
         const h = String(host || '');
         return `${h.includes(':') ? '[' + h + ']' : h}:${port}`;
@@ -961,7 +961,7 @@ const SingboxDashboardPage = (() => {
         const def = (fakeipOpts && fakeipOpts.external_defaults) || {};
         const extDns = def.direct_dns || 'https://1.1.1.1/dns-query';
         f.front_dns = mode === 'external' ? 'external' : 'engine';
-        // Имя по умолчанию у режимов своё — чтобы не перезаписать engine-конфиг.
+        // Имя по умолчанию у режимов своё, чтобы не перезаписать engine-конфиг.
         const extName = def.name || 'fakeip-agh';
         if (f.front_dns === 'external' && (!f.name.trim() || f.name.trim() === 'fakeip')) {
             f.name = extName;

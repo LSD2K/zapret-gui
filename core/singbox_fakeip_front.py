@@ -44,7 +44,7 @@ EXTERNAL_CACHE_PATH = "/var/lib/sing-box/cache.db"
 # её можно было читать и вставлять кусками.
 ADGUARD_UPSTREAM_CHUNK = 40
 
-# Удалены в sing-box 1.13 — из чужого конфига не переносим.
+# Удалены в sing-box 1.13, из чужого конфига не переносим.
 _DROPPED_OUTBOUND_TYPES = ("block", "dns")
 _GROUP_TYPES = ("selector", "urltest")
 _DEFAULT_DNS_PORTS = {"udp": 53, "tls": 853, "https": 443}
@@ -53,7 +53,7 @@ _DEFAULT_DNS_PORTS = {"udp": 53, "tls": 853, "https": 443}
 # ─────────────────────── проверка ввода ───────────────────────
 
 def norm_listen(value) -> str:
-    """Адрес dns-in: только IP-литерал. ValueError — иначе."""
+    """Адрес dns-in: только IP-литерал, иначе ValueError."""
     s = str(value if value is not None else "").strip().strip("[]") \
         or EXTERNAL_DNS_LISTEN
     try:
@@ -103,13 +103,13 @@ def fakeip_external_outbounds(outbounds, endpoints=None, dns_tags=None):
 
     Outbound'ы и endpoint'ы копируются как есть, кроме:
       - block/dns (удалены в 1.13) выбрасываются;
-      - без тега → `proxy`/`proxy-2`/…; повтор тега — ValueError (sing-box
+      - без тега → `proxy`/`proxy-2`/…; повтор тега даёт ValueError (sing-box
         всё равно не стартует, а так видно, в чём дело);
       - `domain_resolver` с тегом, которого нет среди dns_tags, снимается
         (из чужого конфига DNS-серверы не переносятся);
-      - члены selector/urltest — только существующие теги, без повторов;
+      - в selector/urltest только существующие теги, без повторов;
         группа без членов выбрасывается, `default` вне членов снимается.
-    Если тега `proxy-out` нет — добавляется `selector` proxy-out: сначала
+    Если тега `proxy-out` нет, добавляется `selector` proxy-out: сначала
     группы, потом серверы, потом endpoint'ы; по умолчанию первый. Он встаёт
     перед первым direct. `direct` добавляется, если такого тега нет.
     """
@@ -192,7 +192,7 @@ def build_fakeip_external_config(*, proxy_outbounds, proxy_endpoints=None,
     """
     FakeIP за внешним фронт-DNS (п.1 спеки B2).
 
-    dns-in (direct, только UDP) на dns_listen:dns_port — всегда, без перехвата
+    dns-in (direct, только UDP) на dns_listen:dns_port всегда, без перехвата
     :53. DNS: AAAA, HTTPS и SVCB → пустой NOERROR (IPv6 в сети нет, а
     ipv4hint из HTTPS-записи, пришедший через DoH, увёл бы клиента на
     настоящий IP мимо fakeip), A → fakeip, остальное → прямой DNS (typed,
@@ -206,7 +206,7 @@ def build_fakeip_external_config(*, proxy_outbounds, proxy_endpoints=None,
     встают после sniff/hijack-dns и перед правилом `inbound: tun-in`.
 
     `default_domain_resolver` = dns-direct всегда (1.14 без него не стартует).
-    `cache_file.path` абсолютный. ValueError — на непригодный ввод.
+    `cache_file.path` абсолютный. ValueError на непригодный ввод.
     """
     from core.singbox_config import (
         make_direct_dns_servers, make_sniff_rule, make_hijack_dns_rule,
@@ -299,7 +299,7 @@ def build_config_hook(front_dns, *, proxy_outbound=None,
 # ─────────────────────── settings.json: режим конфига ───────────────────────
 
 def get_front(name: str) -> dict:
-    """Запись фронт-DNS конфига `name` ({} — режим engine/неизвестно)."""
+    """Запись фронт-DNS конфига `name` ({} для engine или неизвестного)."""
     try:
         from core.config_manager import get_config_manager
         fronts = get_config_manager().get(
@@ -316,7 +316,7 @@ def is_external_front(name: str) -> bool:
 
 
 def _store_front(name: str, entry) -> None:
-    """Записать (entry=None — стереть) отметку и сохранить settings.json.
+    """Записать (entry=None: стереть) отметку и сохранить settings.json.
     RuntimeError, если файл не записался; в памяти тогда прежнее значение."""
     from core.config_manager import get_config_manager
     cm = get_config_manager()
@@ -324,7 +324,7 @@ def _store_front(name: str, entry) -> None:
     fronts = dict(before) if isinstance(before, dict) else {}
     if entry is None:
         if name not in fronts:
-            return                       # нечего стирать — settings не трогаем
+            return                       # нечего стирать, settings не трогаем
         fronts.pop(name)
     else:
         if fronts.get(name) == entry:
@@ -378,7 +378,7 @@ def _host_port(host: str, port: int) -> str:
 def adguard_upstream_lines(domains, dns_listen: str, dns_port: int,
                            chunk: int = ADGUARD_UPSTREAM_CHUNK) -> list:
     """Строки upstream'а для AdGuard: `[/a.com/b.org/]127.0.0.1:1053`, по
-    `chunk` доменов в строке. Без доменов — []."""
+    `chunk` доменов в строке. Без доменов []."""
     target = _host_port(dns_listen, dns_port)
     doms = list(domains or [])
     return ["[/%s/]%s" % ("/".join(doms[i:i + chunk]), target)
@@ -386,7 +386,7 @@ def adguard_upstream_lines(domains, dns_listen: str, dns_port: int,
 
 
 def _host_addresses() -> set:
-    """IP-адреса интерфейсов этого хоста (`ip -o addr`); set() — не вышло."""
+    """IP-адреса интерфейсов этого хоста (`ip -o addr`); set(), если не вышло."""
     try:
         r = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True,
                            text=True, timeout=3)
@@ -413,8 +413,8 @@ def direct_dns_problems(direct_dns: str, dns_listen: str, dns_port: int,
     (ошибки, предупреждения) про петли прямого DNS в режиме external.
 
     Системный резолвер и DNS на самом хосте (loopback, адреса интерфейсов)
-    на gw — это AdGuard: для доменов из списка он снова спросит sing-box,
-    получится петля. Прямой DNS, указывающий на сам dns-in, — ошибка.
+    на gw это AdGuard: для доменов из списка он снова спросит sing-box,
+    получится петля. Прямой DNS, указывающий на сам dns-in, это ошибка.
     """
     from core.singbox_config import parse_direct_dns
     errors, warnings = [], []
@@ -438,10 +438,10 @@ def direct_dns_problems(direct_dns: str, dns_listen: str, dns_port: int,
     hits_dns_in = (srv["type"] == "udp" and port == int(dns_port) and
                    (ip == listen or (listen.is_unspecified and local_ip)))
     if hits_dns_in:
-        errors.append("прямой DNS %s — это сам dns-in sing-box: запросы "
+        errors.append("прямой DNS %s это сам dns-in sing-box: запросы "
                       "пойдут по кругу" % _host_port(str(ip), port))
     elif local_ip and port in _DEFAULT_DNS_PORTS.values():
-        warnings.append("прямой DNS %s — это сам хост (там, скорее всего, "
+        warnings.append("прямой DNS %s это сам хост (там, скорее всего, "
                         "AdGuard): %s" % (_host_port(str(ip), port), loop_hint))
     return errors, warnings
 
@@ -458,7 +458,7 @@ def form_options(configs) -> dict:
     """Добавка к singbox_fakeip.build_options(): режимы и их дефолты."""
     return {
         # Фронт-DNS: engine (sing-box перехватывает DNS LAN) | external
-        # (AdGuard Home впереди, sing-box — его upstream для доменов списка).
+        # (AdGuard Home впереди, sing-box его upstream для доменов списка).
         "front_dns": "engine",
         "front_dns_modes": list(FAKEIP_FRONT_MODES),
         "engine_defaults": {"name": "fakeip", "dns_port": 1153,
@@ -479,11 +479,11 @@ def form_options(configs) -> dict:
 
 def _resolve_proxy_set(proxy_link: str, proxy_config: str) -> dict:
     """
-    {ok, outbounds, endpoints} — все выходы прокси.
+    {ok, outbounds, endpoints}: все выходы прокси.
 
     Ссылка → один outbound (тег из ссылки; пустой или `direct` → `proxy`).
     Конфиг → все его outbounds и endpoints как есть; чистка (block/dns,
-    чужие domain_resolver, битые члены групп) и selector proxy-out — в
+    чужие domain_resolver, битые члены групп) и selector proxy-out: в
     fakeip_external_outbounds.
     """
     link = (proxy_link or "").strip()
@@ -514,7 +514,7 @@ def _resolve_proxy_set(proxy_link: str, proxy_config: str) -> dict:
                   _GROUP_TYPES + _DROPPED_OUTBOUND_TYPES + ("direct",)]
         if not leaves and not eps:
             return {"ok": False,
-                    "error": "в конфиге '%s' нет прокси-outbound'ов — "
+                    "error": "в конфиге '%s' нет прокси-outbound'ов, "
                              "вставьте ссылку vless://…" % cfgname}
         return {"ok": True, "outbounds": obs, "endpoints": eps}
 
@@ -529,7 +529,7 @@ def _capture_conflict(mgr, name: str) -> str:
 
     Пересобрать его на ходу нельзя: после перезаписи менеджер перестанет
     считать конфиг «перехватывающим», и REDIRECT :53 останется без хозяина
-    (LAN без DNS). Снимать перехват под живым процессом тоже плохо — FakeIP
+    (LAN без DNS). Снимать перехват под живым процессом тоже плохо: FakeIP
     engine-конфига молча перестанет работать. Поэтому отказ."""
     port = mgr._config_dns_in_port(name)
     if port and mgr.is_running(name):
@@ -571,7 +571,7 @@ def build_and_save_front(front_dns, *, name="", proxy_link="",
 
     Только typed-DNS (1.12+): default_domain_resolver и predefined-ответов в
     legacy нет. Домены из списков/формы в конфиг не попадают (их отбирает
-    AdGuard) — из них собираются строки upstream'а для AdGuard. Отметка
+    AdGuard), из них собираются строки upstream'а для AdGuard. Отметка
     режима пишется в settings.json ДО конфига: без неё менеджер на
     iptables-платформе поставил бы REDIRECT :53.
     """
@@ -637,7 +637,7 @@ def build_and_save_front(front_dns, *, name="", proxy_link="",
     warning = ""
     chk = mgr.check_text(text)
     if chk.get("no_binary"):
-        warning = "sing-box не установлен — конфиг сохранён без проверки"
+        warning = "sing-box не установлен, конфиг сохранён без проверки"
     elif not chk.get("ok"):
         return {"ok": False,
                 "error": "sing-box отверг сгенерированный конфиг: %s"
@@ -649,7 +649,7 @@ def build_and_save_front(front_dns, *, name="", proxy_link="",
                               "dns_port": port})
     except Exception as e:
         return {"ok": False,
-                "error": "режим конфига не записан в settings.json (%s) — "
+                "error": "режим конфига не записан в settings.json (%s), "
                          "конфиг не сохранён" % e}
     save = mgr.save_config(name, text=text)
     if not save.get("ok"):
