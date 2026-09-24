@@ -297,8 +297,13 @@ const AghRoutesPage = (() => {
         if (el) el.style.display = dirty ? '' : 'none';
     }
 
+    // Построчно: сначала срезаем комментарий «# …» в каждой строке, потом
+    // делим по пробелам/запятым (иначе слова комментария стали бы доменами).
     function splitLines(text) {
-        return String(text || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+        return String(text || '').split(/\r?\n/)
+            .map(line => line.replace(/#.*$/, ''))
+            .flatMap(line => line.split(/[\s,;]+/))
+            .map(s => s.trim()).filter(Boolean);
     }
 
     function onInput(e) {
@@ -429,6 +434,15 @@ const AghRoutesPage = (() => {
         }
     }
 
+    // На время плана/применения форма недоступна: правка посреди запроса
+    // разошлась бы с тем, что уже ушло на сервер.
+    function lockForm(on) {
+        const body = document.getElementById('agr-body');
+        if (!body) return;
+        body.inert = !!on;
+        body.style.opacity = on ? '0.6' : '';
+    }
+
     async function withBusy(fn) {
         if (busy) return;
         busy = true;
@@ -438,6 +452,7 @@ const AghRoutesPage = (() => {
             await fn();
         } finally {
             busy = false;
+            lockForm(false);
             btns.forEach(b => { b.disabled = false; });
         }
     }
@@ -445,6 +460,7 @@ const AghRoutesPage = (() => {
     function showPlan() {
         return withBusy(async () => {
             if (dirty && !(await save(true))) return;
+            lockForm(true);
             try {
                 const r = await API.get('/api/agh-routes/plan', LONG);
                 lastPlan = r.plan;
@@ -464,6 +480,7 @@ const AghRoutesPage = (() => {
                 + 'в AdGuard Home заменятся наши upstream-строки. Чужие строки и правила не трогаются.',
                 { confirmLabel: 'Применить' });
             if (!ok) return;
+            lockForm(true);
             let r;
             try {
                 r = await API.post('/api/agh-routes/apply', {}, LONG);
@@ -487,8 +504,10 @@ const AghRoutesPage = (() => {
             } else {
                 Toast.success('Применено');
                 const sb = r.singbox || {};
-                if (sb.saved && !sb.running) {
-                    Toast.warning(`Конфиг «${sb.config}» сохранён, но инстанс не запущен панелью: перезапустите sing-box вручную`, 10000);
+                // Ни процесс панели, ни юнит sing-box-gui этот конфиг не
+                // крутят — перезапускать больше некому.
+                if (sb.saved && !sb.restarted && !sb.restart_via) {
+                    Toast.warning(`Конфиг «${sb.config}» сохранён, но не запущен ни панелью, ни юнитом sing-box-gui: перезапустите sing-box вручную`, 10000);
                 }
                 if (sb.warning) Toast.warning(sb.warning, 8000);
             }
@@ -562,13 +581,16 @@ const AghRoutesPage = (() => {
             </tr>`).join('');
 
         const clientRows = (agh.clients || []).map(c => {
-            const act = { add: 'создать', update: 'обновить', remove: 'снять наши строки', none: 'без изменений' }[c.action] || c.action;
+            const act = { add: 'создать', update: 'обновить', remove: 'снять наши строки',
+                          delete: 'удалить (создан здесь)', none: 'без изменений' }[c.action] || c.action;
             return `<tr><td>${esc(c.name)}</td><td class="text-muted">${esc(c.id || '')}</td>
                 <td>${esc(act)}</td><td>${c.current} → ${c.desired}</td></tr>`;
         }).join('');
 
         const sbState = sb.found
-            ? (sb.running ? '<span class="badge badge-success">запущен</span>' : '<span class="badge badge-muted">не запущен панелью</span>')
+            ? (sb.running ? '<span class="badge badge-success">запущен панелью</span>'
+                : sb.systemd ? '<span class="badge badge-success">запущен юнитом sing-box-gui</span>'
+                : '<span class="badge badge-muted">не запущен</span>')
             : '<span class="badge badge-danger">нет конфига</span>';
         const sbRules = (sb.rules_desired || []).map(r =>
             `${r.outbound}: ${(r.domain_suffix || []).length} доменов`);
@@ -577,7 +599,8 @@ const AghRoutesPage = (() => {
         if (result && result.ok && result.changed) {
             const s = result.singbox || {};
             const parts = [];
-            if (s.saved) parts.push(`sing-box «${s.config}» сохранён` + (s.restarted ? ' и перезапущен' : ''));
+            const via = { panel: 'панелью', systemd: 'через systemd (sing-box-gui)' }[s.restart_via] || '';
+            if (s.saved) parts.push(`sing-box «${s.config}» сохранён` + (s.restarted ? ` и перезапущен ${via}` : ''));
             if (result.agh && result.agh.global_updated) parts.push('AdGuard: upstream_dns обновлён');
             if (result.agh && result.agh.clients && result.agh.clients.length) {
                 parts.push('AdGuard: клиентов изменено ' + result.agh.clients.length);

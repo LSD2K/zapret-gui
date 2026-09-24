@@ -31,6 +31,7 @@
 
 import base64
 import copy
+import http.client
 import ipaddress
 import json
 import os
@@ -38,6 +39,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from core.log_buffer import log
@@ -55,15 +57,13 @@ LINE_CHUNK = 40
 # Маска пароля в ответах API (как у gui.auth_password в /api/config).
 MASK = "***"
 
-# Поля ответа /control/dns_info, которых нет в теле /control/dns_config.
-_DNS_INFO_READONLY = ("default_local_ptr_upstreams",)
-
 # Имя конфига sing-box — то же правило, что у singbox_manager.
 _CONFIG_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
 _RULE_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,40}$")
 
-# Домен-суффикс после нормализации: метки a-z0-9_- через точку.
-_LABEL = r"(?!-)[a-z0-9_-]{1,63}(?<!-)"
+# Домен-суффикс после нормализации: метки a-z0-9- через точку; `_`
+# допустим только первым символом метки (_dmarc, _acme-challenge).
+_LABEL = r"_?(?!-)[a-z0-9-]+(?<!-)"
 _DOMAIN_RE = re.compile(r"^%s(?:\.%s)*$" % (_LABEL, _LABEL))
 
 # Цель DNS для AdGuard: адрес upstream'а без пробелов и комментариев
@@ -113,6 +113,8 @@ def normalize_domains(items) -> list:
         d = _to_ascii(d)
         if not d or len(d) > 253 or not _DOMAIN_RE.match(d):
             continue
+        if any(len(label) > 63 for label in d.split(".")):
+            continue
         if d not in seen:
             seen.add(d)
             out.append(d)
@@ -134,14 +136,19 @@ def _norm_client_id(raw) -> str:
 
 
 def _split_tokens(v) -> list:
-    """Список строк из списка или текста (пробелы/запятые/переводы строк)."""
-    if isinstance(v, (list, tuple)):
-        tokens = []
-        for x in v:
-            tokens.extend(re.split(r"[\s,;]+", str(x or "")))
-    else:
-        tokens = re.split(r"[\s,;]+", str(v or ""))
-    return [t for t in tokens if t]
+    """
+    Записи из текста textarea или списка строк. Режем построчно, в каждой
+    строке срезаем комментарий ``#…`` и только потом делим по пробелам,
+    запятым и точкам с запятой: иначе слова из комментария
+    («example.org # мой сайт») становились бы доменами.
+    """
+    items = v if isinstance(v, (list, tuple)) else [v]
+    tokens = []
+    for item in items:
+        for line in str(item or "").splitlines():
+            line = line.split("#", 1)[0]
+            tokens.extend(t for t in re.split(r"[\s,;]+", line) if t)
+    return tokens
 
 
 def _dedup(seq) -> list:
@@ -346,7 +353,82 @@ def _clean_target(v) -> str:
     return t
 
 
+def _clean_url(v) -> str:
+    """
+    Адрес API AdGuard Home: http(s)://хост[:порт][/путь]. Логин/пароль в
+    адресе, query и fragment запрещены: учётные данные живут в отдельных
+    полях, а адрес уходит в логи и в интерфейс.
+    """
+    if not isinstance(v, str):
+        raise ValueError("Адрес AdGuard Home должен быть строкой")
+    raw = v.strip().rstrip("/")
+    try:
+        u = urllib.parse.urlsplit(raw)
+        u.port          # бросает ValueError на порте вне 0..65535
+    except ValueError:
+        raise ValueError("Адрес AdGuard Home: некорректный порт")
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("Адрес AdGuard Home: http(s)://хост:порт")
+    if u.username is not None or u.password is not None or "@" in u.netloc:
+        raise ValueError("Адрес AdGuard Home: логин и пароль задаются "
+                         "отдельными полями, не в адресе")
+    if u.query or u.fragment or "?" in raw or "#" in raw:
+        raise ValueError("Адрес AdGuard Home: без ?query и #fragment")
+    if re.search(r"\s", raw):
+        raise ValueError("Адрес AdGuard Home: пробелы недопустимы")
+    return raw
+
+
+def _clean_url_quiet(v) -> str:
+    try:
+        return _clean_url(v)
+    except ValueError:
+        return str(v or "")
+
+
+def _url_origin(url: str) -> str:
+    """scheme://хост:порт — для логов и сообщений (без пути и прочего)."""
+    try:
+        u = urllib.parse.urlsplit(str(url or ""))
+        host = u.hostname or "?"
+        if ":" in host:
+            host = "[%s]" % host
+        return "%s://%s%s" % (u.scheme or "http", host,
+                              ":%d" % u.port if u.port else "")
+    except ValueError:
+        return "?"
+
+
+def _need_str(data: dict, key: str) -> str:
+    v = data.get(key)
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        raise ValueError("%s: ожидается строка" % key)
+    return v
+
+
+def _need_bool(data: dict, key: str, where: str = "") -> bool:
+    v = data.get(key)
+    if not isinstance(v, bool):
+        raise ValueError("%s%s: ожидается true или false"
+                         % (where, key))
+    return v
+
+
+def _need_str_list(v, what: str, allow_text: bool = False) -> list:
+    """Список строк (или, если allow_text, текст textarea)."""
+    if v is None:
+        return []
+    if isinstance(v, str) and allow_text:
+        return [v]
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise ValueError("%s: ожидается список строк" % what)
+    return v
+
+
 def _clean_clients(v) -> list:
+    v = _need_str_list(v, "clients", allow_text=True)
     out, bad = [], []
     for tok in _split_tokens(v):
         try:
@@ -365,30 +447,37 @@ def _clean_rules(v) -> tuple:
     if not isinstance(v, list):
         raise ValueError("rules должен быть массивом")
     out, warns, ids = [], [], set()
-    for r in v:
+    for i, r in enumerate(v):
+        where = "rules[%d]." % i
         if not isinstance(r, dict):
-            continue
-        rid = str(r.get("id") or "").strip()
+            raise ValueError("rules[%d]: ожидается объект" % i)
+        for key in ("id", "name", "outbound"):
+            if r.get(key) is not None and not isinstance(r[key], str):
+                raise ValueError("%s%s: ожидается строка" % (where, key))
+        enabled = _need_bool(r, "enabled", where) if "enabled" in r else True
+        rid = (r.get("id") or "").strip()
         if not _RULE_ID_RE.match(rid) or rid in ids:
             # os.urandom, а не uuid: на Entware python3-light без uuid
             rid = "r-" + os.urandom(3).hex()
         ids.add(rid)
-        name = str(r.get("name") or "").strip()[:80] or rid
-        raw = _split_tokens(r.get("domains"))
+        name = (r.get("name") or "").strip()[:80] or rid
+        raw = _split_tokens(_need_str_list(r.get("domains"),
+                                           where + "domains",
+                                           allow_text=True))
         domains = normalize_domains(raw)
         dropped = [t for t in raw if not normalize_domains([t])]
         if dropped:
             warns.append("правило «%s»: отброшено %d записей (%s)"
                          % (name, len(dropped), ", ".join(dropped[:5])))
-        lists = r.get("lists") or []
-        if isinstance(lists, str):
-            lists = [lists]
-        lists = _dedup(str(x).strip() for x in lists if str(x or "").strip())
+        lists = _need_str_list(r.get("lists"), where + "lists")
+        lists = _dedup(x.strip() for x in lists if x.strip())
+        if any(len(x) > 200 for x in lists):
+            raise ValueError("%slists: слишком длинный идентификатор" % where)
         out.append({
             "id": rid,
             "name": name,
-            "enabled": bool(r.get("enabled", True)),
-            "outbound": str(r.get("outbound") or "").strip(),
+            "enabled": enabled,
+            "outbound": (r.get("outbound") or "").strip(),
             "lists": lists,
             "domains": domains,
         })
@@ -405,22 +494,19 @@ def update_settings(data: dict) -> dict:
         raise ValueError("Ожидается JSON-объект")
     upd, warns = {}, []
     if "enabled" in data:
-        upd["enabled"] = bool(data["enabled"])
+        upd["enabled"] = _need_bool(data, "enabled")
     if "agh_url" in data:
-        url = str(data["agh_url"] or "").strip().rstrip("/")
-        if not re.match(r"^https?://[^/\s]+", url):
-            raise ValueError("Адрес AdGuard Home: http(s)://хост:порт")
-        upd["agh_url"] = url
+        upd["agh_url"] = _clean_url(data["agh_url"])
     if "agh_user" in data:
-        upd["agh_user"] = str(data["agh_user"] or "").strip()
+        upd["agh_user"] = _need_str(data, "agh_user").strip()
     if "agh_password" in data:
-        pw = str(data["agh_password"] or "")
+        pw = _need_str(data, "agh_password")
         if pw and pw != MASK:
             upd["agh_password"] = pw
     if "dns_target" in data:
-        upd["dns_target"] = _clean_target(data["dns_target"])
+        upd["dns_target"] = _clean_target(_need_str(data, "dns_target"))
     if "singbox_config" in data:
-        name = str(data["singbox_config"] or "").strip()
+        name = _need_str(data, "singbox_config").strip()
         if name.endswith(".json"):
             name = name[:-5]
         if name and not _CONFIG_NAME_RE.match(name):
@@ -452,9 +538,16 @@ def _store_applied(applied: dict) -> None:
 # ─────────────────────── источники доменов ───────────────────────────
 
 def _collect_detail(rule: dict) -> tuple:
-    """(отсортированные домены правила, предупреждения)."""
+    """
+    (отсортированные домены правила, предупреждения, ошибки).
+
+    Источник, который не удалось прочитать (geosite не скачался и нет
+    кэша, список удалён, hostlist-файла нет, исключение при чтении), —
+    ОШИБКА плана: иначе применение молча сняло бы его домены из sing-box
+    и AdGuard. Пустой, но существующий hostlist — только предупреждение.
+    """
     name = str(rule.get("name") or rule.get("id") or "?")
-    raw, warns = [], []
+    raw, warns, errs = [], [], []
     for item in rule.get("lists") or []:
         s = str(item or "").strip()
         low = s.lower()
@@ -463,10 +556,15 @@ def _collect_detail(rule: dict) -> tuple:
         try:
             if low.startswith("hl:"):
                 from core.hostlist_manager import get_hostlist_manager
-                doms = get_hostlist_manager().get_hostlist(s[3:]) or []
+                hm = get_hostlist_manager()
+                doms = hm.get_hostlist(s[3:]) or []
                 if not doms:
-                    warns.append("правило «%s»: hostlist %s пуст или не "
-                                 "найден" % (name, s[3:]))
+                    if s[3:] in hm.list_names():
+                        warns.append("правило «%s»: hostlist %s пуст"
+                                     % (name, s[3:]))
+                    else:
+                        errs.append("правило «%s»: hostlist %s не найден"
+                                    % (name, s[3:]))
                 raw += doms
             elif low.startswith("ipl:") or low.startswith("geoip:"):
                 warns.append("правило «%s»: %s пропущен, поддерживаются "
@@ -474,22 +572,23 @@ def _collect_detail(rule: dict) -> tuple:
             elif low.startswith("geosite:"):
                 from core.routing import alias_resolver
                 res = alias_resolver.expand_domains([low]) or {}
-                if res.get("aliases_failed"):
-                    warns.append("правило «%s»: не удалось получить %s"
-                                 % (name, low))
+                if res.get("aliases_failed") or not res.get("domains"):
+                    errs.append("правило «%s»: не удалось получить %s "
+                                "(нет сети и кэша или нет такого списка)"
+                                % (name, low))
                 raw += res.get("domains") or []
             else:
                 from core import named_lists
                 it = named_lists.get(s)
                 if it is None:
-                    warns.append("правило «%s»: список %s не найден"
-                                 % (name, s))
+                    errs.append("правило «%s»: список %s не найден"
+                                % (name, s))
                 else:
                     raw += it.get("domains") or []
         except Exception as e:
-            warns.append("правило «%s»: %s: %s" % (name, s, e))
+            errs.append("правило «%s»: %s: %s" % (name, s, e))
     raw += list(rule.get("domains") or [])
-    return sorted(set(normalize_domains(raw))), warns
+    return sorted(set(normalize_domains(raw))), warns, errs
 
 
 def collect(rule: dict) -> list:
@@ -580,12 +679,15 @@ def _http_request(method: str, url: str, *, body=None, user: str = "",
             detail = e.read()[:300].decode("utf-8", "replace").strip()
         except Exception:
             detail = ""
+        path = urllib.parse.urlsplit(url).path
         raise AghError("AdGuard Home %s %s: HTTP %d%s"
-                       % (method, url, e.code,
-                          (" — " + detail) if detail else ""))
-    except (urllib.error.URLError, OSError, ValueError) as e:
+                       % (method, path, e.code,
+                          (": " + detail) if detail else ""))
+    except (urllib.error.URLError, http.client.HTTPException, OSError,
+            ValueError) as e:
         reason = getattr(e, "reason", None) or e
-        raise AghError("нет связи с AdGuard Home (%s): %s" % (url, reason))
+        raise AghError("нет связи с AdGuard Home (%s): %s"
+                       % (_url_origin(url), reason or type(e).__name__))
     text = raw.decode("utf-8", "replace")
     if not text.strip():
         return code, {}
@@ -608,17 +710,31 @@ def test_connection(overrides: dict = None) -> dict:
     url/логин/пароль из формы (пустой пароль и маска = сохранённый)."""
     s = get_settings()
     ov = overrides if isinstance(overrides, dict) else {}
-    if str(ov.get("agh_url") or "").strip():
-        s["agh_url"] = str(ov["agh_url"]).strip().rstrip("/")
-    if "agh_user" in ov:
-        s["agh_user"] = str(ov.get("agh_user") or "").strip()
-    pw = str(ov.get("agh_password") or "")
-    if pw and pw != MASK:
+    pw = ov.get("agh_password")
+    pw = pw if isinstance(pw, str) and pw and pw != MASK else ""
+    url = ov.get("agh_url")
+    if isinstance(url, str) and url.strip():
+        try:
+            url = _clean_url(url)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        # Сохранённый пароль уходит только на сохранённый адрес: иначе
+        # кнопкой «Проверить» его можно было бы отправить куда угодно.
+        if url != _clean_url_quiet(s.get("agh_url")) and not pw:
+            return {"ok": False, "error": "Адрес отличается от сохранённого: "
+                    "введите пароль для проверки"}
+        s["agh_url"] = url
+    elif url is not None and not isinstance(url, str):
+        return {"ok": False, "error": "agh_url: ожидается строка"}
+    if isinstance(ov.get("agh_user"), str):
+        s["agh_user"] = ov["agh_user"].strip()
+    if pw:
         s["agh_password"] = pw
     try:
         st = _agh_call(s, "GET", "/control/status")
     except AghError as e:
-        log.warning("agh_routes: проверка связи: %s" % e, source=SOURCE)
+        log.warning("agh_routes: проверка связи с %s: %s"
+                    % (_url_origin(s.get("agh_url")), e), source=SOURCE)
         return {"ok": False, "error": str(e)}
     if not isinstance(st, dict):
         return {"ok": False, "error": "неожиданный ответ /control/status"}
@@ -646,18 +762,37 @@ def _rules_part(s: dict, enabled: bool, errors: list, warnings: list):
         if not enabled or not item["enabled"]:
             item["skipped"] = "выключено"
             continue
-        doms, warns = _collect_detail(r)
+        doms, warns, errs = _collect_detail(r)
         warnings.extend(warns)
-        own, dup = [], {}
+        errors.extend(errs)
+        own, dup, shadow = [], {}, {}
         for d in doms:
             if d in assigned:
                 dup[assigned[d]] = dup.get(assigned[d], 0) + 1
                 continue
-            assigned[d] = name
+            # Суффикс из правила выше перекрывает домен: sing-box отдаст
+            # его первому совпавшему правилу (google.com раньше mail.google.com).
+            parts = d.split(".")
+            for i in range(1, len(parts)):
+                other = assigned.get(".".join(parts[i:]))
+                if other and other != name:
+                    shadow[other] = shadow.get(other, 0) + 1
+                    break
             own.append(d)
+        for d in own:
+            assigned[d] = name
         for other, n in dup.items():
             warnings.append("правило «%s»: %d доменов уже есть в правиле "
                             "«%s», берётся первое" % (name, n, other))
+        for other, n in shadow.items():
+            warnings.append("правило «%s»: %d доменов перекрыты суффиксами "
+                            "правила «%s» выше, в sing-box сработает оно"
+                            % (name, n, other))
+        single = [d for d in own if "." not in d]
+        if single:
+            warnings.append("правило «%s»: однометочные суффиксы (%s) "
+                            "заворачивают всю зону" % (name,
+                                                       ", ".join(single[:5])))
         item["domains"] = len(own)
         item["sample"] = own[:5]
         if not own:
@@ -695,10 +830,11 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
             if new != cfg:
                 sb["cleanup_config"] = prev_name
                 ctx["sb_cleanup"] = (prev_name, new, r.get("text") or "")
+        elif r.get("ok"):
+            warnings.append("прежний конфиг sing-box «%s» не разобран: наши "
+                            "правила из него не сняты" % prev_name)
 
     old = prev_rules if prev_name == name else []
-    # Конфиг нужен, если есть что ставить или что снимать.
-    needed = bool(rules_desired or old)
     if not name:
         if rules_desired:
             errors.append("не выбран конфиг sing-box")
@@ -708,11 +844,21 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
     if not isinstance(cfg, dict):
         why = (r.get("error") or "не найден") if not r.get("ok") else \
             "не разобран: " + "; ".join(r.get("errors") or [])
-        (errors if needed else warnings).append(
+        # Ставить некуда — ошибка. Снимать не из чего (выключено, файла
+        # нет) — предупреждение: AdGuard всё равно надо почистить.
+        (errors if rules_desired else warnings).append(
             "конфиг sing-box «%s»: %s" % (name, why))
+        if old:
+            # Запись о поставленном не теряем: конфиг может вернуться,
+            # и тогда наши правила из него надо будет снять.
+            ctx["sb_keep_applied"] = True
         return sb
     sb["found"] = True
     sb["running"] = bool(mgr.is_running(name))
+    sb["systemd"] = False
+    if not sb["running"]:
+        from core import singbox_autostart
+        sb["systemd"] = bool(singbox_autostart.unit_runs_config(name))
     tags = outbound_tags(cfg)
     sb["outbounds"] = [t["tag"] for t in tags]
     for rule in rules_desired:
@@ -722,6 +868,12 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
     cur_rules = ((cfg.get("route") or {}).get("rules") or []) \
         if isinstance(cfg.get("route"), dict) else []
     sb["rules_current"] = [x for x in cur_rules if x in old]
+    missing = len([x for x in old if x not in cur_rules])
+    if missing:
+        sb["drift"] = missing
+        warnings.append("в конфиге «%s» не найдено %d из %d поставленных "
+                        "правил: их изменили вручную, изменённые останутся "
+                        "как есть" % (name, missing, len(old)))
     new_cfg = merge_singbox_rules(copy.deepcopy(cfg), old, rules_desired)
     sb["changed"] = new_cfg != cfg
     if sb["changed"]:
@@ -732,6 +884,43 @@ def _singbox_part(s, enabled, rules_desired, errors, warnings, ctx):
         warnings.append("в конфиге «%s» dns-in слушает %s, а цель DNS "
                         "для AdGuard — %s" % (name, bad, target))
     return sb
+
+
+def _is_general_upstream(line) -> bool:
+    """Обычный upstream (для всех доменов): не комментарий, не пусто и не
+    доменная строка ``[/…/]``. Без хотя бы одного такого AdGuard не
+    знает, куда слать остальные домены."""
+    s = str(line or "").strip()
+    return bool(s) and not s.startswith("#") and not s.startswith("[/")
+
+
+def _as_network(raw):
+    """IP/подсеть из id клиента AdGuard (MAC и ClientID → None)."""
+    try:
+        return ipaddress.ip_network(str(raw).strip(), strict=False)
+    except ValueError:
+        return None
+
+
+def _covering_clients(clients, cid, exclude) -> list:
+    """Клиенты AdGuard (кроме exclude), чья подсеть покрывает cid."""
+    net = _as_network(cid)
+    out = []
+    if net is None:
+        return out
+    for c in clients:
+        if c is exclude:
+            continue
+        for raw in c.get("ids") or []:
+            other = _as_network(raw)
+            if (other is None or other.version != net.version
+                    or other.prefixlen == other.max_prefixlen
+                    or other == net):
+                continue
+            if net.subnet_of(other):
+                out.append("%s (%s)" % (c.get("name"), raw))
+                break
+    return out
 
 
 def _find_client(clients, cid):
@@ -787,10 +976,14 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
         "global_changed": new_up != upstreams,
     })
     if agh["global_changed"]:
-        body = {k: v for k, v in info.items()
-                if k not in _DNS_INFO_READONLY}
-        body["upstream_dns"] = new_up
-        ctx["agh_global"] = body
+        if not agh["upstream_dns_file"] and not any(
+                _is_general_upstream(x) for x in new_up):
+            errors.append("в глобальных upstream'ах AdGuard не останется "
+                          "ни одного обычного upstream'а (только доменные "
+                          "строки): добавьте его в AdGuard")
+        # Минимальное тело: AdGuard меняет только переданные поля, эхо
+        # всего dns_info нам не нужно и рискованно между версиями.
+        ctx["agh_global"] = {"upstream_dns": new_up}
 
     # ── клиенты ──
     agh_clients = [c for c in (cl.get("clients") or [])
@@ -808,11 +1001,22 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
                                 % raw)
     for cid in _dedup(wanted):
         c = _find_client(agh_clients, cid)
+        cover = _covering_clients(agh_clients, cid, c)
+        if cover:
+            warnings.append("клиент %s входит в подсеть клиента AdGuard %s: "
+                            "для этого адреса будут действовать настройки "
+                            "клиента %s, а не подсети"
+                            % (cid, ", ".join(cover),
+                               c.get("name") if c else "zg-" + cid))
         if c is None:
             name = "zg-" + cid
             if name in handled:
                 continue
             new = base + list(lines)
+            if not any(_is_general_upstream(x) for x in new):
+                errors.append("клиент %s: в глобальных upstream'ах AdGuard "
+                              "нет ни одного обычного upstream'а, новому "
+                              "клиенту нечего дать кроме наших строк" % cid)
             # use_global_settings оставляем true: в AdGuard этот флаг
             # про фильтрацию (блокировки, safe search и т.п.), а не про
             # upstream'ы — поклиентные upstream'ы действуют при любом
@@ -850,6 +1054,10 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
         op = {"id": cid, "name": name, "exists": True,
               "action": "update" if new != cur else "none",
               "current": n_cur, "desired": len(lines)}
+        if new != cur and new and not any(_is_general_upstream(x)
+                                          for x in new):
+            errors.append("клиент AdGuard %s: после замены не останется ни "
+                          "одного обычного upstream'а" % name)
         if new != cur:
             data = copy.deepcopy(c)
             data["upstreams"] = new
@@ -866,19 +1074,30 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
             continue
         cur = [str(x) for x in (c.get("upstreams") or [])]
         n_cur = len([x for x in cur if is_managed_line(x, targets)])
-        if not n_cur:
+        rec = prev.get(name)
+        ours = bool(rec and rec.get("created") and name.startswith("zg-"))
+        if not n_cur and not ours:
+            continue
+        ids = ",".join(str(x) for x in c.get("ids") or [])
+        if ours:
+            # Клиента создавали мы — снимаем его целиком.
+            ops.append({"id": ids, "name": name, "action": "delete",
+                        "exists": True, "current": n_cur, "desired": 0,
+                        "path": "/control/clients/delete",
+                        "body": {"name": name}})
             continue
         rest = [x for x in cur if not is_managed_line(x, targets)]
-        rec = prev.get(name)
         kind = rec.get("base") if rec else ("global" if rest == base
                                             else "own")
         # Клиент до нас ходил через глобальные — возвращаем его к ним.
         new = [] if kind == "global" else rest
+        if new and not any(_is_general_upstream(x) for x in new):
+            errors.append("клиент AdGuard %s: после снятия наших строк не "
+                          "останется ни одного обычного upstream'а" % name)
         data = copy.deepcopy(c)
         data["upstreams"] = new
-        ops.append({"id": ",".join(str(x) for x in c.get("ids") or []),
-                    "name": name, "action": "remove", "exists": True,
-                    "current": n_cur, "desired": 0,
+        ops.append({"id": ids, "name": name, "action": "remove",
+                    "exists": True, "current": n_cur, "desired": 0,
                     "path": "/control/clients/update",
                     "body": {"name": name, "data": data}})
 
@@ -887,6 +1106,7 @@ def _agh_part(s, mode, lines, target, errors, warnings, ctx):
         o["action"] != "none" for o in ops)
     ctx["agh_ops"] = ops
     ctx["agh_records"] = records
+    ctx["agh_prev_records"] = prev
     return agh
 
 
@@ -962,12 +1182,17 @@ def plan() -> dict:
 # ─────────────────────── применение ──────────────────────────────────
 
 def _write_singbox(mgr, name: str, cfg: dict, prev_text: str) -> dict:
-    """check → save → restart (если запущен). Не поднялся после
-    рестарта — возвращаем прежний текст и перезапускаем снова."""
+    """
+    check → save → рестарт того, кто держит инстанс: процесс панели
+    (SingboxManager) или systemd-юнит sing-box-gui с этим конфигом. Не
+    поднялся — возвращаем прежний текст и перезапускаем снова; что
+    получилось на самом деле, пишем в ответ.
+    """
+    from core import singbox_autostart
     from core.singbox_config import render_conf
     text = render_conf(cfg)
     res = {"config": name, "saved": False, "running": False,
-           "restarted": False}
+           "restarted": False, "restart_via": ""}
     chk = mgr.check_text(text)
     if not chk.get("ok"):
         if not chk.get("no_binary"):
@@ -983,23 +1208,41 @@ def _write_singbox(mgr, name: str, cfg: dict, prev_text: str) -> dict:
     res["saved"] = True
     log.info("agh_routes: конфиг sing-box «%s» обновлён" % name,
              source=SOURCE)
-    if not mgr.is_running(name):
+    if mgr.is_running(name):
+        res["restart_via"] = "panel"
+
+        def restart():
+            return mgr.restart(name)
+    elif singbox_autostart.unit_runs_config(name):
+        res["restart_via"] = "systemd"
+
+        def restart():
+            return singbox_autostart.restart_unit()
+    else:
         return res
     res["running"] = True
-    rr = mgr.restart(name)
+    rr = restart()
     if rr.get("ok"):
         res["restarted"] = True
-        log.info("agh_routes: sing-box «%s» перезапущен" % name,
-                 source=SOURCE)
+        log.info("agh_routes: sing-box «%s» перезапущен (%s)"
+                 % (name, res["restart_via"]), source=SOURCE)
         return res
     res["error"] = "sing-box «%s» не перезапустился: %s" % (
         name, rr.get("error") or "")
-    if prev_text:
-        mgr.save_config(name, text=prev_text)
-        back = mgr.restart(name)
-        res["rolled_back"] = True
-        res["error"] += "; прежний конфиг возвращён%s" % (
-            "" if back.get("ok") else " (но не запустился)")
+    res["rolled_back"] = False
+    if not prev_text:
+        res["error"] += "; прежнего текста конфига нет, откатить нечем"
+        return res
+    sv = mgr.save_config(name, text=prev_text)
+    if not sv.get("ok"):
+        res["error"] += ("; вернуть прежний конфиг не удалось: %s, в файле "
+                         "остался новый" % (sv.get("error") or "ошибка записи"))
+        return res
+    res["rolled_back"] = True
+    back = restart()
+    res["error"] += "; прежний конфиг возвращён%s" % (
+        " и запущен" if back.get("ok") else
+        ", но инстанс не поднялся: %s" % (back.get("error") or ""))
     return res
 
 
@@ -1056,12 +1299,13 @@ def _apply_locked() -> dict:
                 _store_applied(applied)
             return dict(result, ok=False, errors=[r["error"]],
                         error=r["error"])
-    applied["singbox"] = {"config": ctx.get("sb_name") or "",
-                          "rules": ctx.get("sb_rules") or []}
-    _store_applied(applied)
+    if not ctx.get("sb_keep_applied"):
+        applied["singbox"] = {"config": ctx.get("sb_name") or "",
+                              "rules": ctx.get("sb_rules") or []}
+        _store_applied(applied)
 
     # 2. AdGuard: клиентам — до смены глобального списка, снятие — после.
-    errors = []
+    errors, failed = [], set()
     ops = ctx.get("agh_ops") or []
 
     def _run(op):
@@ -1072,6 +1316,7 @@ def _apply_locked() -> dict:
             log.info("agh_routes: AdGuard клиент %s: %s"
                      % (op["name"], op["action"]), source=SOURCE)
         except AghError as e:
+            failed.add(op["name"])
             errors.append("клиент %s: %s" % (op["name"], e))
 
     for op in ops:
@@ -1086,15 +1331,22 @@ def _apply_locked() -> dict:
         except AghError as e:
             errors.append("upstream_dns: %s" % e)
     for op in ops:
-        if op["action"] == "remove":
+        if op["action"] in ("remove", "delete"):
             _run(op)
 
     targets = [ctx["target"]]
     if errors:
         # Строки со старой целью могли остаться — помним её до успеха.
         targets = _dedup(targets + list(ctx.get("agh_targets") or []))
+    records = list(ctx.get("agh_records") or [])
+    # Не снятых из-за ошибки клиентов помним до следующего применения
+    # (иначе созданный нами zg-* потерял бы отметку created).
+    known = {r["name"] for r in records}
+    for name, rec in (ctx.get("agh_prev_records") or {}).items():
+        if name in failed and name not in known:
+            records.append(rec)
     applied["agh"] = {"mode": ctx["mode"], "targets": targets,
-                      "clients": ctx.get("agh_records") or []}
+                      "clients": records}
     applied["at"] = int(time.time())
     _store_applied(applied)
 

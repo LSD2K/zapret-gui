@@ -8,6 +8,8 @@ AdGuard Home и sing-box подменяются фейками: HTTP — чер�
 """
 
 import copy
+import http.client
+import io
 import json
 import os
 import shutil
@@ -77,10 +79,17 @@ class FakeAGH:
                     if c["name"] == body["name"]:
                         self.clients[i] = copy.deepcopy(body["data"])
                 return 200, {}
+            if path == "/control/clients/delete":
+                self.clients = [c for c in self.clients
+                                if c["name"] != body["name"]]
+                return 200, {}
         raise AssertionError("неожиданный вызов %s %s" % (method, path))
 
     def client(self, name):
         return next(c for c in self.clients if c["name"] == name)
+
+    def has_client(self, name):
+        return any(c["name"] == name for c in self.clients)
 
 
 def b2_config(extra_rules=None):
@@ -124,6 +133,7 @@ class FakeSingbox:
         self.restarts = []
         self.check_ok = True
         self.restart_fail = False
+        self.save_fail_after = None     # сохранить N раз, потом отказ
 
     def get_config(self, name):
         if name not in self.configs:
@@ -136,6 +146,10 @@ class FakeSingbox:
         return json.loads(self.configs[name])
 
     def save_config(self, name, *, text="", parsed=None):
+        if self.save_fail_after is not None:
+            if self.save_fail_after <= 0:
+                return {"ok": False, "error": "write: No space left"}
+            self.save_fail_after -= 1
         if parsed is not None and not text:
             text = json.dumps(parsed)
         json.loads(text)
@@ -185,6 +199,11 @@ class _Base(unittest.TestCase):
                        return_value=self.sb)
         p.start()
         self.addCleanup(p.stop)
+        # systemd в тестах не трогаем: юнит sing-box-gui «не крутит» конфиг.
+        self.unit_runs = mock.patch(
+            "core.singbox_autostart.unit_runs_config", return_value=False)
+        self.unit_runs.start()
+        self.addCleanup(self.unit_runs.stop)
 
         self.geosite = {"openai": ["openai.com", "chatgpt.com",
                                    "oaistatic.com"]}
@@ -283,10 +302,18 @@ class TestNormalize(unittest.TestCase):
             "*.Example.COM", "https://www.site.org/path", "1.2.3.4",
             "localhost", "^foo.net", "bar.io # коммент", ".lead.dev",
             "президент.рф", "bad domain", "-x.com", "", "example.com",
+            "_dmarc.mail.org", "foo_bar.org", "a_.b.com", "ok._srv.net",
         ])
         self.assertEqual(got, ["example.com", "site.org", "foo.net",
                                "bar.io", "lead.dev", "xn--d1abbgf6aiiy.xn--p1ai",
-                               "bad"])
+                               "bad", "_dmarc.mail.org", "ok._srv.net"])
+
+    def test_split_comments_per_line(self):
+        text = "example.org # мой сайт, work\nfoo.com, bar.com\n# всё строкой"
+        self.assertEqual(agh_routes._split_tokens(text),
+                         ["example.org", "foo.com", "bar.com"])
+        self.assertEqual(agh_routes._split_tokens(["a.com # x y", "b.com"]),
+                         ["a.com", "b.com"])
 
 
 class TestMergeSingboxRules(unittest.TestCase):
@@ -356,15 +383,24 @@ class TestCollect(_Base):
                                       "openai.com", "chatgpt.com",
                                       "oaistatic.com", "perplexity.ai",
                                       "poe.com"]))
-        _doms, warns = agh_routes._collect_detail(rule)
+        _doms, warns, errs = agh_routes._collect_detail(rule)
+        self.assertEqual(errs, [])
         self.assertTrue(any("ipl:ipset-base" in w for w in warns))
 
-    def test_missing_sources_warn(self):
+    def test_missing_sources_are_errors(self):
         rule = {"name": "X", "lists": ["geosite:nope", "list-missing",
                                        "hl:absent"], "domains": []}
-        doms, warns = agh_routes._collect_detail(rule)
+        doms, warns, errs = agh_routes._collect_detail(rule)
         self.assertEqual(doms, [])
-        self.assertEqual(len(warns), 3)
+        self.assertEqual(warns, [])
+        self.assertEqual(len(errs), 3)
+
+    def test_empty_existing_hostlist_is_warning(self):
+        self.write_hostlist("empty", ["# ничего"])
+        _d, warns, errs = agh_routes._collect_detail(
+            {"name": "X", "lists": ["hl:empty"]})
+        self.assertEqual(errs, [])
+        self.assertEqual(len(warns), 1)
 
 
 # ─────────────────────── план и применение: глобально ───────────────
@@ -407,14 +443,12 @@ class TestApplyGlobal(_Base):
 
         path, body = self.agh.posts[-1]
         self.assertEqual(path, "/control/dns_config")
-        # Полное тело из dns_info, без read-only поля.
-        self.assertEqual(body["bootstrap_dns"], ["1.1.1.1"])
-        self.assertEqual(body["ratelimit"], 20)
-        self.assertNotIn("default_local_ptr_upstreams", body)
-        self.assertEqual(body["upstream_dns"], [
+        # Минимальное тело: только upstream_dns.
+        self.assertEqual(body, {"upstream_dns": [
             "https://dns.cloudflare.com/dns-query",
             "[/anthropic.com/chatgpt.com/claude.ai/example.org/"
-            "oaistatic.com/openai.com/]127.0.0.1:1053"])
+            "oaistatic.com/openai.com/]127.0.0.1:1053"]})
+        self.assertEqual(self.agh.info["ratelimit"], 20)
 
         applied = agh_routes.get_settings()["_applied"]
         self.assertEqual(applied["singbox"]["config"], "gw")
@@ -602,10 +636,13 @@ class TestClientsMode(_Base):
         agh_routes.update_settings({"clients": []})
         p = agh_routes.plan()
         acts = {c["name"]: c["action"] for c in p["agh"]["clients"]}
-        self.assertEqual(acts, {"zg-10.10.10.5": "remove",
+        self.assertEqual(acts, {"zg-10.10.10.5": "delete",
                                 "phone": "remove", "tv": "remove"})
         self.assertTrue(agh_routes.apply()["ok"])
-        self.assertEqual(self.agh.client("zg-10.10.10.5")["upstreams"], [])
+        # Созданного нами клиента удаляем целиком.
+        self.assertFalse(self.agh.has_client("zg-10.10.10.5"))
+        self.assertIn(("/control/clients/delete", {"name": "zg-10.10.10.5"}),
+                      self.agh.posts)
         self.assertEqual(self.agh.client("phone")["upstreams"], [])
         self.assertEqual(self.agh.client("tv")["upstreams"],
                          ["tls://dns.example"])
@@ -614,6 +651,7 @@ class TestClientsMode(_Base):
                             for x in self.agh.info["upstream_dns"]))
         paths = [p for p, _ in self.agh.posts[-4:]]
         self.assertEqual(paths[0], "/control/dns_config")
+        self.assertFalse(agh_routes.apply()["changed"])
 
     def test_client_on_global_copy_is_global(self):
         # Записи о прошлом применении нет, а upstream'ы клиента равны
@@ -746,6 +784,395 @@ class TestAPI(_Base):
         self.assertTrue(any(g["id"] == "geosite:openai"
                             for g in r["geosite"]))
         self.assertTrue(any(h["id"] == "hl:other" for h in r["hostlists"]))
+
+
+# ─────────────────────── доработки по ревью ──────────────────────────
+
+class TestReviewFixes(_Base):
+
+    def test_disabled_missing_config_still_cleans_agh(self):
+        self.settings()
+        self.assertTrue(agh_routes.apply()["ok"])
+        applied_sb = agh_routes.get_settings()["_applied"]["singbox"]
+        del self.sb.configs["gw"]
+        agh_routes.update_settings({"enabled": False})
+        p = agh_routes.plan()
+        self.assertEqual(p["errors"], [])
+        self.assertTrue(any("gw" in w and "не найден" in w
+                            for w in p["warnings"]))
+        r = agh_routes.apply()
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.agh.info["upstream_dns"],
+                         ["https://dns.cloudflare.com/dns-query"])
+        # Запись о правилах в конфиге не теряем: файл может вернуться.
+        self.assertEqual(agh_routes.get_settings()["_applied"]["singbox"],
+                         applied_sb)
+
+    def test_missing_config_with_rules_is_error(self):
+        del self.sb.configs["gw"]
+        self.settings()
+        p = agh_routes.plan()
+        self.assertTrue(any("gw" in e for e in p["errors"]))
+
+    def test_geosite_failure_blocks_apply(self):
+        self.settings()
+        agh_routes.apply()
+        self.geosite.pop("openai")
+        posts, saves = len(self.agh.posts), len(self.sb.saves)
+        r = agh_routes.apply()
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("geosite:openai" in e for e in r["errors"]))
+        self.assertEqual(len(self.agh.posts), posts)
+        self.assertEqual(len(self.sb.saves), saves)
+        self.assertTrue(any("openai.com" in x
+                            for x in self.agh.info["upstream_dns"]))
+
+    def test_single_label_and_shadow_warnings(self):
+        self.settings(rules=[
+            {"name": "A", "outbound": "mieruNeth",
+             "domains": ["google.com", "work"]},
+            {"name": "B", "outbound": "Finland",
+             "domains": ["mail.google.com", "b.org"]},
+        ])
+        w = agh_routes.plan()["warnings"]
+        self.assertTrue(any("однометочные" in x and "work" in x for x in w))
+        self.assertTrue(any("перекрыты суффиксами" in x and "«A»" in x
+                            for x in w))
+
+    def test_drift_warning(self):
+        self.settings()
+        agh_routes.apply()
+        cfg = self.sb.parsed("gw")
+        cfg["route"]["rules"][3]["domain_suffix"].append("hand.edit")
+        self.sb.configs["gw"] = json.dumps(cfg)
+        p = agh_routes.plan()
+        self.assertEqual(p["singbox"].get("drift"), 1)
+        self.assertTrue(any("изменили вручную" in x for x in p["warnings"]))
+
+    def test_no_general_upstream_global(self):
+        self.agh.info["upstream_dns"] = ["[/corp.lan/]10.0.0.1"]
+        self.settings()
+        p = agh_routes.plan()
+        self.assertTrue(any("ни одного обычного" in e for e in p["errors"]))
+        self.assertFalse(agh_routes.apply()["ok"])
+        self.assertEqual(self.agh.posts, [])
+
+    def test_no_general_upstream_new_client(self):
+        self.agh.info["upstream_dns"] = ["# только комментарий"]
+        self.settings(clients=["10.10.10.5"])
+        p = agh_routes.plan()
+        self.assertTrue(any("10.10.10.5" in e and "обычного" in e
+                            for e in p["errors"]))
+
+    def test_cidr_cover_warning(self):
+        self.agh.clients = [{"name": "lan", "ids": ["10.10.10.0/24"],
+                             "use_global_settings": False,
+                             "upstreams": []}]
+        self.settings(clients=["10.10.10.5"])
+        p = agh_routes.plan()
+        self.assertEqual(p["errors"], [])
+        self.assertTrue(any("lan" in w and "10.10.10.0/24" in w
+                            for w in p["warnings"]))
+
+    def test_failed_delete_keeps_created_record(self):
+        self.settings(clients=["10.10.10.5"])
+        agh_routes.apply()
+        agh_routes.update_settings({"clients": []})
+        real = self.agh.__call__
+
+        def flaky(method, url, **kw):
+            if url.endswith("/control/clients/delete"):
+                raise agh_routes.AghError("HTTP 500")
+            return real(method, url, **kw)
+        with mock.patch.object(agh_routes, "_http_request", flaky):
+            self.assertFalse(agh_routes.apply()["ok"])
+        recs = agh_routes.get_settings()["_applied"]["agh"]["clients"]
+        self.assertTrue(any(r["name"] == "zg-10.10.10.5" and r["created"]
+                            for r in recs))
+        # Следующее применение дочищает.
+        self.assertTrue(agh_routes.apply()["ok"])
+        self.assertFalse(self.agh.has_client("zg-10.10.10.5"))
+
+
+class TestSingboxRestart(_Base):
+
+    def test_systemd_path(self):
+        self.sb.running = set()
+        self.unit_runs.stop()
+        with mock.patch("core.singbox_autostart.unit_runs_config",
+                        return_value=True) as urc, \
+                mock.patch("core.singbox_autostart.restart_unit",
+                           return_value={"ok": True, "error": ""}) as ru:
+            self.settings()
+            r = agh_routes.apply()
+        self.unit_runs.start()
+        self.assertTrue(r["ok"], r)
+        urc.assert_called_with("gw")
+        ru.assert_called_once()
+        self.assertEqual(r["singbox"]["restart_via"], "systemd")
+        self.assertTrue(r["singbox"]["restarted"])
+        self.assertEqual(self.sb.restarts, [])
+
+    def test_systemd_failure_rolls_back(self):
+        before = self.sb.configs["gw"]
+        self.sb.running = set()
+        self.unit_runs.stop()
+        with mock.patch("core.singbox_autostart.unit_runs_config",
+                        return_value=True), \
+                mock.patch("core.singbox_autostart.restart_unit",
+                           side_effect=[{"ok": False, "error": "failed"},
+                                        {"ok": True, "error": ""}]) as ru:
+            self.settings()
+            r = agh_routes.apply()
+        self.unit_runs.start()
+        self.assertFalse(r["ok"])
+        self.assertEqual(ru.call_count, 2)
+        self.assertTrue(r["singbox"]["rolled_back"])
+        self.assertIn("прежний конфиг возвращён и запущен", r["error"])
+        self.assertEqual(self.sb.configs["gw"], before)
+        self.assertEqual(self.agh.posts, [])
+
+    def test_rollback_save_failure_is_reported(self):
+        self.settings()
+        self.sb.restart_fail = True
+        self.sb.save_fail_after = 1      # новый сохранится, откат — нет
+        r = agh_routes.apply()
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["singbox"]["rolled_back"])
+        self.assertIn("вернуть прежний конфиг не удалось", r["error"])
+        # В файле новый конфиг — так и запоминаем.
+        rules = agh_routes.get_settings()["_applied"]["singbox"]["rules"]
+        self.assertEqual(len(rules), 2)
+
+    def test_not_running_anywhere(self):
+        self.sb.running = set()
+        self.settings()
+        r = agh_routes.apply()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["singbox"]["restart_via"], "")
+        self.assertFalse(r["singbox"]["running"])
+
+
+class TestSystemdHelpers(unittest.TestCase):
+
+    def _platform(self, name):
+        plat = mock.Mock()
+        plat.name = name
+        plat.init_name = "sing-box-gui"
+        return mock.patch("core.singbox_autostart.detect_singbox_platform",
+                          return_value=plat)
+
+    def test_unit_runs_config(self):
+        from core import singbox_autostart as sa
+        exec_start = ("{ path=/usr/local/bin/sing-box ; argv[]=/usr/local/"
+                      "bin/sing-box run -c /etc/sing-box/gw.json ; "
+                      "ignore_errors=no }")
+
+        def fake(args, timeout=10):
+            if args[0] == "is-active":
+                return 0, "active\n", ""
+            return 0, exec_start + "\n", ""
+        with self._platform("linux"), \
+                mock.patch.object(sa, "_systemctl", side_effect=fake):
+            self.assertTrue(sa.unit_runs_config("gw"))
+            self.assertFalse(sa.unit_runs_config("other"))
+            self.assertFalse(sa.unit_runs_config("w"))
+        with self._platform("keenetic"), \
+                mock.patch.object(sa, "_systemctl") as sc:
+            self.assertFalse(sa.unit_runs_config("gw"))
+            sc.assert_not_called()
+        with self._platform("linux"), \
+                mock.patch.object(sa, "_systemctl",
+                                  return_value=(3, "inactive\n", "")):
+            self.assertFalse(sa.unit_runs_config("gw"))
+
+    def test_restart_unit(self):
+        from core import singbox_autostart as sa
+        calls = []
+
+        def fake(args, timeout=10):
+            calls.append((args, timeout))
+            if args[0] == "restart":
+                return 0, "", ""
+            return 3, "failed\n", ""
+        with self._platform("linux"), \
+                mock.patch.object(sa, "_systemctl", side_effect=fake), \
+                mock.patch("time.sleep") as sl:
+            r = sa.restart_unit()
+        self.assertFalse(r["ok"])
+        self.assertIn("failed", r["error"])
+        self.assertEqual(calls[0], (["restart", "sing-box-gui"], 30))
+        sl.assert_called_once_with(2.5)
+
+
+# ─────────────────────── HTTP: коды, не-JSON, обрывы ─────────────────
+
+class _Resp:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def getcode(self):
+        return 200
+
+    def read(self):
+        return self.body
+
+
+class _Opener:
+    def __init__(self, result):
+        self.result = result
+
+    def open(self, req, timeout=None):
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return _Resp(self.result)
+
+
+class TestHttpErrors(unittest.TestCase):
+
+    URL = "http://127.0.0.1:3000/hidden/control/status"
+
+    def call(self, result):
+        with mock.patch("urllib.request.build_opener",
+                        return_value=_Opener(result)):
+            return agh_routes._http_request("GET", self.URL)
+
+    def test_401_403(self):
+        for code in (401, 403):
+            err = urllib.error.HTTPError(self.URL, code, "denied", {},
+                                         io.BytesIO(b""))
+            with self.assertRaises(agh_routes.AghError) as cm:
+                self.call(err)
+            self.assertIn("неверный логин или пароль", str(cm.exception))
+
+    def test_500_has_detail(self):
+        err = urllib.error.HTTPError(self.URL, 500, "boom", {},
+                                     io.BytesIO(b"upstream invalid"))
+        with self.assertRaises(agh_routes.AghError) as cm:
+            self.call(err)
+        self.assertIn("HTTP 500", str(cm.exception))
+        self.assertIn("upstream invalid", str(cm.exception))
+
+    def test_http_exception(self):
+        for exc in (http.client.RemoteDisconnected("closed"),
+                    http.client.IncompleteRead(b"x"),
+                    http.client.BadStatusLine("?")):
+            with self.assertRaises(agh_routes.AghError) as cm:
+                self.call(exc)
+            # В сообщении только scheme://host:port, без пути.
+            self.assertIn("http://127.0.0.1:3000", str(cm.exception))
+            self.assertNotIn("/hidden", str(cm.exception))
+
+    def test_not_json(self):
+        _code, data = self.call(b"<html>login</html>")
+        self.assertEqual(data, "<html>login</html>")
+
+
+class TestNotJsonPlan(_Base):
+
+    def test_plan_reports_unexpected_answer(self):
+        self.settings()
+        real = self.agh.__call__
+
+        def html(method, url, **kw):
+            if url.endswith("/control/dns_info"):
+                return 200, "<html>login</html>"
+            return real(method, url, **kw)
+        with mock.patch.object(agh_routes, "_http_request", html):
+            p = agh_routes.plan()
+        self.assertTrue(any("неожиданный ответ" in e for e in p["errors"]))
+
+
+# ─────────────────────── /test и валидация PUT ───────────────────────
+
+class TestConnectionAndValidation(_Base):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = WSGIClient(build_test_app())
+
+    def test_other_url_needs_password(self):
+        self.settings()
+        before = len(self.agh.auth)
+        r = agh_routes.test_connection({"agh_url": "http://10.0.0.9:3000"})
+        self.assertFalse(r["ok"])
+        self.assertIn("пароль", r["error"])
+        r = agh_routes.test_connection({"agh_url": "http://10.0.0.9:3000",
+                                        "agh_password": "***"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(self.agh.auth), before)   # никуда не ходили
+        r = agh_routes.test_connection({"agh_url": "http://10.0.0.9:3000",
+                                        "agh_password": "other"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.agh.auth[-1], ("admin", "other"))
+        # Тот же адрес — можно без пароля (берётся сохранённый).
+        r = agh_routes.test_connection({"agh_url": "http://127.0.0.1:3000/"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.agh.auth[-1], ("admin", "pw"))
+
+    def test_bad_urls(self):
+        for url in ("http://user:pw@127.0.0.1:3000",
+                    "http://127.0.0.1:3000/?x=1",
+                    "http://127.0.0.1:3000/#f", "ftp://127.0.0.1",
+                    "http://127.0.0.1:99999", "http:///nohost"):
+            with self.subTest(url=url):
+                r = agh_routes.test_connection({"agh_url": url,
+                                                "agh_password": "x"})
+                self.assertFalse(r["ok"])
+                code = self.client.put_json("/api/agh-routes",
+                                            {"agh_url": url})["_status"]
+                self.assertEqual(code, 400)
+
+    def test_log_has_origin_only(self):
+        self.settings()
+        self.agh.fail = agh_routes.AghError("down")
+        with mock.patch.object(agh_routes.log, "warning") as w:
+            agh_routes.test_connection(
+                {"agh_url": "http://10.0.0.9:3000/secret-path",
+                 "agh_password": "x"})
+        msg = w.call_args[0][0]
+        self.assertIn("http://10.0.0.9:3000", msg)
+        self.assertNotIn("secret-path", msg)
+
+    def test_put_garbage(self):
+        bad = [
+            {"rules": ["not a dict"]},
+            {"rules": [{"name": "x", "enabled": "false"}]},
+            {"rules": [{"name": "x", "enabled": 1}]},
+            {"rules": [{"name": "x", "lists": "hl:claude"}]},
+            {"rules": [{"name": "x", "lists": [1]}]},
+            {"rules": [{"name": 5}]},
+            {"rules": [{"name": "x", "domains": [None]}]},
+            {"rules": {"name": "x"}},
+            {"enabled": "yes"},
+            {"clients": [1]},
+            {"agh_user": 5},
+            {"dns_target": ["127.0.0.1:1053"]},
+        ]
+        agh_routes.update_settings({"rules": []})
+        for body in bad:
+            with self.subTest(body=body):
+                r = self.client.put_json("/api/agh-routes", body)
+                self.assertEqual(r["_status"], 400, r)
+        self.assertEqual(agh_routes.get_settings()["rules"], [])
+        self.assertFalse(agh_routes.get_settings()["enabled"])
+        r = self.client.put_json("/api/agh-routes", {"rules": [
+            {"name": "ok", "enabled": False,
+             "domains": "a.com # коммент\nb.com"}]})
+        self.assertEqual(r["_status"], 200, r)
+        rule = r["settings"]["rules"][0]
+        self.assertIs(rule["enabled"], False)
+        self.assertEqual(rule["domains"], ["a.com", "b.com"])
+        code, _h, _b = self.client.request(
+            "PUT", "/api/agh-routes", body="[1, 2]",
+            content_type="application/json")
+        self.assertEqual(code, 400)
 
 
 if __name__ == "__main__":

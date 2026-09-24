@@ -269,6 +269,67 @@ def status() -> dict:
     }
 
 
+# ─────── systemd-юнит как «хозяин» инстанса (generic Linux) ───────
+#
+# На Debian-роутере sing-box может крутиться не процессом панели, а
+# юнитом sing-box-gui (см. _systemd_unit). SingboxManager.is_running()
+# такой инстанс не видит (pid-файла панели нет), и после правки конфига
+# его надо перезапускать через systemctl.
+
+def _systemctl(args, timeout=10):
+    """systemctl <args> → (rc, stdout, stderr); без systemctl → 127."""
+    import subprocess
+    try:
+        r = subprocess.run(["systemctl"] + list(args), capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, r.stdout or "", r.stderr or ""
+    except FileNotFoundError as e:
+        return 127, "", str(e)
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout %ds" % timeout
+    except OSError as e:
+        return 1, "", str(e)
+
+
+def _unit_name() -> str:
+    return getattr(detect_singbox_platform(), "init_name", "") or \
+        "sing-box-gui"
+
+
+def unit_runs_config(name: str) -> bool:
+    """
+    True, если на generic Linux юнит sing-box-gui активен и запускает
+    именно конфиг ``<name>.json`` (по ExecStart юнита).
+    """
+    import re
+    if not name or detect_singbox_platform().name != "linux":
+        return False
+    unit = _unit_name()
+    _rc, out, _err = _systemctl(["is-active", unit])
+    if out.strip() != "active":
+        return False
+    _rc, out, _err = _systemctl(["show", "-p", "ExecStart", "--value", unit])
+    return bool(re.search(r"/%s\.json(?=[\s;'\"]|$)" % re.escape(name),
+                          out))
+
+
+def restart_unit(settle: float = 2.5) -> dict:
+    """systemctl restart sing-box-gui (до 30 с), через settle секунд —
+    проверка is-active. {"ok", "error"}."""
+    import time
+    unit = _unit_name()
+    rc, out, err = _systemctl(["restart", unit], timeout=30)
+    if rc != 0:
+        return {"ok": False, "error": "systemctl restart %s: %s"
+                % (unit, (err or out).strip() or "rc=%d" % rc)}
+    time.sleep(settle)
+    _rc, out, _err = _systemctl(["is-active", unit])
+    state = out.strip() or "unknown"
+    if state != "active":
+        return {"ok": False, "error": "после рестарта %s: %s" % (unit, state)}
+    return {"ok": True, "error": ""}
+
+
 def apply_now() -> dict:
     """Поднять все enabled-конфиги прямо сейчас (для UI-кнопки)."""
     from core.singbox_manager import get_singbox_manager
