@@ -10,6 +10,7 @@ from core.singbox_config import (
     make_tuic_outbound, normalize_ss_method,
     make_selector_outbound, make_urltest_outbound,
     list_user_outbound_tags, wrap_in_group,
+    make_tun_inbound, set_tun_inbound, build_system_route_config,
     KNOWN_OUTBOUND_TYPES,
 )
 
@@ -328,6 +329,41 @@ class TestWrapInGroup(unittest.TestCase):
     def test_wrap_invalid_type(self):
         with self.assertRaises(ValueError):
             wrap_in_group(self._sample(), "auto", "nonsense")
+
+
+class TestTunDnsMode(unittest.TestCase):
+    """Спека T2: TUN не захватывает DNS хоста (dns_mode, sing-box 1.14+)."""
+
+    def test_default_disabled(self):
+        ib = make_tun_inbound()
+        self.assertEqual(ib["dns_mode"], "disabled")
+        self.assertFalse(ib["auto_route"])
+        self.assertEqual(ib["stack"], "system")
+
+    def test_empty_means_no_key(self):
+        ib = make_tun_inbound(dns_mode="", auto_route=True, stack="gvisor")
+        self.assertNotIn("dns_mode", ib)
+        self.assertTrue(ib["auto_route"])
+        self.assertEqual(ib["stack"], "gvisor")
+
+    def test_set_tun_inbound_passes_through(self):
+        cfg = {"outbounds": [{"type": "direct", "tag": "direct"}]}
+        set_tun_inbound(cfg)
+        self.assertEqual(cfg["inbounds"][0]["dns_mode"], "disabled")
+        set_tun_inbound(cfg, dns_mode="")
+        self.assertNotIn("dns_mode", cfg["inbounds"][0])
+        set_tun_inbound(cfg, dns_mode="hijack")
+        self.assertEqual(cfg["inbounds"][0]["dns_mode"], "hijack")
+
+    def test_system_route_builder(self):
+        cfg = build_system_route_config(
+            proxy_outbound={"type": "vless", "server": "1.2.3.4",
+                            "server_port": 443, "uuid": "u"})
+        tun = cfg["inbounds"][0]
+        self.assertEqual(tun["type"], "tun")
+        self.assertEqual(tun["dns_mode"], "disabled")
+        self.assertTrue(tun["auto_route"])
+        self.assertEqual(tun["stack"], "system")
 
 
 if __name__ == "__main__":

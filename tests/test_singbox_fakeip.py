@@ -148,6 +148,23 @@ class TestBuildFakeipConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_fakeip_config(proxy_outbound={"no": "type"})
 
+    def test_tun_dns_mode_disabled(self):
+        # спека T2: sing-box 1.14 иначе забирает DNS хоста через resolved
+        cfg = build_fakeip_config(proxy_outbound=_vless(),
+                                  proxied_domains=["a.com"])
+        tun = cfg["inbounds"][0]
+        self.assertEqual(tun["dns_mode"], "disabled")
+        self.assertTrue(tun["auto_route"] and tun["strict_route"])
+        self.assertEqual(tun["stack"], "system")
+        self.assertEqual(validate(cfg), [])
+
+    def test_tun_dns_mode_external_front(self):
+        cfg = build_fakeip_config(proxy_outbound=_vless(),
+                                  front_dns="external")
+        tun = next(i for i in cfg["inbounds"] if i["type"] == "tun")
+        self.assertEqual(tun["dns_mode"], "disabled")
+        self.assertFalse(tun["auto_route"])
+
     def test_capture_dns_adds_dns_in_inbound(self):
         off = build_fakeip_config(proxy_outbound=_vless(),
                                   proxied_domains=["a.com"])

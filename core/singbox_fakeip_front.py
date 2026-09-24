@@ -232,6 +232,9 @@ def build_fakeip_external_config(*, proxy_outbounds, proxy_endpoints=None,
         "auto_route": False,
         "strict_route": False,
         "stack": stack or "system",
+        # Без захвата DNS хоста через systemd-resolved (sing-box 1.14+),
+        # см. singbox_config.make_tun_inbound.
+        "dns_mode": "disabled",
     }
     dns_in = {"type": "direct", "tag": "dns-in",
               "listen": norm_listen(dns_listen),

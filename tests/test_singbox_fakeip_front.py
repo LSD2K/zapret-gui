@@ -50,6 +50,15 @@ def _p2_affected(kw) -> bool:
     return bool(kw.get("typed_dns")) and kw.get("direct_dns") in _P2_DIRECT
 
 
+def _drop_t2_dns_mode(tc, cfg: dict) -> dict:
+    """Второе осознанное отличие, спека T2 (docs/gw/spec-t2-tun-dns-mode-
+    subnets.md): у TUN-inbound появился `dns_mode: disabled`. Проверяем его
+    и убираем, остальное обязано совпасть со снапшотом."""
+    tun = next(ib for ib in cfg["inbounds"] if ib.get("type") == "tun")
+    tc.assertEqual(tun.pop("dns_mode"), "disabled")
+    return cfg
+
+
 class TestEngineSnapshot(unittest.TestCase):
     """Режим engine собирается ровно так же, как до правок B2."""
 
@@ -60,7 +69,7 @@ class TestEngineSnapshot(unittest.TestCase):
                                  if k in ("typed_dns", "direct_dns",
                                           "route_all", "capture_dns",
                                           "auto_redirect", "stack")}):
-                cfg = build_fakeip_config(**kw)
+                cfg = _drop_t2_dns_mode(self, build_fakeip_config(**kw))
                 if not _p2_affected(kw):
                     self.assertEqual(cfg, case["config"])
                     self.assertEqual(_sha(render_conf(cfg)), case["sha256"])
@@ -144,7 +153,8 @@ class TestEngineSnapshot(unittest.TestCase):
                         p.stop()
                 self.assertEqual(res, case["result"])
                 self.assertEqual(mgr.saved[0], case["saved_name"])
-                self.assertEqual(mgr.saved[1], case["saved_text"])
+                saved = _drop_t2_dns_mode(self, json.loads(mgr.saved[1]))
+                self.assertEqual(render_conf(saved), case["saved_text"])
 
 
 class TestDirectDns(unittest.TestCase):
@@ -272,7 +282,8 @@ EXPECTED_ONE_PROXY = {
          "listen_port": 1053, "network": "udp"},
         {"type": "tun", "tag": "tun-in", "interface_name": "singbox-tun",
          "address": ["172.19.0.1/30"], "auto_route": False,
-         "strict_route": False, "stack": "system"},
+         "strict_route": False, "stack": "system",
+         "dns_mode": "disabled"},
     ],
     "outbounds": [
         {"type": "vless", "tag": "p1", "server": "1.2.3.4",

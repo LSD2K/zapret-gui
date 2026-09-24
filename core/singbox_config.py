@@ -414,7 +414,8 @@ def make_tun_inbound(*, interface_name: str = "singbox-tun",
                      stack: str = "system",
                      auto_route: bool = False,
                      strict_route: bool = False,
-                     auto_redirect: bool = False) -> dict:
+                     auto_redirect: bool = False,
+                     dns_mode: str = "disabled") -> dict:
     """
     Собрать TUN-inbound sing-box (создаёт сетевой интерфейс
     `interface_name`). Используются ТОЛЬКО актуальные поля 1.11+/1.13:
@@ -437,6 +438,15 @@ def make_tun_inbound(*, interface_name: str = "singbox-tun",
     (hysteria2/…) большой MTU бессмысленен (реальный путь ~1400), а с
     gvisor-стеком 9000 раздувает буферы и на роутере с малым ОЗУ приводит к
     GC-молотьбе и 100% CPU.
+
+    dns_mode (опция TUN с sing-box 1.14.0, дефолт у sing-box `hijack`):
+    при `hijack` sing-box регистрирует в systemd-resolved на линке TUN
+    DNS-сервер `<address+1>` с доменом `~.` и Default Route, и весь резолв
+    хоста через nss (python, apt, git, certbot) уходит в TUN, получает
+    fakeip и идёт через прокси (инцидент на gw 24.09.2026,
+    docs/gw/spec-t2-tun-dns-mode-subnets.md). Поэтому по умолчанию
+    `disabled`. Пустая строка = ключ не писать (sing-box < 1.14
+    незнакомые ключи отвергает).
     """
     ib = {
         "type": "tun",
@@ -450,6 +460,8 @@ def make_tun_inbound(*, interface_name: str = "singbox-tun",
     }
     if auto_redirect and auto_route:
         ib["auto_redirect"] = True
+    if dns_mode:
+        ib["dns_mode"] = dns_mode
     return ib
 
 
@@ -458,7 +470,8 @@ def set_tun_inbound(cfg: dict, *, interface_name: str = "singbox-tun",
                     auto_route: bool = False, strict_route: bool = False,
                     sniff: bool = True, route_to_proxy: bool = True,
                     hijack_dns: bool = False, typed_dns: bool = False,
-                    reject_quic: bool = False) -> dict:
+                    reject_quic: bool = False,
+                    dns_mode: str = "disabled") -> dict:
     """
     Вставить/заменить TUN-inbound в конфиге (cfg мутируется и
     возвращается). Прежний наш `tun-in` убирается, остальные inbound'ы
@@ -487,12 +500,14 @@ def set_tun_inbound(cfg: dict, *, interface_name: str = "singbox-tun",
     равно идёт в прокси; bootstrap-петли (резолв самого прокси-сервера) нет.
     Приватные адреса (LAN) пускаем мимо прокси (`ip_is_private → direct`).
     typed_dns=True — DNS-секция в формате sing-box 1.12+ (иначе legacy).
+    dns_mode уходит в make_tun_inbound (там и объяснение).
     """
     existing = [ib for ib in (cfg.get("inbounds") or [])
                 if not (isinstance(ib, dict) and ib.get("tag") == _TUN_TAG)]
     tun = make_tun_inbound(
         interface_name=interface_name, address=address, mtu=mtu,
-        stack=stack, auto_route=auto_route, strict_route=strict_route)
+        stack=stack, auto_route=auto_route, strict_route=strict_route,
+        dns_mode=dns_mode)
     cfg["inbounds"] = [tun] + existing
     _set_managed_route_rules(cfg, sniff=(sniff or hijack_dns),
                              hijack_dns=hijack_dns)
