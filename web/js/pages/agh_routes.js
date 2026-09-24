@@ -594,8 +594,9 @@ const AghRoutesPage = (() => {
                 : sb.systemd ? '<span class="badge badge-success">запущен юнитом sing-box-gui</span>'
                 : '<span class="badge badge-muted">не запущен</span>')
             : '<span class="badge badge-danger">нет конфига</span>';
-        const sbRules = (sb.rules_desired || []).map(r =>
-            `${r.outbound}: ${(r.domain_suffix || []).length} доменов`);
+        const sbRules = (sb.rules_desired || []).map(r => r.ip_cidr
+            ? `${r.outbound}: ${r.ip_cidr.length} подсетей`
+            : `${r.outbound}: ${(r.domain_suffix || []).length} доменов`);
 
         let resultHtml = '';
         if (result && result.ok && result.changed) {

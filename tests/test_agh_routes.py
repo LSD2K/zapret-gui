@@ -1288,6 +1288,53 @@ class TestSubnets(_Base):
         g = client.get_json("/api/agh-routes")
         self.assertEqual(g["settings"]["rules"][0]["subnets"], [])
 
+    def test_panel_put_body_and_subnets_only_change(self):
+        # тело PUT ровно как шлёт gw-panel
+        tg = ["149.154.160.0/20", "91.108.4.0/22", "91.108.8.0/22",
+              "91.108.12.0/22", "91.108.16.0/22", "91.108.20.0/22",
+              "91.108.56.0/22", "91.105.192.0/23", "185.76.151.0/24"]
+        self.geosite["telegram"] = ["telegram.org", "t.me"]
+        client = WSGIClient(build_test_app())
+        body = {"enabled": True, "singbox_config": "gw",
+                "dns_target": "127.0.0.1:1053",
+                "rules": [{"id": "gw-Finland", "name": "gw: Finland",
+                           "enabled": True, "outbound": "Finland",
+                           "lists": ["geosite:telegram"],
+                           "domains": ["web.telegram.org"],
+                           "subnets": tg}]}
+        self.settings(rules=[])
+        r = client.put_json("/api/agh-routes", body)
+        self.assertEqual(r["_status"], 200, r)
+        self.assertEqual(r["warnings"], [])
+        g = client.get_json("/api/agh-routes")
+        self.assertEqual(g["settings"]["rules"][0]["subnets"], tg)
+        p = client.get_json("/api/agh-routes/plan")["plan"]
+        self.assertEqual(p["errors"], [])
+        self.assertEqual(p["rules"][0]["subnets"], 9)
+        self.assertEqual(p["rules"][0]["subnets_sample"], tg[:5])
+        r = client.post_json("/api/agh-routes/apply", {})
+        self.assertTrue(r["ok"], r)
+        rules = self.sb.parsed("gw")["route"]["rules"]
+        self.assertEqual(rules[2]["outbound"], "Finland")
+        self.assertIn("web.telegram.org", rules[2]["domain_suffix"])
+        self.assertEqual(rules[3], {"ip_cidr": tg, "outbound": "Finland"})
+        self.assertEqual(rules[4]["inbound"], ["tun-in"])
+        # меняются только подсети: конфиг переписан, sing-box перезапущен
+        restarts = len(self.sb.restarts)
+        body["rules"][0]["subnets"] = tg[:3]
+        self.assertEqual(client.put_json("/api/agh-routes", body)["_status"],
+                         200)
+        p = client.get_json("/api/agh-routes/plan")["plan"]
+        self.assertTrue(p["singbox"]["changed"])
+        self.assertFalse(p["agh"]["changed"])
+        r = client.post_json("/api/agh-routes/apply", {})
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["changed"])
+        self.assertEqual(len(self.sb.restarts), restarts + 1)
+        cidr = [x for x in self.sb.parsed("gw")["route"]["rules"]
+                if "ip_cidr" in x]
+        self.assertEqual(cidr, [{"ip_cidr": tg[:3], "outbound": "Finland"}])
+
 
 if __name__ == "__main__":
     unittest.main()
