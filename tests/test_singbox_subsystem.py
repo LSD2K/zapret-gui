@@ -48,6 +48,38 @@ class TestPlatformPaths(unittest.TestCase):
         self.assertTrue(p.init_script_path().endswith(".service"))
 
 
+class TestInitScriptMode(unittest.TestCase):
+    """Юнит systemd 0644 (иначе «marked executable»), init.d остаётся 0755."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="sb-init-")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_systemd_unit_is_0644(self):
+        p = GenericLinuxSingbox()
+        p.init_dir = self.tmp
+        # старый юнит с 0755 должен стать 0644 при перезаписи
+        old = p.init_script_path()
+        with open(old, "w") as f:
+            f.write("old")
+        os.chmod(old, 0o755)
+        with mock.patch("core.singbox_platform._cmd_ok",
+                        return_value=True) as cmd:
+            path = p.install_init_script("[Unit]\n")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+        cmd.assert_called_with(["systemctl", "daemon-reload"])
+
+    def test_initd_script_stays_executable(self):
+        p = KeeneticSingbox()
+        p.init_dir = self.tmp
+        path = p.install_init_script("#!/bin/sh\n")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o755)
+
+
 class TestPlatformAsDict(unittest.TestCase):
 
     def test_kind_included(self):

@@ -71,6 +71,31 @@ class TestSingboxManagerCRUD(unittest.TestCase):
         self.assertTrue(os.path.isfile(
             os.path.join(self.platform.config_dir, "my-vpn.json")))
 
+    def test_save_config_mode_0600(self):
+        # в конфиге креды прокси: только root, и при перезаписи старого 0644
+        path = os.path.join(self.platform.config_dir, "my-vpn.json")
+        with open(path, "w") as f:
+            f.write(MINIMAL_CONFIG)
+        os.chmod(path, 0o644)
+        r = self.mgr.save_config("my-vpn", text=MINIMAL_CONFIG)
+        self.assertTrue(r["ok"])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        # мусорных temp-файлов не осталось
+        self.assertEqual(os.listdir(self.platform.config_dir),
+                         ["my-vpn.json"])
+
+    def test_check_text_temp_mode_0600(self):
+        seen = {}
+
+        def fake_run(cmd, timeout=None):
+            seen["mode"] = os.stat(cmd[-1]).st_mode & 0o777
+            return 0, "", ""
+
+        with mock.patch.object(singbox_manager, "_run", side_effect=fake_run):
+            r = self.mgr.check_text(MINIMAL_CONFIG)
+        self.assertTrue(r["ok"])
+        self.assertEqual(seen["mode"], 0o600)
+
     def test_save_invalid_name(self):
         r = self.mgr.save_config("bad/name", text=MINIMAL_CONFIG)
         self.assertFalse(r["ok"])

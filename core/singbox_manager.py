@@ -66,6 +66,7 @@ def _raise_nofile():
         pass
 
 from core.log_buffer import log
+from core.safe_io import atomic_write_text
 from core.singbox_platform import detect_singbox_platform
 from core.singbox_config import parse_conf, render_conf, validate
 from core.singbox_detector import get_singbox_detector
@@ -439,10 +440,9 @@ class SingboxManager:
         self._ensure_config_dir()
         path = self._platform().config_path(name)
         try:
-            tmp = path + ".tmp"
-            with open(tmp, "w") as f:
-                f.write(text)
-            os.replace(tmp, path)
+            # В конфиге креды прокси: temp из mkstemp создаётся 0600 и
+            # атомарно встаёт на место, права 644 не появляются ни на миг.
+            atomic_write_text(path, text)
         except OSError as e:
             return {"ok": False, "error": "write: %s" % e}
 
@@ -507,7 +507,10 @@ class SingboxManager:
         self._ensure_run_dir()
         tmp = os.path.join(self._platform().run_dir, "_zg-check.json")
         try:
-            with open(tmp, "w") as f:
+            # Временный конфиг с кредами тоже только для root.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as f:
                 f.write(text)
         except OSError as e:
             return {"ok": False, "error": "write: %s" % e}

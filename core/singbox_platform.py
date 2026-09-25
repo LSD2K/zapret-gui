@@ -167,6 +167,9 @@ class GenericLinuxSingbox(SingboxPlatform):
 
     def install_init_script(self, content: str):
         path = super().install_init_script(content)
+        # Юнит systemd не исполняемый: с 0755 systemd на каждом старте
+        # пишет «marked executable».
+        os.chmod(path, 0o644)
         _cmd_ok(["systemctl", "daemon-reload"])
         return path
 
