@@ -19,7 +19,8 @@ Keenetic/OpenWrt, часть вещей под generic Linux не работае
 - язык кода и комментариев как в апстриме (русские комментарии, docstring)
 - в коммитах не упоминать AI-инструменты
 
-Спеки задач: `spec-b1-mieru.md`, `spec-b2-fakeip-front.md`, `spec-b3-agh-routes.md`.
+Спеки задач: `spec-b1-mieru.md`, `spec-b2-fakeip-front.md`, `spec-b3-agh-routes.md`,
+`spec-t4-updates.md` (замок обновлений, argv в preview, неинтерактивный install.sh).
 Целевая схема сети описана в `spec-b3-agh-routes.md`, раздел «Схема».
 
 ## Статус на 24.09.2026
