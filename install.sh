@@ -15,6 +15,9 @@
 #   ZAPRET_GUI_PORT=8080     — порт веб-интерфейса
 #   ZAPRET_GUI_HOST=0.0.0.0  — адрес привязки
 #   ZAPRET_GUI_BRANCH=main   — ветка GitHub
+#   ZG_NONINTERACTIVE=1      : без вопросов, на каждый ответ «n» (запуск
+#                              не предлагается, --uninstall отменяется);
+#                              для драйвера обновления gw-panel без tty
 #
 # ═══════════════════════════════════════════════════════════════
 
@@ -25,6 +28,12 @@ set -e
 REPO_URL="https://github.com/avatarDD/zapret-gui"
 BRANCH="${ZAPRET_GUI_BRANCH:-main}"
 VERSION="0.25.3"
+
+# Неинтерактивный режим (debian-gw, docs/gw/spec-t4-updates.md): вопросов
+# нет, apt тоже не спрашивает.
+if [ "${ZG_NONINTERACTIVE:-}" = "1" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+fi
 
 GUI_PORT="${ZAPRET_GUI_PORT:-8080}"
 GUI_HOST="${ZAPRET_GUI_HOST:-0.0.0.0}"
@@ -104,8 +113,15 @@ error()   { printf "${RED}[ERR]${NC}  %s\n" "$1"; }
 # мгновенно возвращает EOF, не дожидаясь ответа. Берём ввод напрямую
 # с управляющего терминала (/dev/tty), если он доступен; иначе
 # возвращаем значение по умолчанию из $2.
+# ZG_NONINTERACTIVE=1: /dev/tty не читаем, ответ всегда «n» (без
+# терминала `read </dev/tty` под `set -e` валил скрипт).
 prompt_read() {
     __prompt_default="${2:-}"
+    if [ "${ZG_NONINTERACTIVE:-}" = "1" ]; then
+        eval "$1=n"
+        echo "n (ZG_NONINTERACTIVE=1)"
+        return 0
+    fi
     if [ -r /dev/tty ]; then
         # shellcheck disable=SC2229
         read -r "$1" </dev/tty
@@ -927,15 +943,24 @@ main() {
     echo "  Веб-интерфейс: http://<IP роутера>:$GUI_PORT"
     echo ""
 
-    # Предлагаем запустить.
-    # При запуске через `wget -O - URL | sh` stdin занят пайпом — берём
-    # ответ с /dev/tty, иначе автоматически запускаем (значение по умолчанию).
+    offer_start
+    echo ""
+}
+
+# Предлагаем запустить.
+# При запуске через `wget -O - URL | sh` stdin занят пайпом, берём
+# ответ с /dev/tty, иначе автоматически запускаем (значение по умолчанию).
+# ZG_NONINTERACTIVE=1: не запускаем (ответ «n»), рестарт делает тот, кто
+# позвал скрипт (драйвер обновления gw-panel через systemctl).
+offer_start() {
     printf "  Запустить сейчас? [Y/n] "
     prompt_read answer "y"
-    if [ -r /dev/tty ]; then
+    if [ "${ZG_NONINTERACTIVE:-}" = "1" ]; then
+        :
+    elif [ -r /dev/tty ]; then
         echo ""
     else
-        echo "y (нет терминала — автозапуск)"
+        echo "y (нет терминала, автозапуск)"
     fi
     if [ "$answer" != "n" ] && [ "$answer" != "N" ]; then
         if [ "$ENV_TYPE" = "generic" ] && command -v systemctl >/dev/null 2>&1; then
@@ -944,7 +969,6 @@ main() {
             $SUDO "$INITD_SCRIPT" start
         fi
     fi
-    echo ""
 }
 
 # ── Парсинг аргументов ────────────────────────────────────────
