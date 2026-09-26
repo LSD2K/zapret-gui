@@ -11,6 +11,7 @@ API стратегий и категорий.
   POST   /api/strategies/:id/apply    — применить стратегию (restart nfqws)
   POST   /api/strategies/:id/favorite — toggle избранного
   POST   /api/strategies/preview      — превью итоговой команды nfqws2
+                                        (command строкой, argv списком без бинаря)
 
 Категории:
   GET    /api/categories              — список категорий
@@ -322,13 +323,17 @@ def register(app):
                 "error": "Укажите strategy_id или strategy_data"
             }
 
-        # Собираем превью
-        command = sm.build_preview_command(strategy)
+        # Собираем превью. argv (debian-gw, docs/gw/spec-t4-updates.md):
+        # полная команда списком токенов без пути к бинарю, command это
+        # её же склейка для показа.
+        full_argv = sm.build_preview_argv(strategy)
+        command = " \\\n  ".join(full_argv)
         args = sm.build_nfqws_args(strategy)
 
         result = {
             "ok": True,
             "command": command,
+            "argv": full_argv[1:],
             "args": args,
             "profiles_count": len([
                 p for p in strategy.get("profiles", [])

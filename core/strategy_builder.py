@@ -760,15 +760,28 @@ class StrategyManager:
         Returns:
             Строка вида "nfqws2 --user=nobody ... --filter-tcp=443 ..."
         """
+        full_args = self.build_preview_argv(strategy, hostlist_path)
+        return " \\\n  ".join(full_args)
+
+    def build_preview_argv(self, strategy: dict,
+                           hostlist_path: str = None) -> list:
+        """
+        Полный argv запуска nfqws2 для стратегии, первым элементом путь к
+        бинарю. Тот же `compose_command`, что у живого запуска: base-args,
+        lua-init, единый --hostlist-слой, аргументы профилей с подставленными
+        путями списков.
+
+        Нужен preview (поле argv, debian-gw, docs/gw/spec-t4-updates.md):
+        gw-panel гоняет dry-run нового бинаря тем же argv, не разбирая строку
+        с кавычками inline-Lua.
+        """
         from core.nfqws_manager import get_nfqws_manager
 
         # strategy args (с blob-декларациями и резолвом путей)
         strategy_args = self.build_nfqws_args(strategy, hostlist_path)
 
-        # Полная команда — тем же путём, что и реальный запуск.
-        full_args = get_nfqws_manager().compose_command(strategy_args)
-
-        return " \\\n  ".join(full_args)
+        # Полная команда тем же путём, что и реальный запуск.
+        return list(get_nfqws_manager().compose_command(strategy_args))
 
 
 # ═══════════════════════════════════════════════════════════
