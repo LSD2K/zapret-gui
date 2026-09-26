@@ -48,7 +48,10 @@ const API = (() => {
                 // Бэкенд кладёт человекочитаемый текст то в `error`
                 // (REST-ошибки), то в `message` (например awg up/down/
                 // restart). Берём что есть, иначе — код статуса.
-                const msg = data.error || data.message || `HTTP ${resp.status}`;
+                // Замок обновлений (403, debian-gw): в error код "locked",
+                // человеческий текст в message.
+                const msg = (data.error === 'locked' && data.message)
+                    || data.error || data.message || `HTTP ${resp.status}`;
                 throw new Error(msg);
             }
 

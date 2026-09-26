@@ -15,10 +15,15 @@ API управления zapret2: версии, установка, обновл
   GET  /api/zapret/uninstall-plan — что будет удалено
   POST /api/zapret/uninstall    — удалить zapret2
   POST /api/zapret/stop         — остановить nfqws2 (вспомогательный)
+
+install, update и uninstall при updates.locked отвечают 403 (debian-gw,
+docs/gw/spec-t4-updates.md).
 """
 
 import threading
 from bottle import request, response
+
+from api._updates_lock import refuse_if_locked
 
 
 def register(app):
@@ -138,6 +143,9 @@ def register(app):
     def api_zapret_install():
         """Установить zapret2 (body: {tag?, transport?})."""
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
 
         from core.zapret_installer import get_zapret_installer
         inst = get_zapret_installer()
@@ -192,6 +200,9 @@ def register(app):
     def api_zapret_update():
         """Обновить zapret2 (body: {tag?, transport?}; пусто tag — последняя)."""
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
 
         from core.zapret_installer import get_zapret_installer
         inst = get_zapret_installer()
@@ -255,6 +266,9 @@ def register(app):
     def api_zapret_uninstall():
         """Удалить zapret2 из системы."""
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
 
         from core.zapret_installer import get_zapret_installer
         inst = get_zapret_installer()

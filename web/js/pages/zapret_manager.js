@@ -36,13 +36,19 @@ const ZapretManagerPage = (() => {
         onChange: onExtrasChange,
     });
 
+    // Замок обновлений (debian-gw, components/updates_lock.js): на gw
+    // nfqws2 и сам движок обновляет gw-panel, кнопки здесь заменяет плашка.
+    function isLocked() {
+        return typeof UpdatesLock !== 'undefined' && UpdatesLock.isLocked();
+    }
+
     // Перерисовать только блоки «версия + транспорт» и подписи кнопок —
     // лёгкая операция, безопасна до загрузки data.
     function onExtrasChange() {
         const n = document.getElementById('zm-nfqws-extras');
-        if (n) n.innerHTML = extrasNfqws.optionsHtml();
+        if (n) n.innerHTML = isLocked() ? '' : extrasNfqws.optionsHtml();
         const g = document.getElementById('zm-gui-extras');
-        if (g) g.innerHTML = extrasGui.optionsHtml();
+        if (g) g.innerHTML = isLocked() ? '' : extrasGui.optionsHtml();
         renderActions();
         renderGuiActions();
     }
@@ -288,6 +294,10 @@ const ZapretManagerPage = (() => {
     // ══════════════════ Data Loading ══════════════════
 
     async function loadData() {
+        if (typeof UpdatesLock !== 'undefined') {
+            await UpdatesLock.load();
+            onExtrasChange();
+        }
         try {
             data = await API.get('/api/zapret');
             if (data.ok) {
@@ -301,7 +311,7 @@ const ZapretManagerPage = (() => {
         try {
             const guiCheck = await API.get('/api/gui/check');
             guiInfo = guiCheck;
-            if (guiCheck.update_available) {
+            if (guiCheck.update_available && !isLocked()) {
                 showGuiUpdateBanner(guiCheck);
             }
             renderGuiCard();
@@ -341,6 +351,10 @@ const ZapretManagerPage = (() => {
     function renderGuiActions() {
         const c = document.getElementById('zm-gui-actions');
         if (!c) return;
+        if (isLocked()) {
+            c.innerHTML = UpdatesLock.noticeHtml();
+            return;
+        }
         const tag = extrasGui.selectedTag();
         // Пока проверка версии не пришла (guiInfo === null) — нейтральное
         // «Обновить GUI»; когда известно, что апдейта нет — «Переустановить».
@@ -448,7 +462,7 @@ const ZapretManagerPage = (() => {
         // ── Баннер обновления ──
         const banner = document.getElementById('zm-update-banner');
         if (banner) {
-            if (data.update_available) {
+            if (data.update_available && !isLocked()) {
                 banner.classList.remove('hidden');
                 const detail = document.getElementById('zm-update-detail');
                 if (detail) {
@@ -479,6 +493,10 @@ const ZapretManagerPage = (() => {
     function renderActions() {
         const container = document.getElementById('zm-actions');
         if (!container || !data) return;
+        if (isLocked()) {
+            container.innerHTML = UpdatesLock.noticeHtml();
+            return;
+        }
 
         const inst = data.installed || {};
         const op = data.operation || {};
@@ -915,7 +933,7 @@ const ZapretManagerPage = (() => {
 
     function showGuiUpdateBanner(info) {
         const banner = document.getElementById('gui-update-banner');
-        if (!banner) return;
+        if (!banner || isLocked()) return;
         banner.classList.remove('hidden');
         const ver = document.getElementById('gui-update-version');
         if (ver) ver.textContent = info.latest_version || '?';

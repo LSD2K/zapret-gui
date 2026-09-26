@@ -50,6 +50,7 @@ def register_routes(app):
     from api.tunnel_optimizer import register as reg_tunnel_optimizer
     from api.dns_routing import register as reg_dns_routing
     from api.agh_routes import register as reg_agh_routes
+    from api._updates_lock import register as reg_updates_lock
     from api.mcp import register as reg_mcp
     from api.mcp_ui import register as reg_mcp_ui
     from api.agent import register as reg_agent
@@ -92,6 +93,7 @@ def register_routes(app):
     reg_tunnel_optimizer(app)
     reg_dns_routing(app)
     reg_agh_routes(app)
+    reg_updates_lock(app)
     reg_mcp(app)
     reg_mcp_ui(app)
     reg_agent(app)

@@ -21,6 +21,8 @@ const SingboxSetupPage = SetupUI.create({
     binaryLabel: 'sing-box',
     fetchManifest: true,
     latestLabel: 'В нашем релизе',
+    // Замок обновлений (debian-gw): на gw sing-box-extended обновляет gw-panel.
+    updatesLock: true,
 
     // Подпись релиза в селекте выбора версии (наши тэги singbox-bin-*).
     releaseLabel: (r) => {

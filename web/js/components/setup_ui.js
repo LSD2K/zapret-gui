@@ -158,6 +158,11 @@ const SetupUI = (() => {
                 st.env = await API.post(`${opts.apiBase}/environment/refresh`)
                                   .catch(() => null);
             } catch (e) { /* ignore */ }
+            // Замок обновлений (opts.updatesLock, debian-gw): до первой
+            // отрисовки, чтобы кнопки не мелькали.
+            if (opts.updatesLock && typeof UpdatesLock !== 'undefined') {
+                await UpdatesLock.load();
+            }
             renderContent();
 
             // Транспорты скачивания — локальный быстрый запрос, фоном.
@@ -311,6 +316,11 @@ const SetupUI = (() => {
 
             const latestLabel = opts.latestLabel || 'В релизе';
 
+            // Замок обновлений: вместо выбора версии, кнопок и загрузки
+            // файла одна плашка (сервер всё равно ответит 403).
+            const locked = !!opts.updatesLock && typeof UpdatesLock !== 'undefined'
+                           && UpdatesLock.isLocked();
+
             box.innerHTML = `
                 ${environmentCardHtml(env)}
 
@@ -349,6 +359,7 @@ const SetupUI = (() => {
                             </div>`).join('') : ''}
                     </div>
 
+                    ${locked ? `<div style="margin-top:12px;">${UpdatesLock.noticeHtml()}</div>` : `
                     <div style="margin-top:10px;">${extras.optionsHtml()}</div>
 
                     ${opts.alertHtml ? (opts.alertHtml(vm) || '') : ''}
@@ -373,6 +384,7 @@ const SetupUI = (() => {
                     ${progressHtml(st.installState)}
 
                     ${extras.uploadHtml()}
+                    `}
                 </div>
 
                 ${!ready && !installed ? `
@@ -466,6 +478,9 @@ const SetupUI = (() => {
  *   uploadFields — [{name, label}] поля файлов (дефолт — одно 'file');
  *   onChange     — перерисовать страницу-хозяина;
  *   onInstalled  — после успешной локальной установки (refresh).
+ *
+ * У SetupUI.create опция updatesLock: true включает замок обновлений
+ * (components/updates_lock.js): при замке вместо кнопок плашка.
  */
 const InstallExtras = (() => {
 

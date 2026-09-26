@@ -59,6 +59,7 @@ JS_FILES = [
     "js/components/help.js",
     "js/components/transport_select.js",
     "js/components/confirm.js",
+    "js/components/updates_lock.js",
     "js/components/setup_ui.js",
     "js/components/proxy_table.js",
     # pages

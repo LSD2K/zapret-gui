@@ -7,10 +7,13 @@ API обновления zapret-gui.
   GET  /api/gui/check       — проверить наличие обновлений GUI
   GET  /api/gui/releases    — список версий для выбора (?transport=&force=1)
   POST /api/gui/update      — обновить GUI (body: {tag?, branch?, transport?})
+                              (403 при updates.locked, debian-gw)
   GET  /api/gui/progress    — прогресс обновления
 """
 
 from bottle import request, response
+
+from api._updates_lock import refuse_if_locked
 
 
 def register(app):
@@ -70,6 +73,9 @@ def register(app):
         обработчиком запроса, и неудача выглядела как успех.
         """
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
 
         from core.gui_updater import get_gui_updater
         updater = get_gui_updater()

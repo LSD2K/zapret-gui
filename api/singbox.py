@@ -14,6 +14,8 @@ REST API для sing-box.
                                               (body: arch?, tag?, transport?)
   POST   /api/singbox/install/local         — multipart: file (tar.gz/gz/ELF)
   POST   /api/singbox/uninstall             — удалить бинарь
+  (install, install/local и uninstall при updates.locked отвечают 403,
+   debian-gw, docs/gw/spec-t4-updates.md)
   GET    /api/singbox/version               — установленная версия + апдейт
 
   GET    /api/singbox/configs               — список конфигов
@@ -98,6 +100,8 @@ REST API для sing-box.
 import re
 import threading
 from bottle import request, response
+
+from api._updates_lock import refuse_if_locked
 
 
 # Сколько ждать в HTTP-запросе install перед тем как вернуть in_progress
@@ -583,6 +587,9 @@ def register(app):
         в INSTALL_API_WAIT, иначе in_progress.
         """
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
         try:
             body = request.json or {}
         except Exception:
@@ -618,6 +625,9 @@ def register(app):
     def singbox_install_local():
         """Установка из локального файла: multipart-поле `file`."""
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
         from api._install_upload import handle_single_upload
         from core.singbox_installer import get_singbox_installer
         return handle_single_upload(
@@ -627,6 +637,9 @@ def register(app):
     @app.route("/api/singbox/uninstall", method="POST")
     def singbox_uninstall():
         response.content_type = "application/json; charset=utf-8"
+        denied = refuse_if_locked()
+        if denied:
+            return denied
         from core.singbox_installer import get_singbox_installer
         try:
             return get_singbox_installer().uninstall()

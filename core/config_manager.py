@@ -356,6 +356,15 @@ DEFAULT_CONFIG = {
         "interval_hours": 24,
     },
 
+    # --- Замок обновлений (debian-gw) ---
+    # locked=True: эндпоинты установки, обновления и удаления бинарей
+    # nfqws2 и sing-box и самого GUI отвечают 403 (api/_updates_lock.py).
+    # На gw обновления с проверкой и откатом ведёт gw-panel, кнопки движка
+    # там опасны. См. docs/gw/spec-t4-updates.md.
+    "updates": {
+        "locked": False,
+    },
+
     # --- Opera Proxy (Alexey71/opera-proxy) ---
     # Standalone Opera VPN клиент: HTTP/SOCKS5 прокси через SurfEasy.
     # Бинарник тянется из Alexey71/opera-proxy — по аналогии с sing-box.
